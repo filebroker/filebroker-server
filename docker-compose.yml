@@ -1,0 +1,57 @@
+version: "3.8"
+services:
+  filebroker-db:
+    image: postgres:14.2
+    container_name: filebroker-db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      timeout: 10s
+      interval: 5s
+      retries: 15
+    restart: always
+    env_file:
+      - .env
+    networks:
+      - internal
+    ports:
+      - '5432:5432'
+    hostname: filebroker-db
+  filebroker-api:
+    container_name: filebroker-api
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      - filebroker-db
+    networks:
+      - internal
+      - external
+    command: "cargo run --release --features auto_migration"
+  filebroker-proxy:
+    container_name: filebroker-proxy
+    image: nginx:alpine
+    ports:
+      - 8000:8000
+    volumes:
+      - "./default.conf:/etc/nginx/conf.d/default.conf"
+    depends_on:
+      - filebroker-api
+      - filebroker-client
+    networks:
+      - internal
+      - external
+  filebroker-client:
+    container_name: filebroker-client
+    build: ../filebroker-client
+    env_file:
+      - .env
+    ports:
+      - 3000:3000
+    networks:
+      - internal
+      - external
+
+networks:
+  external:
+  internal:
+    internal: true
