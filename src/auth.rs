@@ -1,5 +1,5 @@
 use bcrypt::{hash, verify, DEFAULT_COST};
-use chrono::{offset::Utc, Duration, DateTime};
+use chrono::{offset::Utc, DateTime, Duration};
 use diesel::{dsl::count, expression_methods::BoolExpressionMethods};
 use exec_rs::sync::MutexSync;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -187,6 +187,21 @@ fn create_login_response(
     registered_user: User,
     refresh_token_cookie: String,
 ) -> Result<impl Reply, Rejection> {
+    let login_response = create_login_response_struct(registered_user)?;
+
+    let json_response = serde_json::to_vec(&login_response)
+        .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
+
+    let response_body = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::SET_COOKIE, refresh_token_cookie)
+        .body(json_response)
+        .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
+
+    Ok(response_body)
+}
+
+fn create_login_response_struct(registered_user: User) -> Result<LoginResponse, Rejection> {
     let expiration_period = Duration::minutes(15);
     let expiration_secs = expiration_period.num_seconds();
     let expiration = Utc::now()
@@ -209,20 +224,11 @@ fn create_login_response(
         Err(_) => return Err(warp::reject::custom(Error::JwtCreationError)),
     };
 
-    let json_response = serde_json::to_vec(&LoginResponse {
+    Ok(LoginResponse {
         token,
         expiration_secs,
         user: registered_user.into(),
     })
-    .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
-
-    let response_body = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::SET_COOKIE, refresh_token_cookie)
-        .body(json_response)
-        .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
-
-    Ok(response_body)
 }
 
 /// Refreshes a login for the provided refresh token by creating a fresh JWT for the User linked
@@ -231,6 +237,41 @@ fn create_login_response(
 /// Returns a [`LoginResponse`] with the new JWT if the refresh token is valid (the UUID exists and
 /// the refresh token is not expired) or else returns a InvalidRefreshTokenError which results in a 401.
 pub async fn refresh_login_handler(refresh_token: String) -> Result<impl Reply, Rejection> {
+    let (user, refresh_token_cookie) = refresh_user_login_data(refresh_token)?;
+    create_login_response(user, refresh_token_cookie)
+}
+
+pub async fn try_refresh_login_handler(
+    refresh_token: Option<String>,
+) -> Result<impl Reply, Rejection> {
+    let (login_response, refresh_token_cookie) = match refresh_token {
+        Some(refresh_token) => {
+            let (user, refresh_token_cookie) = refresh_user_login_data(refresh_token)?;
+            (
+                Some(create_login_response_struct(user)?),
+                Some(refresh_token_cookie),
+            )
+        }
+        None => (None, None),
+    };
+
+    let json_response = serde_json::to_vec(&login_response)
+        .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
+
+    let mut response_builder = Response::builder().status(StatusCode::OK);
+
+    if let Some(refresh_token_cookie) = refresh_token_cookie {
+        response_builder = response_builder.header(header::SET_COOKIE, refresh_token_cookie);
+    }
+
+    let response_body = response_builder
+        .body(json_response)
+        .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
+
+    Ok(response_body)
+}
+
+fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Rejection> {
     let connection = acquire_db_connection()?;
     let curr_token_uuid = Uuid::parse_str(&refresh_token)
         .map_err(|_| warp::reject::custom(Error::BadRequestError))?;
@@ -270,8 +311,7 @@ pub async fn refresh_login_handler(refresh_token: String) -> Result<impl Reply, 
 
     // TODO set Secure once moving to production
     let refresh_token_cookie = format!("refresh_token={}; Expires={}; HttpOnly", uuid, expiry);
-
-    create_login_response(user, refresh_token_cookie)
+    Ok((user, refresh_token_cookie))
 }
 
 lazy_static! {
@@ -357,7 +397,12 @@ pub struct UserInfo {
 
 impl From<User> for UserInfo {
     fn from(user: User) -> Self {
-        Self { user_name: user.user_name, email: user.email, avatar_url: user.avatar_url, creation_timestamp: user.creation_timestamp }
+        Self {
+            user_name: user.user_name,
+            email: user.email,
+            avatar_url: user.avatar_url,
+            creation_timestamp: user.creation_timestamp,
+        }
     }
 }
 

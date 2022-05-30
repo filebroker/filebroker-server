@@ -15,8 +15,6 @@ API_PORT=8080
 POSTGRES_USER=postgres_user
 POSTGRES_PASSWORD=postgres_password
 POSTGRES_DB=filebroker
-REACT_APP_PATH=/filebroker
-PUBLIC_URL=/filebroker/public
 ```
 `DATABASE_URL`: URL of the postgres database, note that user and password should match `POSTGRES_USER` and `POSTGRES_PASSWORD`
 and the hostname `filebroker-db` should be changed to `localhost` if hosted locally instead of through Docker.
@@ -29,5 +27,4 @@ and the hostname `filebroker-db` should be changed to `localhost` if hosted loca
 
 `POSTGRES_DB`: Name of the postgres database.
 
-`REACT_APP_PATH` and `PUBLIC_URL`: Paths to the frontend resources. Should be changed to / and /public respectively when
-hosted on the root path /. Changing this requires adjustments to the nginx configuration in `default.conf`.
+Note that CORS headers are only set when running debug binaries for development, for production you need to set up nginx.

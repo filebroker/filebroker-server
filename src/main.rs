@@ -90,6 +90,11 @@ async fn setup_tokio_runtime() {
         .and(warp::cookie("refresh_token"))
         .and_then(auth::refresh_login_handler);
 
+    let try_refresh_login_router = warp::path("try-refresh-login")
+        .and(warp::post())
+        .and(warp::cookie::optional("refresh_token"))
+        .and_then(auth::try_refresh_login_handler);
+
     let register_route = warp::path("register")
         .and(warp::post())
         .and(warp::body::json())
@@ -102,12 +107,20 @@ async fn setup_tokio_runtime() {
 
     let routes = login_route
         .or(refresh_login_router)
+        .or(try_refresh_login_router)
         .or(register_route)
         .or(current_user_info);
 
     let filter = routes
         .recover(error::handle_rejection)
         .with(warp::log("filebroker::api"));
+
+    #[cfg(debug_assertions)]
+    let filter = filter.with(warp::reply::with::header(
+        "Access-Control-Allow-Origin",
+        "http://localhost:3000",
+    ));
+
     warp::serve(filter).run(([0, 0, 0, 0], *PORT)).await;
 }
 
