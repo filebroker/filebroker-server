@@ -116,10 +116,18 @@ async fn setup_tokio_runtime() {
         .with(warp::log("filebroker::api"));
 
     #[cfg(debug_assertions)]
-    let filter = filter.with(warp::reply::with::header(
-        "Access-Control-Allow-Origin",
-        "http://localhost:3000",
-    ));
+    let filter = filter.with(
+        warp::cors()
+            .allow_origin("http://localhost:3000")
+            .allow_header("content-type")
+            .allow_credentials(true)
+            .allow_method(warp::http::Method::DELETE)
+            .allow_method(warp::http::Method::GET)
+            .allow_method(warp::http::Method::OPTIONS)
+            .allow_method(warp::http::Method::PATCH)
+            .allow_method(warp::http::Method::POST)
+            .allow_method(warp::http::Method::PATCH),
+    );
 
     warp::serve(filter).run(([0, 0, 0, 0], *PORT)).await;
 }

@@ -178,10 +178,23 @@ fn create_refresh_token_cookie(
     let expiry = refresh_token.expiry.to_rfc2822();
 
     // TODO set Secure once moving to production
-    Ok(format!(
-        "refresh_token={}; Expires={}; HttpOnly",
-        uuid, expiry
-    ))
+    Ok(format_refresh_token_cookie(&uuid, &expiry))
+}
+
+#[inline]
+fn format_refresh_token_cookie(uuid: &str, expiry: &str) -> String {
+    if cfg!(debug_assertions) {
+        // unlike firefox, chrome (and postman and other chromium / electron based apps) does not allow setting Secure cookies on localhost
+        format!(
+            "refresh_token={}; Expires={}; HttpOnly",
+            uuid, expiry
+        )
+    } else {
+        format!(
+            "refresh_token={}; Expires={}; HttpOnly; Secure; SameSite=None",
+            uuid, expiry
+        )
+    }
 }
 
 /// Create a [`LoginResponse`] for the provided User and add the provided refresh token cookie.
@@ -314,7 +327,7 @@ fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Erro
         let expiry = updated_token.expiry.to_rfc2822();
 
         // TODO set Secure once moving to production
-        let refresh_token_cookie = format!("refresh_token={}; Expires={}; HttpOnly", uuid, expiry);
+        let refresh_token_cookie = format_refresh_token_cookie(&uuid, &expiry);
         Ok((user, refresh_token_cookie))
     })
 }
