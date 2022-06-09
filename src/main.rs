@@ -71,10 +71,10 @@ fn main() {
     setup_tokio_runtime();
 }
 
-pub fn acquire_db_connection() -> Result<DbConnection, warp::Rejection> {
+pub fn acquire_db_connection() -> Result<DbConnection, Error> {
     CONNECTION_POOL
         .get()
-        .map_err(|_| warp::reject::custom(Error::DatabaseConnectionError))
+        .map_err(|_| Error::DatabaseConnectionError)
 }
 
 /// Start a tokio runtime that runs a warp server.

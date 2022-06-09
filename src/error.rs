@@ -3,7 +3,7 @@ use thiserror::Error;
 use warp::{hyper::StatusCode, reject::Reject, Rejection, Reply};
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum Error {
     #[error("invalid credentials")]
     InvalidCredentialsError,
@@ -36,6 +36,12 @@ pub enum Error {
 }
 
 impl Reject for Error {}
+
+impl From<diesel::result::Error> for Error {
+    fn from(e: diesel::result::Error) -> Self {
+        Self::QueryError(e.to_string())
+    }
+}
 
 #[derive(Serialize, Debug)]
 struct ErrorResponse {

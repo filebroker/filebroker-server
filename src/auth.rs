@@ -1,6 +1,6 @@
 use bcrypt::{hash, verify, DEFAULT_COST};
 use chrono::{offset::Utc, DateTime, Duration};
-use diesel::{dsl::count, expression_methods::BoolExpressionMethods};
+use diesel::{dsl::count, expression_methods::BoolExpressionMethods, Connection};
 use exec_rs::sync::MutexSync;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
@@ -120,30 +120,33 @@ async fn get_user_from_auth_header(header_map: HeaderMap) -> Result<Option<User>
 /// results in a 403, if the credentials are not correct.
 pub async fn login_handler(request: LoginRequest) -> Result<impl Reply, Rejection> {
     let connection = acquire_db_connection()?;
-
-    let found_registered_user = registered_user::table
-        .filter(registered_user::user_name.eq(&request.user_name))
-        .first::<User>(&connection);
-    let registered_user = match found_registered_user {
-        Ok(registered_user) => {
-            let hashed_password = &registered_user.password;
-            match verify(&request.password, hashed_password) {
-                Ok(valid) => {
-                    if valid {
-                        registered_user
-                    } else {
-                        return Err(warp::reject::custom(Error::InvalidCredentialsError));
+    connection
+        .transaction(|| {
+            let found_registered_user = registered_user::table
+                .filter(registered_user::user_name.eq(&request.user_name))
+                .first::<User>(&connection);
+            let registered_user = match found_registered_user {
+                Ok(registered_user) => {
+                    let hashed_password = &registered_user.password;
+                    match verify(&request.password, hashed_password) {
+                        Ok(valid) => {
+                            if valid {
+                                registered_user
+                            } else {
+                                return Err(Error::InvalidCredentialsError);
+                            }
+                        }
+                        Err(_) => return Err(Error::EncryptionError),
                     }
                 }
-                Err(_) => return Err(warp::reject::custom(Error::EncryptionError)),
-            }
-        }
-        Err(diesel::NotFound) => return Err(warp::reject::custom(Error::InvalidCredentialsError)),
-        Err(e) => return Err(warp::reject::custom(Error::QueryError(e.to_string()))),
-    };
+                Err(diesel::NotFound) => return Err(Error::InvalidCredentialsError),
+                Err(e) => return Err(Error::QueryError(e.to_string())),
+            };
 
-    let refresh_token_cookie = create_refresh_token_cookie(&registered_user, &connection)?;
-    create_login_response(registered_user, refresh_token_cookie)
+            let refresh_token_cookie = create_refresh_token_cookie(&registered_user, &connection)?;
+            create_login_response(registered_user, refresh_token_cookie)
+        })
+        .map_err(warp::reject::custom)
 }
 
 /// Create a HttpOnly Cookie that may be used to refresh logins by generating a UUID which is persisted
@@ -151,7 +154,7 @@ pub async fn login_handler(request: LoginRequest) -> Result<impl Reply, Rejectio
 fn create_refresh_token_cookie(
     registered_user: &User,
     connection: &DbConnection,
-) -> Result<String, Rejection> {
+) -> Result<String, Error> {
     let uuid = Uuid::new_v4();
     let current_utc = Utc::now();
     let expiry = current_utc + Duration::hours(24);
@@ -168,7 +171,7 @@ fn create_refresh_token_cookie(
         .get_result::<RefreshToken>(connection)
     {
         Ok(refresh_token) => refresh_token,
-        Err(e) => return Err(warp::reject::custom(Error::QueryError(e.to_string()))),
+        Err(e) => return Err(Error::QueryError(e.to_string())),
     };
 
     let uuid = refresh_token.uuid.to_string();
@@ -186,22 +189,22 @@ fn create_refresh_token_cookie(
 fn create_login_response(
     registered_user: User,
     refresh_token_cookie: String,
-) -> Result<impl Reply, Rejection> {
+) -> Result<impl Reply, Error> {
     let login_response = create_login_response_struct(registered_user)?;
 
-    let json_response = serde_json::to_vec(&login_response)
-        .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
+    let json_response =
+        serde_json::to_vec(&login_response).map_err(|_| Error::SerialisationError)?;
 
     let response_body = Response::builder()
         .status(StatusCode::OK)
         .header(header::SET_COOKIE, refresh_token_cookie)
         .body(json_response)
-        .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
+        .map_err(|_| Error::SerialisationError)?;
 
     Ok(response_body)
 }
 
-fn create_login_response_struct(registered_user: User) -> Result<LoginResponse, Rejection> {
+fn create_login_response_struct(registered_user: User) -> Result<LoginResponse, Error> {
     let expiration_period = Duration::minutes(15);
     let expiration_secs = expiration_period.num_seconds();
     let expiration = Utc::now()
@@ -221,7 +224,7 @@ fn create_login_response_struct(registered_user: User) -> Result<LoginResponse, 
         &EncodingKey::from_secret(&crate::JWT_SECRET.to_be_bytes()),
     ) {
         Ok(token) => token,
-        Err(_) => return Err(warp::reject::custom(Error::JwtCreationError)),
+        Err(_) => return Err(Error::JwtCreationError),
     };
 
     Ok(LoginResponse {
@@ -238,7 +241,7 @@ fn create_login_response_struct(registered_user: User) -> Result<LoginResponse, 
 /// the refresh token is not expired) or else returns a InvalidRefreshTokenError which results in a 401.
 pub async fn refresh_login_handler(refresh_token: String) -> Result<impl Reply, Rejection> {
     let (user, refresh_token_cookie) = refresh_user_login_data(refresh_token)?;
-    create_login_response(user, refresh_token_cookie)
+    create_login_response(user, refresh_token_cookie).map_err(warp::reject::custom)
 }
 
 pub async fn try_refresh_login_handler(
@@ -271,47 +274,49 @@ pub async fn try_refresh_login_handler(
     Ok(response_body)
 }
 
-fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Rejection> {
+fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Error> {
     let connection = acquire_db_connection()?;
-    let curr_token_uuid = Uuid::parse_str(&refresh_token)
-        .map_err(|_| warp::reject::custom(Error::BadRequestError))?;
-    let current_utc = Utc::now();
+    connection.transaction(|| {
+        let curr_token_uuid =
+            Uuid::parse_str(&refresh_token).map_err(|_| Error::BadRequestError)?;
+        let current_utc = Utc::now();
 
-    let refresh_token = refresh_token::table
-        .filter(
-            refresh_token::uuid
-                .eq(&curr_token_uuid)
-                .and(refresh_token::expiry.ge(&current_utc))
-                .and(refresh_token::invalidated.eq(false)),
-        )
-        .first::<RefreshToken>(&connection)
-        .optional()
-        .map_err(|e| warp::reject::custom(Error::QueryError(e.to_string())))?
-        .ok_or_else(|| warp::reject::custom(Error::InvalidRefreshTokenError))?;
+        let refresh_token = refresh_token::table
+            .filter(
+                refresh_token::uuid
+                    .eq(&curr_token_uuid)
+                    .and(refresh_token::expiry.ge(&current_utc))
+                    .and(refresh_token::invalidated.eq(false)),
+            )
+            .first::<RefreshToken>(&connection)
+            .optional()
+            .map_err(|e| Error::QueryError(e.to_string()))?
+            .ok_or_else(|| Error::InvalidRefreshTokenError)?;
 
-    let user = registered_user::table
-        .filter(registered_user::pk.eq(refresh_token.fk_registered_user))
-        .first::<User>(&connection)
-        .map_err(|e| warp::reject::custom(Error::QueryError(e.to_string())))?;
+        let user = registered_user::table
+            .filter(registered_user::pk.eq(refresh_token.fk_registered_user))
+            .first::<User>(&connection)
+            .map_err(|e| Error::QueryError(e.to_string()))?;
 
-    let expiry = current_utc + Duration::hours(24);
-    let new_token = Uuid::new_v4();
+        let expiry = current_utc + Duration::hours(24);
+        let new_token = Uuid::new_v4();
 
-    let updated_token = diesel::update(refresh_token::table)
-        .filter(refresh_token::pk.eq(refresh_token.pk))
-        .set((
-            refresh_token::uuid.eq(new_token),
-            refresh_token::expiry.eq(expiry),
-        ))
-        .get_result::<RefreshToken>(&connection)
-        .map_err(|e| warp::reject::custom(Error::QueryError(e.to_string())))?;
+        let updated_token = diesel::update(refresh_token::table)
+            .filter(refresh_token::pk.eq(refresh_token.pk))
+            .set((
+                refresh_token::uuid.eq(new_token),
+                refresh_token::expiry.eq(expiry),
+            ))
+            .get_result::<RefreshToken>(&connection)
+            .map_err(|e| Error::QueryError(e.to_string()))?;
 
-    let uuid = updated_token.uuid.to_string();
-    let expiry = updated_token.expiry.to_rfc2822();
+        let uuid = updated_token.uuid.to_string();
+        let expiry = updated_token.expiry.to_rfc2822();
 
-    // TODO set Secure once moving to production
-    let refresh_token_cookie = format!("refresh_token={}; Expires={}; HttpOnly", uuid, expiry);
-    Ok((user, refresh_token_cookie))
+        // TODO set Secure once moving to production
+        let refresh_token_cookie = format!("refresh_token={}; Expires={}; HttpOnly", uuid, expiry);
+        Ok((user, refresh_token_cookie))
+    })
 }
 
 lazy_static! {
@@ -343,47 +348,48 @@ pub async fn register_handler(
     // synchronise user creation based on user_name
     USER_NAME_SYNC.evaluate(user_registration.user_name.clone(), || {
         let connection = acquire_db_connection()?;
+        connection
+            .transaction(|| {
+                let existing_count: Result<i64, _> = registered_user::table
+                    .select(count(registered_user::pk))
+                    .filter(registered_user::user_name.eq(&user_registration.user_name))
+                    .first(&connection);
 
-        let existing_count: Result<i64, _> = registered_user::table
-            .select(count(registered_user::pk))
-            .filter(registered_user::user_name.eq(&user_registration.user_name))
-            .first(&connection);
+                match existing_count {
+                    Ok(count) => {
+                        if count != 0 {
+                            return Err(Error::UserExistsError(user_registration.user_name));
+                        }
+                    }
+                    Err(e) => return Err(Error::QueryError(e.to_string())),
+                };
 
-        match existing_count {
-            Ok(count) => {
-                if count != 0 {
-                    return Err(warp::reject::custom(Error::UserExistsError(
-                        user_registration.user_name,
-                    )));
+                let hashed_password = match hash(&user_registration.password, DEFAULT_COST) {
+                    Ok(hashed_password) => hashed_password,
+                    Err(_) => return Err(Error::EncryptionError),
+                };
+
+                let new_user = NewUser {
+                    user_name: user_registration.user_name,
+                    password: hashed_password,
+                    email: user_registration.email,
+                    avatar_url: user_registration.avatar_url,
+                    creation_timestamp: Utc::now(),
+                };
+
+                match diesel::insert_into(registered_user::table)
+                    .values(&new_user)
+                    .get_result::<User>(&connection)
+                {
+                    Ok(registered_user) => {
+                        let refresh_token_cookie =
+                            create_refresh_token_cookie(&registered_user, &connection)?;
+                        create_login_response(registered_user, refresh_token_cookie)
+                    }
+                    Err(e) => Err(Error::QueryError(e.to_string())),
                 }
-            }
-            Err(e) => return Err(warp::reject::custom(Error::QueryError(e.to_string()))),
-        };
-
-        let hashed_password = match hash(&user_registration.password, DEFAULT_COST) {
-            Ok(hashed_password) => hashed_password,
-            Err(_) => return Err(warp::reject::custom(Error::EncryptionError)),
-        };
-
-        let new_user = NewUser {
-            user_name: user_registration.user_name,
-            password: hashed_password,
-            email: user_registration.email,
-            avatar_url: user_registration.avatar_url,
-            creation_timestamp: Utc::now(),
-        };
-
-        match diesel::insert_into(registered_user::table)
-            .values(&new_user)
-            .get_result::<User>(&connection)
-        {
-            Ok(registered_user) => {
-                let refresh_token_cookie =
-                    create_refresh_token_cookie(&registered_user, &connection)?;
-                create_login_response(registered_user, refresh_token_cookie)
-            }
-            Err(e) => Err(warp::reject::custom(Error::QueryError(e.to_string()))),
-        }
+            })
+            .map_err(warp::reject::custom)
     })
 }
 
