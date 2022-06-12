@@ -15,6 +15,7 @@ diesel = { version = "1.4.8", features = ["chrono", "postgres", "r2d2", "uuidv07
 dotenv = "0.15.0"
 exec-rs = "0.1.2"
 fern = { version = "0.6.1", features = ["date-based"] }
+itertools = "0.10.3"
 jsonwebtoken = "8.1.0"
 lazy_static = "1.4.0"
 log = "0.4.17"

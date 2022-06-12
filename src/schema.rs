@@ -41,7 +41,6 @@ table! {
     tag (pk) {
         pk -> Int4,
         tag_name -> Varchar,
-        fk_parent -> Nullable<Int4>,
         creation_timestamp -> Timestamptz,
     }
 }
@@ -50,6 +49,15 @@ table! {
     tag_alias (fk_source, fk_target) {
         fk_source -> Int4,
         fk_target -> Int4,
+    }
+}
+
+table! {
+    tag_closure_table (pk) {
+        pk -> Int4,
+        fk_parent -> Int4,
+        fk_child -> Int4,
+        depth -> Int4,
     }
 }
 
@@ -65,4 +73,5 @@ allow_tables_to_appear_in_same_query!(
     registered_user,
     tag,
     tag_alias,
+    tag_closure_table,
 );

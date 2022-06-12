@@ -60,7 +60,17 @@ pub struct Post {
     pub fk_create_user: i32,
 }
 
-#[derive(Associations, Identifiable, Queryable, Serialize)]
+#[derive(Insertable)]
+#[table_name = "post"]
+pub struct NewPost {
+    pub data_url: String,
+    pub source_url: Option<String>,
+    pub title: Option<String>,
+    pub creation_timestamp: DateTime<Utc>,
+    pub fk_create_user: i32,
+}
+
+#[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
 #[table_name = "post_tag"]
 #[primary_key(fk_post, fk_tag)]
 #[belongs_to(Post, foreign_key = "fk_post")]
@@ -70,22 +80,45 @@ pub struct PostTag {
     pub fk_tag: i32,
 }
 
-#[derive(Associations, Identifiable, Queryable, Serialize)]
+#[derive(Associations, Clone, Identifiable, Queryable, Serialize)]
 #[table_name = "tag"]
 #[primary_key(pk)]
-#[belongs_to(Tag, foreign_key = "fk_parent")]
 pub struct Tag {
     pub pk: i32,
     pub tag_name: String,
-    pub fk_parent: Option<i32>,
     pub creation_timestamp: DateTime<Utc>,
 }
 
-#[derive(Associations, Identifiable, Queryable, Serialize)]
+#[derive(Insertable)]
+#[table_name = "tag"]
+pub struct NewTag {
+    pub tag_name: String,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
 #[table_name = "tag_alias"]
 #[primary_key(fk_source, fk_target)]
 #[belongs_to(Tag, foreign_key = "fk_source")]
 pub struct TagAlias {
     pub fk_source: i32,
     pub fk_target: i32,
+}
+
+#[derive(Associations, Clone, Identifiable, Queryable, QueryableByName, Serialize)]
+#[table_name = "tag_closure_table"]
+#[primary_key(pk)]
+pub struct TagClosureTable {
+    pub pk: i32,
+    pub fk_parent: i32,
+    pub fk_child: i32,
+    pub depth: i32,
+}
+
+#[derive(Insertable)]
+#[table_name = "tag_closure_table"]
+pub struct NewTagClosureTable {
+    pub fk_parent: i32,
+    pub fk_child: i32,
+    pub depth: i32,
 }

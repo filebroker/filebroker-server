@@ -11,6 +11,8 @@ pub enum Error {
     DatabaseConnectionError,
     #[error("There has been an error executing a query: '{0}'")]
     QueryError(String),
+    #[error("There has been an error running a transaction: '{0}'")]
+    TransactionError(diesel::result::Error),
     #[error("There has been an error creating the JWT token")]
     JwtCreationError,
     #[error("There has been an error encrypting / decrypting a password")]
@@ -39,7 +41,7 @@ impl Reject for Error {}
 
 impl From<diesel::result::Error> for Error {
     fn from(e: diesel::result::Error) -> Self {
-        Self::QueryError(e.to_string())
+        Self::TransactionError(e)
     }
 }
 
@@ -64,6 +66,7 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             | Error::InvalidRequestInputError(_) => (StatusCode::BAD_REQUEST, e.to_string()),
             Error::DatabaseConnectionError
             | Error::QueryError(_)
+            | Error::TransactionError(_)
             | Error::JwtCreationError
             | Error::EncryptionError
             | Error::SerialisationError => {

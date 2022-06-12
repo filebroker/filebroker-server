@@ -17,6 +17,7 @@ use warp::Filter;
 mod auth;
 mod error;
 mod model;
+mod post;
 mod schema;
 
 pub type DbConnection = PooledConnection<ConnectionManager<PgConnection>>;
@@ -77,6 +78,35 @@ pub fn acquire_db_connection() -> Result<DbConnection, Error> {
         .map_err(|_| Error::DatabaseConnectionError)
 }
 
+pub fn run_and_retry_repeatable_read_transaction<T, F: Fn() -> Result<T, Error>>(
+    connection: &DbConnection,
+    retry_on_unique_violation: bool,
+    function: F,
+) -> Result<T, Error> {
+    let mut retry_count: usize = 0;
+    loop {
+        retry_count += 1;
+        let transaction_result = connection
+            .build_transaction()
+            .repeatable_read()
+            .run::<_, Error, _>(&function);
+
+        match transaction_result {
+            Err(Error::TransactionError(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::SerializationFailure,
+                _,
+            ))) if retry_count <= 10 => { /* Retry transaction on serialization failure */ }
+            Err(Error::TransactionError(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            ))) if retry_on_unique_violation && retry_count <= 10 => { /* Retry unique constraint violation if enabled */
+            }
+            Err(e) => break Err(e),
+            Ok(res) => break Ok(res),
+        }
+    }
+}
+
 /// Start a tokio runtime that runs a warp server.
 #[tokio::main]
 async fn setup_tokio_runtime() {
@@ -85,12 +115,12 @@ async fn setup_tokio_runtime() {
         .and(warp::body::json())
         .and_then(auth::login_handler);
 
-    let refresh_login_router = warp::path("refresh-login")
+    let refresh_login_route = warp::path("refresh-login")
         .and(warp::post())
         .and(warp::cookie("refresh_token"))
         .and_then(auth::refresh_login_handler);
 
-    let try_refresh_login_router = warp::path("try-refresh-login")
+    let try_refresh_login_route = warp::path("try-refresh-login")
         .and(warp::post())
         .and(warp::cookie::optional("refresh_token"))
         .and_then(auth::try_refresh_login_handler);
@@ -100,16 +130,37 @@ async fn setup_tokio_runtime() {
         .and(warp::body::json())
         .and_then(auth::register_handler);
 
-    let current_user_info = warp::path("current-user-info")
+    let current_user_info_route = warp::path("current-user-info")
         .and(warp::get())
         .and(auth::with_user())
         .and_then(auth::current_user_info_handler);
 
+    let create_post_route = warp::path("create-post")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(post::create_post_handler);
+
+    let create_tags_route = warp::path("create-tags")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(post::create_tags_handler);
+
+    let upsert_tag_route = warp::path("upsert-tag")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(post::upsert_tag_handler);
+
     let routes = login_route
-        .or(refresh_login_router)
-        .or(try_refresh_login_router)
+        .or(refresh_login_route)
+        .or(try_refresh_login_route)
         .or(register_route)
-        .or(current_user_info);
+        .or(current_user_info_route)
+        .or(create_post_route)
+        .or(create_tags_route)
+        .or(upsert_tag_route);
 
     let filter = routes
         .recover(error::handle_rejection)

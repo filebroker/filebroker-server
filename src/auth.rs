@@ -60,6 +60,7 @@ struct Claims {
 }
 
 /// Warp filter for requests that optionally receive the logged in user from the auth header.
+#[allow(dead_code)] // keep for completion's sake and future usage
 pub fn with_user_optional(
 ) -> impl warp::Filter<Extract = (Option<User>,), Error = Rejection> + Clone {
     headers_cloned().and_then(get_user_from_auth_header)
@@ -185,10 +186,7 @@ fn create_refresh_token_cookie(
 fn format_refresh_token_cookie(uuid: &str, expiry: &str) -> String {
     if cfg!(debug_assertions) {
         // unlike firefox, chrome (and postman and other chromium / electron based apps) does not allow setting Secure cookies on localhost
-        format!(
-            "refresh_token={}; Expires={}; HttpOnly",
-            uuid, expiry
-        )
+        format!("refresh_token={}; Expires={}; HttpOnly", uuid, expiry)
     } else {
         format!(
             "refresh_token={}; Expires={}; HttpOnly; Secure; SameSite=None",
@@ -304,7 +302,7 @@ fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Erro
             .first::<RefreshToken>(&connection)
             .optional()
             .map_err(|e| Error::QueryError(e.to_string()))?
-            .ok_or_else(|| Error::InvalidRefreshTokenError)?;
+            .ok_or(Error::InvalidRefreshTokenError)?;
 
         let user = registered_user::table
             .filter(registered_user::pk.eq(refresh_token.fk_registered_user))
