@@ -9,7 +9,7 @@ use diesel::{
     PgConnection,
 };
 use dotenv::dotenv;
-use error::Error;
+use error::{Error, TransactionRuntimeError};
 use lazy_static::lazy_static;
 use std::str::FromStr;
 use warp::Filter;
@@ -78,9 +78,8 @@ pub fn acquire_db_connection() -> Result<DbConnection, Error> {
         .map_err(|_| Error::DatabaseConnectionError)
 }
 
-pub fn run_and_retry_repeatable_read_transaction<T, F: Fn() -> Result<T, Error>>(
+pub fn run_retryable_transaction<T, F: Fn() -> Result<T, TransactionRuntimeError>>(
     connection: &DbConnection,
-    retry_on_unique_violation: bool,
     function: F,
 ) -> Result<T, Error> {
     let mut retry_count: usize = 0;
@@ -88,22 +87,29 @@ pub fn run_and_retry_repeatable_read_transaction<T, F: Fn() -> Result<T, Error>>
         retry_count += 1;
         let transaction_result = connection
             .build_transaction()
-            .repeatable_read()
-            .run::<_, Error, _>(&function);
+            .read_committed()
+            .run::<_, TransactionRuntimeError, _>(&function);
 
         match transaction_result {
-            Err(Error::TransactionError(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::SerializationFailure,
-                _,
-            ))) if retry_count <= 10 => { /* Retry transaction on serialization failure */ }
-            Err(Error::TransactionError(diesel::result::Error::DatabaseError(
-                diesel::result::DatabaseErrorKind::UniqueViolation,
-                _,
-            ))) if retry_on_unique_violation && retry_count <= 10 => { /* Retry unique constraint violation if enabled */
+            Err(TransactionRuntimeError::Retry(_)) if retry_count <= 10 => { /* retry max 10 attempts */
             }
-            Err(e) => break Err(e),
+            Err(TransactionRuntimeError::Retry(e)) => break Err(e),
+            Err(TransactionRuntimeError::Rollback(e)) => break Err(e),
             Ok(res) => break Ok(res),
         }
+    }
+}
+
+/// Retry a transaction if it fails due to a unique or foreign key constraint violation when concurrent transactions insert the same data
+/// or concurrent transaction deletes data used as a foreign key by another transaction.
+pub fn retry_on_constraint_violation(e: diesel::result::Error) -> TransactionRuntimeError {
+    match e {
+        diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::UniqueViolation
+            | diesel::result::DatabaseErrorKind::ForeignKeyViolation,
+            _,
+        ) => TransactionRuntimeError::Retry(e.into()),
+        _ => TransactionRuntimeError::Rollback(e.into()),
     }
 }
 

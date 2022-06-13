@@ -45,6 +45,29 @@ impl From<diesel::result::Error> for Error {
     }
 }
 
+pub enum TransactionRuntimeError {
+    Retry(Error),
+    Rollback(Error),
+}
+
+impl From<Error> for TransactionRuntimeError {
+    fn from(e: Error) -> Self {
+        TransactionRuntimeError::Rollback(e)
+    }
+}
+
+impl From<diesel::result::Error> for TransactionRuntimeError {
+    fn from(e: diesel::result::Error) -> Self {
+        match e {
+            diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::SerializationFailure,
+                _,
+            ) => TransactionRuntimeError::Retry(e.into()),
+            _ => TransactionRuntimeError::Rollback(e.into()),
+        }
+    }
+}
+
 #[derive(Serialize, Debug)]
 struct ErrorResponse {
     message: String,

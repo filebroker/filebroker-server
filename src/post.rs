@@ -12,11 +12,11 @@ use warp::{Rejection, Reply};
 use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, QueryDsl, RunQueryDsl},
-    error::Error,
+    error::{Error, TransactionRuntimeError},
     model::{
         NewPost, NewTag, NewTagClosureTable, Post, PostTag, Tag, TagAlias, TagClosureTable, User,
     },
-    run_and_retry_repeatable_read_transaction,
+    retry_on_constraint_violation, run_retryable_transaction,
     schema::{post, post_tag, tag, tag_alias, tag_closure_table},
     DbConnection,
 };
@@ -60,7 +60,10 @@ fn validate_tag(tag: &str) -> Result<(), ValidationError> {
 
 #[inline]
 fn tag_is_valid(tag: &str) -> bool {
-    tag.len() <= 50 && tag.chars().all(|c| c == '_' || c == '\'' || c.is_alphanumeric())
+    tag.len() <= 50
+        && tag
+            .chars()
+            .all(|c| c == '_' || c == '\'' || c.is_alphanumeric())
 }
 
 #[inline]
@@ -97,14 +100,12 @@ pub async fn create_post_handler(
     })?;
 
     // cannot use hashset because it is not supported as diesel expression
-    let tags = create_post_request
-        .tags
-        .map(sanitize_request_tags);
+    let tags = create_post_request.tags.map(sanitize_request_tags);
 
     let connection = acquire_db_connection()?;
     // run as repeatable read transaction and retry serialisation errors when a concurrent transaction
     // deletes or creates relevant tags
-    run_and_retry_repeatable_read_transaction(&connection, true, || {
+    run_retryable_transaction(&connection, || {
         let set_tags = if let Some(ref tags) = tags {
             let (mut set_tags, created_tags) = get_or_create_tags(&connection, tags)?;
             set_tags.extend(created_tags);
@@ -169,7 +170,7 @@ pub async fn create_tags_handler(
 
     let tag_names = sanitize_request_tags(create_tags_request.tag_names);
     let connection = acquire_db_connection()?;
-    run_and_retry_repeatable_read_transaction(&connection, true, || {
+    run_retryable_transaction(&connection, || {
         let (existing_tags, inserted_tags) = get_or_create_tags(&connection, &tag_names)?;
         Ok(warp::reply::json(&CreateTagsResponse {
             existing_tags,
@@ -183,7 +184,7 @@ pub async fn create_tags_handler(
 pub fn get_or_create_tags(
     connection: &DbConnection,
     tags: &Vec<String>,
-) -> Result<(Vec<Tag>, Vec<Tag>), Error> {
+) -> Result<(Vec<Tag>, Vec<Tag>), TransactionRuntimeError> {
     let existing_tags = tag::table
         .filter(tag::tag_name.eq_any(tags))
         .load::<Tag>(connection)?;
@@ -207,7 +208,8 @@ pub fn get_or_create_tags(
 
     let created_tags = diesel::insert_into(tag::table)
         .values(&new_tags)
-        .get_results::<Tag>(connection)?;
+        .get_results::<Tag>(connection)
+        .map_err(retry_on_constraint_violation)?;
 
     if !created_tags.is_empty() {
         // create self referencing closure table entries for all inserted tags
@@ -330,15 +332,17 @@ pub async fn upsert_tag_handler(
     let tag_name = sanitize_tag(upsert_tag_request.tag_name);
 
     let connection = acquire_db_connection()?;
-    run_and_retry_repeatable_read_transaction(&connection, true, || {
+    run_retryable_transaction(&connection, || {
         let (inserted, tag) = get_or_create_tag(&tag_name, &connection)?;
 
         if let Some(parent_pk) = upsert_tag_request.parent_pk {
             if parent_pk == tag.pk {
-                return Err(Error::InvalidRequestInputError(format!(
-                    "Cannot set tag {} as its own parent",
-                    parent_pk
-                )));
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::InvalidRequestInputError(format!(
+                        "Cannot set tag {} as its own parent",
+                        parent_pk
+                    )),
+                ));
             }
             set_tag_parent(&tag, parent_pk, &connection)?;
         }
@@ -346,10 +350,12 @@ pub async fn upsert_tag_handler(
         match upsert_tag_request.alias_pks {
             Some(ref alias_pks) if !alias_pks.is_empty() => {
                 if alias_pks.iter().any(|alias_pk| *alias_pk == tag.pk) {
-                    return Err(Error::InvalidRequestInputError(format!(
-                        "Cannot set tag {} as an alias of itself",
-                        tag.pk
-                    )));
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InvalidRequestInputError(format!(
+                            "Cannot set tag {} as an alias of itself",
+                            tag.pk
+                        )),
+                    ));
                 }
 
                 let tag_aliases = alias_pks
@@ -378,7 +384,7 @@ pub async fn upsert_tag_handler(
 pub fn get_or_create_tag(
     tag_name: &String,
     connection: &DbConnection,
-) -> Result<(bool, Tag), Error> {
+) -> Result<(bool, Tag), TransactionRuntimeError> {
     let existing_tag = tag::table
         .filter(tag::tag_name.eq(tag_name))
         .first::<Tag>(connection)
@@ -392,7 +398,8 @@ pub fn get_or_create_tag(
                 tag_name: tag_name.clone(),
                 creation_timestamp: Utc::now(),
             })
-            .get_result::<Tag>(connection)?,
+            .get_result::<Tag>(connection)
+            .map_err(retry_on_constraint_violation)?,
     };
 
     // Create self referencing closure tag entry for newly inserted tag
@@ -409,7 +416,11 @@ pub fn get_or_create_tag(
     Ok((inserted, tag))
 }
 
-pub fn set_tag_parent(tag: &Tag, parent_pk: i32, connection: &DbConnection) -> Result<(), Error> {
+pub fn set_tag_parent(
+    tag: &Tag,
+    parent_pk: i32,
+    connection: &DbConnection,
+) -> Result<(), TransactionRuntimeError> {
     remove_tag_from_ancestry(tag, connection)?;
     diesel::sql_query(
         r#"
@@ -421,11 +432,15 @@ pub fn set_tag_parent(tag: &Tag, parent_pk: i32, connection: &DbConnection) -> R
     )
     .bind::<Integer, _>(parent_pk)
     .bind::<Integer, _>(tag.pk)
-    .execute(connection)?;
+    .execute(connection)
+    .map_err(retry_on_constraint_violation)?;
     Ok(())
 }
 
-pub fn remove_tag_from_ancestry(tag: &Tag, connection: &DbConnection) -> Result<(), Error> {
+pub fn remove_tag_from_ancestry(
+    tag: &Tag,
+    connection: &DbConnection,
+) -> Result<(), TransactionRuntimeError> {
     // delete all links to node for all neighboring nodes (i.e. depth = 1)
     // keeping the self reference (depth = 0) since to node is not deleted, only removed from the current hierarchy
     diesel::sql_query(r#"
@@ -439,6 +454,7 @@ pub fn remove_tag_from_ancestry(tag: &Tag, connection: &DbConnection) -> Result<
         )
     "#)
     .bind::<Integer, _>(tag.pk)
-    .execute(connection)?;
+    .execute(connection)
+    .map_err(retry_on_constraint_violation)?;
     Ok(())
 }
