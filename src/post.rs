@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use diesel::{dsl::exists, sql_types::Integer, BoolExpressionMethods, OptionalExtension};
+use diesel::{
+    dsl::exists,
+    sql_types::{Array, Integer},
+    BoolExpressionMethods, OptionalExtension,
+};
 use exec_rs::sync::MutexSync;
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -358,6 +362,13 @@ pub async fn upsert_tag_handler(
                     ));
                 }
 
+                // set parent of all added aliases to the parent of this tag
+                if let Some(parent_pk) = get_tag_parent_pk(tag.pk, &connection)? {
+                    set_tags_parent(alias_pks, parent_pk, &connection)?;
+                } else {
+                    remove_tags_from_ancestry(alias_pks, &connection)?;
+                }
+
                 let tag_aliases = alias_pks
                     .iter()
                     .map(|alias_pk| TagAlias {
@@ -416,6 +427,21 @@ pub fn get_or_create_tag(
     Ok((inserted, tag))
 }
 
+pub fn get_tag_parent_pk(
+    tag_pk: i32,
+    connection: &DbConnection,
+) -> Result<Option<i32>, diesel::result::Error> {
+    tag_closure_table::table
+        .select(tag_closure_table::fk_parent)
+        .filter(
+            tag_closure_table::fk_child
+                .eq(tag_pk)
+                .and(tag_closure_table::depth.eq(1)),
+        )
+        .get_result::<i32>(connection)
+        .optional()
+}
+
 pub fn set_tag_parent(
     tag: &Tag,
     parent_pk: i32,
@@ -454,6 +480,49 @@ pub fn remove_tag_from_ancestry(
         )
     "#)
     .bind::<Integer, _>(tag.pk)
+    .execute(connection)
+    .map_err(retry_on_constraint_violation)?;
+    Ok(())
+}
+
+pub fn set_tags_parent(
+    tag_pks: &Vec<i32>,
+    parent_pk: i32,
+    connection: &DbConnection,
+) -> Result<(), TransactionRuntimeError> {
+    remove_tags_from_ancestry(tag_pks, connection)?;
+    diesel::sql_query(
+        r#"
+        INSERT INTO tag_closure_table(fk_parent, fk_child, depth)
+        SELECT p.fk_parent, c.fk_child, p.depth + c.depth + 1
+        FROM tag_closure_table p, tag_closure_table c
+        WHERE p.fk_child = $1 AND c.fk_parent = ANY($2)
+    "#,
+    )
+    .bind::<Integer, _>(parent_pk)
+    .bind::<Array<Integer>, _>(tag_pks)
+    .execute(connection)
+    .map_err(retry_on_constraint_violation)?;
+    Ok(())
+}
+
+pub fn remove_tags_from_ancestry(
+    tag_pks: &Vec<i32>,
+    connection: &DbConnection,
+) -> Result<(), TransactionRuntimeError> {
+    // delete all links to node for all neighboring nodes (i.e. depth = 1)
+    // keeping the self reference (depth = 0) since to node is not deleted, only removed from the current hierarchy
+    diesel::sql_query(r#"
+        DELETE FROM tag_closure_table WHERE pk IN(
+            SELECT link.pk
+            FROM tag_closure_table p, tag_closure_table link, tag_closure_table c, tag_closure_table to_delete
+            WHERE p.fk_parent = link.fk_parent AND c.fk_child = link.fk_child
+            AND p.fk_child  = to_delete.fk_parent AND c.fk_parent = to_delete.fk_child
+            AND (to_delete.fk_parent = ANY($1) OR to_delete.fk_child = ANY($1))
+            AND to_delete.depth = 1
+        )
+    "#)
+    .bind::<Array<Integer>, _>(tag_pks)
     .execute(connection)
     .map_err(retry_on_constraint_violation)?;
     Ok(())
