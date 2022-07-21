@@ -38,14 +38,7 @@ pub async fn search_handler(
         ordering: Vec::new(),
     };
 
-    println!("{:?}", &query_parameters_filter.query);
-    let now = std::time::Instant::now();
     let sql_query = compiler::compile_sql(query_parameters_filter.query, query_parameters)?;
-    println!(
-        "({} ms) compiled sql: {}",
-        now.elapsed().as_millis(),
-        &sql_query
-    );
     let connection = acquire_db_connection()?;
     let posts = diesel::sql_query(&sql_query)
         .load::<Post>(&connection)
