@@ -1,0 +1,3 @@
+CREATE UNIQUE INDEX unique_tag_name ON tag(LOWER(tag_name));
+
+ALTER TABLE post ADD COLUMN score INTEGER NOT NULL DEFAULT 0;

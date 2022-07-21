@@ -2,6 +2,8 @@ use serde::Serialize;
 use thiserror::Error;
 use warp::{hyper::StatusCode, reject::Reject, Rejection, Reply};
 
+use crate::query::compiler;
+
 #[allow(clippy::enum_variant_names)]
 #[derive(Error, Debug, PartialEq)]
 pub enum Error {
@@ -35,6 +37,8 @@ pub enum Error {
     InvalidRefreshTokenError,
     #[error("The request input could not be validated: '{0}'")]
     InvalidRequestInputError(String),
+    #[error("Query could not be compiled due to error in phase '{0}'")]
+    QueryCompilationError(String, Vec<compiler::Error>),
 }
 
 impl Reject for Error {}
@@ -72,21 +76,22 @@ impl From<diesel::result::Error> for TransactionRuntimeError {
 struct ErrorResponse {
     message: String,
     status: String,
+    compilation_errors: Option<Vec<compiler::Error>>,
 }
 
 /// Creates a Rejection response for the given error and logs internal server errors.
 pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(e) = err.find::<Error>() {
-        let (code, message) = match e {
-            Error::InvalidCredentialsError => (StatusCode::FORBIDDEN, e.to_string()),
+        let (code, message, compilation_errors) = match e {
+            Error::InvalidCredentialsError => (StatusCode::FORBIDDEN, e.to_string(), None),
             Error::MissingAuthHeaderError
             | Error::InvalidJwtError
-            | Error::InvalidRefreshTokenError => (StatusCode::UNAUTHORIZED, e.to_string()),
+            | Error::InvalidRefreshTokenError => (StatusCode::UNAUTHORIZED, e.to_string(), None),
             Error::UserExistsError(_)
             | Error::UtfEncodingError
             | Error::InvalidAuthHeaderError
             | Error::BadRequestError
-            | Error::InvalidRequestInputError(_) => (StatusCode::BAD_REQUEST, e.to_string()),
+            | Error::InvalidRequestInputError(_) => (StatusCode::BAD_REQUEST, e.to_string(), None),
             Error::DatabaseConnectionError
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -94,13 +99,22 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             | Error::EncryptionError
             | Error::SerialisationError => {
                 log::error!("Encountered internal server error: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None)
+            }
+            Error::QueryCompilationError(_, errors) => {
+                let errors = errors
+                    .iter()
+                    .map(compiler::Error::clone)
+                    .take(5)
+                    .collect::<Vec<_>>();
+                (StatusCode::BAD_REQUEST, e.to_string(), Some(errors))
             }
         };
 
         let err_response = ErrorResponse {
             message,
             status: code.to_string(),
+            compilation_errors,
         };
 
         let json = warp::reply::json(&err_response);

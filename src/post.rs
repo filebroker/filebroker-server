@@ -9,6 +9,7 @@ use diesel::{
 use exec_rs::sync::MutexSync;
 use itertools::Itertools;
 use lazy_static::lazy_static;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 use warp::{Rejection, Reply};
@@ -20,6 +21,7 @@ use crate::{
     model::{
         NewPost, NewTag, NewTagClosureTable, Post, PostTag, Tag, TagAlias, TagClosureTable, User,
     },
+    query::functions::*,
     retry_on_constraint_violation, run_retryable_transaction,
     schema::{post, post_tag, tag, tag_alias, tag_closure_table},
     DbConnection,
@@ -55,7 +57,7 @@ fn validate_tags(tags: &Vec<String>) -> Result<(), ValidationError> {
 fn validate_tag(tag: &str) -> Result<(), ValidationError> {
     if !tag_is_valid(tag) {
         return Err(ValidationError::new(
-            "Invalid tag, tags must be alphanumeric (or ['_', ''']) and 50 or less in length",
+            "Invalid tag, tags must be 50 or less in length",
         ));
     }
 
@@ -65,18 +67,15 @@ fn validate_tag(tag: &str) -> Result<(), ValidationError> {
 #[inline]
 fn tag_is_valid(tag: &str) -> bool {
     tag.len() <= 50
-        && tag
-            .chars()
-            .all(|c| c == '_' || c == '\'' || c.is_alphanumeric())
+}
+
+lazy_static! {
+    pub static ref WHITESPACE_REGEX: Regex = Regex::new("\\s+").unwrap();
 }
 
 #[inline]
 fn sanitize_tag(tag: String) -> String {
-    if tag.chars().any(char::is_uppercase) {
-        tag.to_lowercase()
-    } else {
-        tag
-    }
+    WHITESPACE_REGEX.replace_all(tag.trim(), " ").into_owned()
 }
 
 #[derive(Serialize)]
@@ -187,21 +186,22 @@ pub async fn create_tags_handler(
 /// Get and create all tags for the supplied tag names, returning a tuple of all existing and all created tags.
 pub fn get_or_create_tags(
     connection: &DbConnection,
-    tags: &Vec<String>,
+    tags: &[String],
 ) -> Result<(Vec<Tag>, Vec<Tag>), TransactionRuntimeError> {
+    let lower_tags = tags.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>();
     let existing_tags = tag::table
-        .filter(tag::tag_name.eq_any(tags))
+        .filter(lower(tag::tag_name).eq_any(&lower_tags))
         .load::<Tag>(connection)?;
 
     let mut existing_tag_map = HashMap::new();
     for existing_tag in existing_tags {
-        existing_tag_map.insert(existing_tag.tag_name.clone(), existing_tag);
+        existing_tag_map.insert(existing_tag.tag_name.to_lowercase(), existing_tag);
     }
 
     let mut new_tags = Vec::new();
     let mut set_tags = Vec::new();
     for tag in tags.iter() {
-        match existing_tag_map.remove(tag) {
+        match existing_tag_map.remove(&tag.to_lowercase()) {
             Some(existing_tag) => set_tags.push(existing_tag),
             None => new_tags.push(NewTag {
                 tag_name: tag.clone(),
@@ -393,11 +393,11 @@ pub async fn upsert_tag_handler(
 }
 
 pub fn get_or_create_tag(
-    tag_name: &String,
+    tag_name: &str,
     connection: &DbConnection,
 ) -> Result<(bool, Tag), TransactionRuntimeError> {
     let existing_tag = tag::table
-        .filter(tag::tag_name.eq(tag_name))
+        .filter(lower(tag::tag_name).eq(tag_name.to_lowercase()))
         .first::<Tag>(connection)
         .optional()?;
 
@@ -406,7 +406,7 @@ pub fn get_or_create_tag(
         Some(existing_tag) => existing_tag,
         None => diesel::insert_into(tag::table)
             .values(&NewTag {
-                tag_name: tag_name.clone(),
+                tag_name: String::from(tag_name),
                 creation_timestamp: Utc::now(),
             })
             .get_result::<Tag>(connection)

@@ -1,3 +1,5 @@
+#![allow(clippy::extra_unused_lifetimes)]
+
 use chrono::{offset::Utc, DateTime};
 use diesel::{Associations, Identifiable, Insertable, Queryable};
 use serde::Serialize;
@@ -47,7 +49,7 @@ pub struct NewRefreshToken {
     pub fk_registered_user: i32,
 }
 
-#[derive(Associations, Identifiable, Queryable, Serialize)]
+#[derive(Associations, Identifiable, Queryable, QueryableByName, Serialize)]
 #[table_name = "post"]
 #[primary_key(pk)]
 #[belongs_to(User, foreign_key = "fk_create_user")]
@@ -58,6 +60,7 @@ pub struct Post {
     pub title: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub fk_create_user: i32,
+    pub score: i32,
 }
 
 #[derive(Insertable)]

@@ -6,6 +6,7 @@ table! {
         title -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
         fk_create_user -> Int4,
+        score -> Int4,
     }
 }
 

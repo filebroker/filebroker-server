@@ -11,6 +11,7 @@ use diesel::{
 use dotenv::dotenv;
 use error::{Error, TransactionRuntimeError};
 use lazy_static::lazy_static;
+use query::QueryParametersFilter;
 use std::str::FromStr;
 use warp::Filter;
 
@@ -18,6 +19,7 @@ mod auth;
 mod error;
 mod model;
 mod post;
+mod query;
 mod schema;
 
 pub type DbConnection = PooledConnection<ConnectionManager<PgConnection>>;
@@ -159,6 +161,11 @@ async fn setup_tokio_runtime() {
         .and(auth::with_user())
         .and_then(post::upsert_tag_handler);
 
+    let search_route = warp::path("search")
+        .and(warp::get())
+        .and(warp::query::<QueryParametersFilter>())
+        .and_then(query::search_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(try_refresh_login_route)
@@ -166,7 +173,8 @@ async fn setup_tokio_runtime() {
         .or(current_user_info_route)
         .or(create_post_route)
         .or(create_tags_route)
-        .or(upsert_tag_route);
+        .or(upsert_tag_route)
+        .or(search_route);
 
     let filter = routes
         .recover(error::handle_rejection)
