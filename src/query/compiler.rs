@@ -10,6 +10,8 @@ use self::{
 
 use super::QueryParameters;
 
+use crate::query::{Direction, Ordering};
+
 pub mod ast;
 pub mod dict;
 pub mod lexer;
@@ -140,6 +142,30 @@ pub fn compile_sql(
         }
     }
 
+    if query_parameters.ordering.is_empty() {
+        query_parameters.ordering.push(Ordering {
+            expression: String::from("pk"),
+            direction: Direction::Descending,
+        });
+    }
+
+    let ordering_len = query_parameters.ordering.len();
+    if ordering_len > 0 {
+        sql_query.push_str(" ORDER BY ");
+        for (i, ordering) in query_parameters.ordering.iter().enumerate() {
+            sql_query.push_str(&ordering.expression);
+
+            match ordering.direction {
+                Direction::Ascending => sql_query.push_str(" ASC"),
+                Direction::Descending => sql_query.push_str(" DESC"),
+            }
+
+            if i < ordering_len - 1 {
+                sql_query.push_str(", ");
+            }
+        }
+    }
+
     let limit = query_parameters.limit.as_deref().unwrap_or("50");
     let page = query_parameters.page.unwrap_or(0);
 
@@ -149,6 +175,8 @@ pub fn compile_sql(
     sql_query.push_str(limit);
     sql_query.push_str(") * ");
     sql_query.push_str(&page.to_string());
+
+    log::debug!("Compiled query to sql {}", &sql_query);
 
     Ok(sql_query)
 }
