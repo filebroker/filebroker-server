@@ -1,15 +1,17 @@
 use diesel::RunQueryDsl;
 use serde::Deserialize;
+use validator::Validate;
 use warp::{Rejection, Reply};
 
 use crate::{acquire_db_connection, error::Error, model::Post};
 
 pub mod compiler;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct QueryParametersFilter {
     pub limit: Option<u32>,
     pub page: Option<u32>,
+    #[validate(length(min = 0, max = 255))]
     pub query: Option<String>,
 }
 
@@ -32,6 +34,13 @@ pub enum Direction {
 pub async fn search_handler(
     query_parameters_filter: QueryParametersFilter,
 ) -> Result<impl Reply, Rejection> {
+    query_parameters_filter.validate().map_err(|e| {
+        Error::InvalidRequestInputError(format!(
+            "Validation failed for QueryParametersFilter: {}",
+            e
+        ))
+    })?;
+
     let query_parameters = QueryParameters {
         limit: query_parameters_filter.limit.map(|l| l.to_string()),
         page: query_parameters_filter.page,

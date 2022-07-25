@@ -513,9 +513,9 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
         self.write_buff("(");
         left.accept(self, log);
-        self.write_buff(") ");
+        self.write_buff(" ");
         self.write_buff(op.get_sql_string());
-        self.write_buff(" (");
+        self.write_buff(" ");
         right.accept(self, log);
         self.write_buff(")");
     }

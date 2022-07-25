@@ -132,9 +132,7 @@ pub fn compile_sql(
         sql_query.push_str(" WHERE ");
 
         for (i, where_expression) in query_builder_visitor.where_expressions.iter().enumerate() {
-            sql_query.push('(');
             sql_query.push_str(where_expression);
-            sql_query.push(')');
 
             if i < where_expressions_len - 1 {
                 sql_query.push_str(" AND ");
