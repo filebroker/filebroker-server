@@ -1,10 +1,10 @@
-use std::fmt::Debug;
+use std::{collections::HashMap, fmt::Debug};
 
 use downcast_rs::{impl_downcast, Downcast};
 
 use crate::query::{Direction, Ordering, QueryParameters};
 
-use super::{dict, dict::Type, lexer::Tag, Error, Location, Log};
+use super::{dict, dict::Type, lexer::Tag, Cte, Error, Location, Log};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Operator {
@@ -391,7 +391,7 @@ impl Visitor for SemanticAnalysisVisitor {
 }
 
 pub struct QueryBuilderVisitor<'p> {
-    pub ctes: Vec<String>,
+    pub ctes: HashMap<String, Cte>,
     pub where_expressions: Vec<String>,
     query_parameters: &'p mut QueryParameters,
     buffer: Option<String>,
@@ -400,7 +400,7 @@ pub struct QueryBuilderVisitor<'p> {
 impl<'p> QueryBuilderVisitor<'p> {
     pub fn new(query_parameters: &'p mut QueryParameters) -> Self {
         QueryBuilderVisitor {
-            ctes: Vec::new(),
+            ctes: HashMap::new(),
             where_expressions: Vec::new(),
             query_parameters,
             buffer: None,
@@ -484,21 +484,28 @@ impl Visitor for QueryBuilderVisitor<'_> {
         _log: &mut Log,
         _location: Location,
     ) {
-        let cte_idx = self.ctes.len();
+        let idx = self.ctes.len();
         let tag_name = sanitize_string_literal(&post_tag_node.identifier);
-        let cte = format!(
-            "cte{cte_idx} AS (
-                SELECT unnest(
-                    tag.pk
-                    || array(SELECT fk_target FROM tag_alias WHERE fk_source = tag.pk)
-                    || array(SELECT fk_source FROM tag_alias WHERE fk_target = tag.pk)
-                    || array(SELECT fk_child FROM tag_closure_table WHERE fk_parent = tag.pk)
-                ) AS tag_keys
-                FROM tag WHERE lower(tag.tag_name) = '{tag_name}'
-            )"
-        );
 
-        self.ctes.push(cte);
+        let cte = self
+            .ctes
+            .entry(tag_name)
+            .or_insert_with_key(|tag_name| Cte {
+                idx,
+                expression: format!(
+                    "cte{idx} AS (
+                        SELECT unnest(
+                            tag.pk
+                            || array(SELECT fk_target FROM tag_alias WHERE fk_source = tag.pk)
+                            || array(SELECT fk_source FROM tag_alias WHERE fk_target = tag.pk)
+                            || array(SELECT fk_child FROM tag_closure_table WHERE fk_parent = tag.pk)
+                        ) AS tag_keys
+                        FROM tag WHERE lower(tag.tag_name) = '{tag_name}'
+                    )"
+                ),
+            });
+
+        let cte_idx = cte.idx;
         self.write_buff(&format!("EXISTS(SELECT * FROM post_tag WHERE fk_post = post.pk AND fk_tag IN(SELECT tag_keys FROM cte{cte_idx}))"));
     }
 

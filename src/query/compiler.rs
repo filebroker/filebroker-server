@@ -41,6 +41,11 @@ pub struct Error {
     pub msg: String,
 }
 
+pub struct Cte {
+    pub idx: usize,
+    pub expression: String,
+}
+
 pub fn compile_sql(
     query: Option<String>,
     mut query_parameters: QueryParameters,
@@ -122,8 +127,8 @@ pub fn compile_sql(
     } else if cte_len > 0 {
         sql_query.push_str("WITH ");
 
-        for (i, cte) in query_builder_visitor.ctes.iter().enumerate() {
-            sql_query.push_str(cte);
+        for (i, cte) in query_builder_visitor.ctes.values().enumerate() {
+            sql_query.push_str(&cte.expression);
             if i < cte_len - 1 {
                 sql_query.push_str(", ");
             }
