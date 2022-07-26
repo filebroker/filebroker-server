@@ -43,7 +43,7 @@ lazy_static! {
     };
     pub static ref PORT: u16 = {
         let port_str = std::env::var("API_PORT")
-            .expect("Missing environment variable API_PORT must be set to generate JWT tokens.");
+            .expect("Missing environment variable API_PORT must be set.");
         u16::from_str(&port_str).expect("API_PORT var is not a valid u16 value")
     };
 }
