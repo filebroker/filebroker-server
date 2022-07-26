@@ -492,6 +492,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
                     tag.pk
                     || array(SELECT fk_target FROM tag_alias WHERE fk_source = tag.pk)
                     || array(SELECT fk_source FROM tag_alias WHERE fk_target = tag.pk)
+                    || array(SELECT fk_child FROM tag_closure_table WHERE fk_parent = tag.pk)
                 ) AS tag_keys
                 FROM tag WHERE lower(tag.tag_name) = '{tag_name}'
             )"

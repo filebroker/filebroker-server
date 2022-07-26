@@ -114,7 +114,12 @@ pub fn compile_sql(
     let mut sql_query = String::new();
 
     let cte_len = query_builder_visitor.ctes.len();
-    if cte_len > 0 {
+    if cte_len > 50 {
+        return Err(crate::Error::IllegalQueryInputError(format!(
+            "Exceeded maximum number of CTEs of 50 (recorded {}), too many tags supplied.",
+            cte_len
+        )));
+    } else if cte_len > 0 {
         sql_query.push_str("WITH ");
 
         for (i, cte) in query_builder_visitor.ctes.iter().enumerate() {
@@ -166,6 +171,16 @@ pub fn compile_sql(
 
     let limit = query_parameters.limit.as_deref().unwrap_or("50");
     let page = query_parameters.page.unwrap_or(0);
+
+    let parsed_limit = limit.parse::<u16>().map_err(|_| {
+        crate::Error::IllegalQueryInputError(format!("'{}' is not a valid u16 value", limit))
+    })?;
+    if parsed_limit > 100 {
+        return Err(crate::Error::IllegalQueryInputError(format!(
+            "Limit '{}' exceeds maximum limit of 100.",
+            parsed_limit
+        )));
+    }
 
     sql_query.push_str(" LIMIT ");
     sql_query.push_str(limit);

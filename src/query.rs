@@ -11,7 +11,7 @@ pub mod compiler;
 pub struct QueryParametersFilter {
     pub limit: Option<u32>,
     pub page: Option<u32>,
-    #[validate(length(min = 0, max = 255))]
+    #[validate(length(min = 0, max = 1024))]
     pub query: Option<String>,
 }
 

@@ -39,6 +39,8 @@ pub enum Error {
     InvalidRequestInputError(String),
     #[error("Query could not be compiled due to error in phase '{0}'")]
     QueryCompilationError(String, Vec<compiler::Error>),
+    #[error("The provided query is invalid: {0}")]
+    IllegalQueryInputError(String),
 }
 
 impl Reject for Error {}
@@ -91,7 +93,8 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             | Error::UtfEncodingError
             | Error::InvalidAuthHeaderError
             | Error::BadRequestError
-            | Error::InvalidRequestInputError(_) => (StatusCode::BAD_REQUEST, e.to_string(), None),
+            | Error::InvalidRequestInputError(_)
+            | Error::IllegalQueryInputError(_) => (StatusCode::BAD_REQUEST, e.to_string(), None),
             Error::DatabaseConnectionError
             | Error::QueryError(_)
             | Error::TransactionError(_)

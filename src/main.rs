@@ -42,8 +42,8 @@ lazy_static! {
         u64::from_str(&secret_str).expect("JWT_SECRET var is not a valid u64 value")
     };
     pub static ref PORT: u16 = {
-        let port_str = std::env::var("API_PORT")
-            .expect("Missing environment variable API_PORT must be set.");
+        let port_str =
+            std::env::var("API_PORT").expect("Missing environment variable API_PORT must be set.");
         u16::from_str(&port_str).expect("API_PORT var is not a valid u16 value")
     };
 }
