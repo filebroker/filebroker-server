@@ -61,6 +61,7 @@ pub struct Post {
     pub creation_timestamp: DateTime<Utc>,
     pub fk_create_user: i32,
     pub score: i32,
+    pub fk_s3_object: Option<i32>,
 }
 
 #[derive(Insertable)]
@@ -71,6 +72,8 @@ pub struct NewPost {
     pub title: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub fk_create_user: i32,
+    pub score: i32,
+    pub fk_s3_object: Option<i32>,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
@@ -108,7 +111,7 @@ pub struct TagAlias {
     pub fk_target: i32,
 }
 
-#[derive(Associations, Clone, Identifiable, Queryable, QueryableByName, Serialize)]
+#[derive(Associations, Clone, Identifiable, Queryable, Serialize)]
 #[table_name = "tag_closure_table"]
 #[primary_key(pk)]
 pub struct TagClosureTable {
@@ -124,4 +127,59 @@ pub struct NewTagClosureTable {
     pub fk_parent: i32,
     pub fk_child: i32,
     pub depth: i32,
+}
+
+#[derive(Associations, Identifiable, Queryable, Serialize)]
+#[belongs_to(User, foreign_key = "fk_owner")]
+#[table_name = "broker"]
+#[primary_key(pk)]
+pub struct Broker {
+    pub pk: i32,
+    pub name: String,
+    pub bucket: String,
+    pub endpoint: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub is_aws_region: bool,
+    pub remove_duplicate_files: bool,
+    pub fk_owner: i32,
+}
+
+#[derive(Insertable)]
+#[table_name = "broker"]
+pub struct NewBroker {
+    pub name: String,
+    pub bucket: String,
+    pub endpoint: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub is_aws_region: bool,
+    pub remove_duplicate_files: bool,
+    pub fk_owner: i32,
+}
+
+#[derive(Associations, Clone, Identifiable, Queryable, Serialize)]
+#[belongs_to(Broker, foreign_key = "fk_broker")]
+#[belongs_to(User, foreign_key = "fk_uploader")]
+#[table_name = "s3_object"]
+#[primary_key(pk)]
+pub struct S3Object {
+    pub pk: i32,
+    pub object_key: String,
+    pub sha256_hash: Option<String>,
+    pub size_bytes: i64,
+    pub mime_type: String,
+    pub fk_broker: i32,
+    pub fk_uploader: i32,
+}
+
+#[derive(Insertable)]
+#[table_name = "s3_object"]
+pub struct NewS3Object {
+    pub object_key: String,
+    pub sha256_hash: Option<String>,
+    pub size_bytes: i64,
+    pub mime_type: String,
+    pub fk_broker: i32,
+    pub fk_uploader: i32,
 }

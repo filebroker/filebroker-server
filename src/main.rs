@@ -11,11 +11,13 @@ use diesel::{
 use dotenv::dotenv;
 use error::{Error, TransactionRuntimeError};
 use lazy_static::lazy_static;
+use mime::Mime;
 use query::QueryParametersFilter;
 use std::str::FromStr;
 use warp::Filter;
 
 mod auth;
+mod data;
 mod error;
 mod model;
 mod post;
@@ -166,6 +168,14 @@ async fn setup_tokio_runtime() {
         .and(warp::query::<QueryParametersFilter>())
         .and_then(query::search_handler);
 
+    let upload_route = warp::path("upload")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and(warp::header::<Mime>("content-type"))
+        .and(warp::body::stream())
+        .and_then(data::upload_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(try_refresh_login_route)
@@ -174,7 +184,8 @@ async fn setup_tokio_runtime() {
         .or(create_post_route)
         .or(create_tags_route)
         .or(upsert_tag_route)
-        .or(search_route);
+        .or(search_route)
+        .or(upload_route);
 
     let filter = routes
         .recover(error::handle_rejection)

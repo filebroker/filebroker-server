@@ -40,6 +40,7 @@ pub struct CreatePostRequest {
     pub title: Option<String>,
     #[validate(length(max = 100), custom = "validate_tags")]
     pub tags: Option<Vec<String>>,
+    pub fk_s3_object: Option<i32>,
 }
 
 fn validate_tags(tags: &Vec<String>) -> Result<(), ValidationError> {
@@ -126,6 +127,8 @@ pub async fn create_post_handler(
                 title: create_post_request.title.clone(),
                 creation_timestamp: Utc::now(),
                 fk_create_user: user.pk,
+                score: 0,
+                fk_s3_object: create_post_request.fk_s3_object,
             })
             .get_result::<Post>(&connection)?;
 

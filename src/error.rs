@@ -41,6 +41,16 @@ pub enum Error {
     QueryCompilationError(String, Vec<compiler::Error>),
     #[error("The provided query is invalid: {0}")]
     IllegalQueryInputError(String),
+    #[error("Cannot access broker with provided pk {0}")]
+    InaccessibleBrokerError(i32),
+    #[error("The provided S3 bucket is invalid. Error '{0}'.")]
+    InvalidBucketError(String),
+    #[error("The file upload form is invalid. {0}.")]
+    InvalidFileError(String),
+    #[error("An error occured connecting to S3: {0}")]
+    S3Error(String),
+    #[error("Received error response code from S3: {0}")]
+    S3ResponseError(u16),
 }
 
 impl Reject for Error {}
@@ -85,8 +95,9 @@ struct ErrorResponse {
 pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(e) = err.find::<Error>() {
         let (code, message, compilation_errors) = match e {
-            Error::InvalidCredentialsError => (StatusCode::FORBIDDEN, e.to_string(), None),
-            Error::MissingAuthHeaderError
+            Error::InaccessibleBrokerError(_) => (StatusCode::FORBIDDEN, e.to_string(), None),
+            Error::InvalidCredentialsError
+            | Error::MissingAuthHeaderError
             | Error::InvalidJwtError
             | Error::InvalidRefreshTokenError => (StatusCode::UNAUTHORIZED, e.to_string(), None),
             Error::UserExistsError(_)
@@ -94,13 +105,16 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             | Error::InvalidAuthHeaderError
             | Error::BadRequestError
             | Error::InvalidRequestInputError(_)
-            | Error::IllegalQueryInputError(_) => (StatusCode::BAD_REQUEST, e.to_string(), None),
+            | Error::IllegalQueryInputError(_)
+            | Error::InvalidBucketError(_)
+            | Error::InvalidFileError(_) => (StatusCode::BAD_REQUEST, e.to_string(), None),
             Error::DatabaseConnectionError
             | Error::QueryError(_)
             | Error::TransactionError(_)
             | Error::JwtCreationError
             | Error::EncryptionError
-            | Error::SerialisationError => {
+            | Error::SerialisationError
+            | Error::S3Error(_) => {
                 log::error!("Encountered internal server error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None)
             }
@@ -112,6 +126,11 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
                     .collect::<Vec<_>>();
                 (StatusCode::BAD_REQUEST, e.to_string(), Some(errors))
             }
+            Error::S3ResponseError(code) => (
+                StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                e.to_string(),
+                None,
+            ),
         };
 
         let err_response = ErrorResponse {

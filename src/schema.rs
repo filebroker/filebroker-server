@@ -1,4 +1,18 @@
 table! {
+    broker (pk) {
+        pk -> Int4,
+        name -> Varchar,
+        bucket -> Varchar,
+        endpoint -> Varchar,
+        access_key -> Varchar,
+        secret_key -> Varchar,
+        is_aws_region -> Bool,
+        remove_duplicate_files -> Bool,
+        fk_owner -> Int4,
+    }
+}
+
+table! {
     post (pk) {
         pk -> Int4,
         data_url -> Varchar,
@@ -7,6 +21,7 @@ table! {
         creation_timestamp -> Timestamptz,
         fk_create_user -> Int4,
         score -> Int4,
+        fk_s3_object -> Nullable<Int4>,
     }
 }
 
@@ -39,6 +54,18 @@ table! {
 }
 
 table! {
+    s3_object (pk) {
+        pk -> Int4,
+        object_key -> Varchar,
+        sha256_hash -> Nullable<Bpchar>,
+        size_bytes -> Int8,
+        mime_type -> Varchar,
+        fk_broker -> Int4,
+        fk_uploader -> Int4,
+    }
+}
+
+table! {
     tag (pk) {
         pk -> Int4,
         tag_name -> Varchar,
@@ -62,16 +89,22 @@ table! {
     }
 }
 
+joinable!(broker -> registered_user (fk_owner));
 joinable!(post -> registered_user (fk_create_user));
+joinable!(post -> s3_object (fk_s3_object));
 joinable!(post_tag -> post (fk_post));
 joinable!(post_tag -> tag (fk_tag));
 joinable!(refresh_token -> registered_user (fk_registered_user));
+joinable!(s3_object -> broker (fk_broker));
+joinable!(s3_object -> registered_user (fk_uploader));
 
 allow_tables_to_appear_in_same_query!(
+    broker,
     post,
     post_tag,
     refresh_token,
     registered_user,
+    s3_object,
     tag,
     tag_alias,
     tag_closure_table,
