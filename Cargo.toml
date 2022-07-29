@@ -9,7 +9,9 @@ default = []
 auto_migration = ["diesel_migrations"]
 
 [dependencies]
+async-trait = "0.1.56"
 bcrypt = "0.13.0"
+bytes = "1.2.0"
 chrono = { version = "0.4.19", features = ["serde"] }
 data-encoding = "2.3.2"
 diesel = { version = "1.4.8", features = ["chrono", "postgres", "r2d2", "uuidv07"] }
@@ -26,6 +28,7 @@ log = "0.4.17"
 mime = "0.3.16"
 mpart-async = "0.6.0"
 pin-project-lite = "0.2.9"
+rand = "0.8.5"
 regex = "1.6.0"
 ring = "0.16.20"
 rust-s3 = "0.32.1"

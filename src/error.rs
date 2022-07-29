@@ -43,6 +43,8 @@ pub enum Error {
     IllegalQueryInputError(String),
     #[error("Cannot access broker with provided pk {0}")]
     InaccessibleBrokerError(i32),
+    #[error("Cannot access object with provided pk {0}")]
+    InaccessibleObjectError(i32),
     #[error("The provided S3 bucket is invalid. Error '{0}'.")]
     InvalidBucketError(String),
     #[error("The file upload form is invalid. {0}.")]
@@ -51,6 +53,10 @@ pub enum Error {
     S3Error(String),
     #[error("Received error response code from S3: {0}")]
     S3ResponseError(u16),
+    #[error("Received error response code from S3: {0}, Message: '{1}'")]
+    S3ResponseErrorMsg(u16, String),
+    #[error("The provided byte range is invalid: {0}")]
+    IllegalRangeError(String),
 }
 
 impl Reject for Error {}
@@ -58,6 +64,15 @@ impl Reject for Error {}
 impl From<diesel::result::Error> for Error {
     fn from(e: diesel::result::Error) -> Self {
         Self::TransactionError(e)
+    }
+}
+
+impl From<s3::error::S3Error> for Error {
+    fn from(e: s3::error::S3Error) -> Self {
+        match e {
+            s3::error::S3Error::Http(code, msg) => Error::S3ResponseErrorMsg(code, msg),
+            _ => Error::S3Error(e.to_string()),
+        }
     }
 }
 
@@ -95,7 +110,9 @@ struct ErrorResponse {
 pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(e) = err.find::<Error>() {
         let (code, message, compilation_errors) = match e {
-            Error::InaccessibleBrokerError(_) => (StatusCode::FORBIDDEN, e.to_string(), None),
+            Error::InaccessibleBrokerError(_) | Error::InaccessibleObjectError(_) => {
+                (StatusCode::FORBIDDEN, e.to_string(), None)
+            }
             Error::InvalidCredentialsError
             | Error::MissingAuthHeaderError
             | Error::InvalidJwtError
@@ -118,6 +135,7 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
                 log::error!("Encountered internal server error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None)
             }
+            Error::IllegalRangeError(_) => (StatusCode::RANGE_NOT_SATISFIABLE, e.to_string(), None),
             Error::QueryCompilationError(_, errors) => {
                 let errors = errors
                     .iter()
@@ -126,7 +144,7 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
                     .collect::<Vec<_>>();
                 (StatusCode::BAD_REQUEST, e.to_string(), Some(errors))
             }
-            Error::S3ResponseError(code) => (
+            Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => (
                 StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                 e.to_string(),
                 None,

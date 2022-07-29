@@ -176,6 +176,12 @@ async fn setup_tokio_runtime() {
         .and(warp::body::stream())
         .and_then(data::upload_handler);
 
+    let get_object_route = warp::path("get-object")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and(warp::header::optional::<String>("Range"))
+        .and_then(data::get_object_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(try_refresh_login_route)
@@ -185,7 +191,8 @@ async fn setup_tokio_runtime() {
         .or(create_tags_route)
         .or(upsert_tag_route)
         .or(search_route)
-        .or(upload_route);
+        .or(upload_route)
+        .or(get_object_route);
 
     let filter = routes
         .recover(error::handle_rejection)
@@ -214,10 +221,10 @@ fn setup_logger() {
         std::fs::create_dir("logs").expect("Failed to create logs/ directory");
     }
 
-    let (logging_level, api_logging_level) = if cfg!(debug_assertions) {
-        (log::LevelFilter::Debug, log::LevelFilter::Debug)
+    let logging_level = if cfg!(debug_assertions) {
+        log::LevelFilter::Debug
     } else {
-        (log::LevelFilter::Info, log::LevelFilter::Warn)
+        log::LevelFilter::Info
     };
 
     fern::Dispatch::new()
@@ -231,7 +238,7 @@ fn setup_logger() {
             ))
         })
         .level(logging_level)
-        .level_for("filebroker::api", api_logging_level)
+        .level_for("filebroker::api", logging_level)
         .chain(std::io::stdout())
         .chain(fern::DateBased::new("logs/", "logs_%Y-%W.log"))
         .apply()
