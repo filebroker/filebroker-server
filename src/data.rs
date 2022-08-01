@@ -9,7 +9,9 @@ use mpart_async::server::MultipartStream;
 use pin_project_lite::pin_project;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use ring::digest;
-use s3::{creds::Credentials, Bucket, Region};
+use s3::error::S3Error;
+use s3::request_trait::Request;
+use s3::{command::Command, creds::Credentials, request::Reqwest, Bucket, Region};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use warp::{
     hyper::{self, Response},
@@ -217,7 +219,6 @@ where
     }
 }
 
-const MAX_RANGE: u64 = 1 << 24;
 const BUFFER_SIZE: usize = 1 << 16;
 
 #[async_trait]
@@ -256,6 +257,21 @@ impl ObjectWriter for FullObjectWriter {
     }
 }
 
+async fn get_object_range_stream(
+    bucket: &Bucket,
+    path: &str,
+    start: u64,
+    end: u64,
+    writer: &mut DuplexStream,
+) -> Result<u16, S3Error> {
+    let command = Command::GetObjectRange {
+        start,
+        end: Some(end),
+    };
+    let request = Reqwest::new(bucket, path, command);
+    request.response_data_to_writer(writer).await
+}
+
 struct ObjectRangeWriter {
     bucket: Bucket,
     object: S3Object,
@@ -266,39 +282,29 @@ struct ObjectRangeWriter {
 #[async_trait]
 impl ObjectWriter for ObjectRangeWriter {
     async fn write_bytes(&self, writer: &mut DuplexStream) {
-        for chunk in split_range(self.start, self.end) {
-            let start = chunk.0;
-            let end = chunk.1;
+        let start = self.start;
+        let end = self.end;
 
-            match self
-                .bucket
-                .get_object_range(&self.object.object_key, start, Some(end))
-                .await
-                .map_err(Error::from)
-            {
-                Ok(response_data) => {
-                    let status_code = response_data.status_code();
-                    if status_code < 300 {
-                        let bytes = response_data.bytes();
-                        log::debug!(
-                            "Writing {} bytes for range {}-{} for object {}",
-                            bytes.len(),
-                            start,
-                            end,
-                            self.object.pk
-                        );
-                        if let Err(e) = writer.write_all(bytes).await {
-                            log::error!("Failed to write file bytes: {}", e);
-                            return;
-                        }
-                    } else {
-                        log::error!("Error code sending bytes to body: {}", status_code);
-                    }
-                }
-                Err(e) => {
-                    log::error!("Error reading object range: {}", e);
-                    return;
-                }
+        match get_object_range_stream(&self.bucket, &self.object.object_key, start, end, writer)
+            .await
+            .map_err(Error::from)
+        {
+            Ok(status_code) if status_code < 300 => {}
+            Ok(status_code) => {
+                log::error!(
+                    "Non success response code {} reading object pk {}",
+                    status_code,
+                    self.object.pk
+                );
+            }
+            Err(e) => {
+                log::error!(
+                    "Error occurred reading range {}-{} for object pk {}: {}",
+                    start,
+                    end,
+                    self.object.pk,
+                    e
+                );
             }
         }
 
@@ -345,41 +351,29 @@ impl ObjectWriter for MultipartObjectWriter {
                 return;
             }
 
-            for chunk in split_range(part.start, part.end) {
-                let start = chunk.0;
-                let end = chunk.1;
-                match self
-                    .bucket
-                    .get_object_range(&self.object.object_key, start, Some(end))
-                    .await
-                {
-                    Ok(response_data) => {
-                        let response_code = response_data.status_code();
-                        if response_code < 300 {
-                            let bytes = response_data.bytes();
-                            log::debug!(
-                                "Writing {} bytes for range {}-{} for object {}",
-                                bytes.len(),
-                                start,
-                                end,
-                                self.object.pk
-                            );
-                            if let Err(e) = writer.write_all(bytes).await {
-                                log::error!("Failed to write file bytes: {}", e);
-                                return;
-                            }
-                        } else {
-                            log::error!(
-                                "Non success status code sending file bytes {}",
-                                response_code
-                            );
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Error reading object range: {}", e);
-                        return;
-                    }
+            let start = part.start;
+            let end = part.end;
+            match get_object_range_stream(&self.bucket, &self.object.object_key, start, end, writer)
+                .await
+            {
+                Ok(status_code) if status_code < 300 => {}
+                Ok(status_code) => {
+                    log::error!(
+                        "Non success response code {} reading object pk {}",
+                        status_code,
+                        self.object.pk
+                    );
+                    return;
+                }
+                Err(e) => {
+                    log::error!(
+                        "Error occurred reading range {}-{} for object pk {}: {}",
+                        start,
+                        end,
+                        self.object.pk,
+                        e
+                    );
+                    return;
                 }
             }
         }
@@ -603,25 +597,6 @@ pub fn create_bucket(
                 b.with_path_style()
             }
         })
-}
-
-/// To avoid loading large ranges into memory, ranges are split into chunks.
-fn split_range(start: u64, end: u64) -> Vec<(u64, u64)> {
-    let mut ranges = Vec::new();
-    let mut curr_start = start;
-
-    loop {
-        let curr_end = curr_start + MAX_RANGE;
-        if curr_end > end {
-            ranges.push((curr_start, end));
-            break;
-        }
-
-        ranges.push((curr_start, curr_end));
-        curr_start = curr_end + 1;
-    }
-
-    ranges
 }
 
 fn parse_range(range: &str, size: u64) -> Result<Vec<(u64, u64)>, Error> {
