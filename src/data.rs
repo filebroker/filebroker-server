@@ -1,8 +1,9 @@
 use std::{ffi::OsStr, path::Path, task::Poll};
 
 use async_trait::async_trait;
-use bytes::BytesMut;
+use bytes::Bytes;
 use diesel::QueryDsl;
+use futures::StreamExt;
 use futures::{ready, stream::IntoAsyncRead, Stream, TryStream, TryStreamExt};
 use mime::Mime;
 use mpart_async::server::MultipartStream;
@@ -12,7 +13,6 @@ use ring::digest;
 use s3::error::S3Error;
 use s3::request_trait::Request;
 use s3::{command::Command, creds::Credentials, request::Reqwest, Bucket, Region};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use warp::{
     hyper::{self, Response},
     Buf, Rejection, Reply,
@@ -219,11 +219,9 @@ where
     }
 }
 
-const BUFFER_SIZE: usize = 1 << 16;
-
 #[async_trait]
 trait ObjectWriter {
-    async fn write_bytes(&self, writer: &mut DuplexStream);
+    async fn write_bytes(&self, sender: hyper::body::Sender);
 }
 
 struct FullObjectWriter {
@@ -233,43 +231,36 @@ struct FullObjectWriter {
 
 #[async_trait]
 impl ObjectWriter for FullObjectWriter {
-    async fn write_bytes(&self, writer: &mut DuplexStream) {
-        let res = self
-            .bucket
-            .get_object_stream(&self.object.object_key, writer)
-            .await;
+    async fn write_bytes(&self, mut sender: hyper::body::Sender) {
+        let res = get_object_stream(&self.bucket, &self.object.object_key, &mut sender).await;
 
         match res {
             Ok(response_code) if response_code < 300 => {}
             Ok(response_code) => {
+                sender.abort();
                 log::error!(
                     "Non success response code {} reading object pk {}",
                     response_code,
                     self.object.pk
                 );
             }
+            Err(Error::HyperError(msg)) => {
+                sender.abort();
+                // sending probably failed due to broken pipe / connection disconnect, log as info
+                log::info!(
+                    "Error occurred sending bytes to body for object pk {}: {}",
+                    self.object.pk,
+                    &msg
+                );
+            }
             Err(e) => {
+                sender.abort();
                 log::error!("Error occurred reading object pk {}: {}", self.object.pk, e);
             }
         }
 
         log::debug!("Writer exit for object {}", self.object.pk);
     }
-}
-
-async fn get_object_range_stream(
-    bucket: &Bucket,
-    path: &str,
-    start: u64,
-    end: u64,
-    writer: &mut DuplexStream,
-) -> Result<u16, S3Error> {
-    let command = Command::GetObjectRange {
-        start,
-        end: Some(end),
-    };
-    let request = Reqwest::new(bucket, path, command);
-    request.response_data_to_writer(writer).await
 }
 
 struct ObjectRangeWriter {
@@ -281,23 +272,40 @@ struct ObjectRangeWriter {
 
 #[async_trait]
 impl ObjectWriter for ObjectRangeWriter {
-    async fn write_bytes(&self, writer: &mut DuplexStream) {
+    async fn write_bytes(&self, mut sender: hyper::body::Sender) {
         let start = self.start;
         let end = self.end;
 
-        match get_object_range_stream(&self.bucket, &self.object.object_key, start, end, writer)
-            .await
-            .map_err(Error::from)
+        match get_object_range_stream(
+            &self.bucket,
+            &self.object.object_key,
+            start,
+            end,
+            &mut sender,
+        )
+        .await
+        .map_err(Error::from)
         {
             Ok(status_code) if status_code < 300 => {}
             Ok(status_code) => {
+                sender.abort();
                 log::error!(
                     "Non success response code {} reading object pk {}",
                     status_code,
                     self.object.pk
                 );
             }
+            Err(Error::HyperError(msg)) => {
+                sender.abort();
+                // sending probably failed due to broken pipe / connection disconnect, log as info
+                log::info!(
+                    "Error occurred sending bytes to body for object pk {}: {}",
+                    self.object.pk,
+                    &msg
+                );
+            }
             Err(e) => {
+                sender.abort();
                 log::error!(
                     "Error occurred reading range {}-{} for object pk {}: {}",
                     start,
@@ -344,20 +352,31 @@ impl MultipartByteRange {
 
 #[async_trait]
 impl ObjectWriter for MultipartObjectWriter {
-    async fn write_bytes(&self, writer: &mut DuplexStream) {
+    async fn write_bytes(&self, mut sender: hyper::body::Sender) {
         for part in self.parts.iter() {
-            if let Err(e) = writer.write_all(part.fields.as_bytes()).await {
-                log::error!("Error writing part fields: {}", e);
+            if let Err(e) = sender
+                .send_data(Bytes::copy_from_slice(part.fields.as_bytes()))
+                .await
+            {
+                log::info!("Error writing part fields: {}", e);
+                sender.abort();
                 return;
             }
 
             let start = part.start;
             let end = part.end;
-            match get_object_range_stream(&self.bucket, &self.object.object_key, start, end, writer)
-                .await
+            match get_object_range_stream(
+                &self.bucket,
+                &self.object.object_key,
+                start,
+                end,
+                &mut sender,
+            )
+            .await
             {
                 Ok(status_code) if status_code < 300 => {}
                 Ok(status_code) => {
+                    sender.abort();
                     log::error!(
                         "Non success response code {} reading object pk {}",
                         status_code,
@@ -365,7 +384,18 @@ impl ObjectWriter for MultipartObjectWriter {
                     );
                     return;
                 }
+                Err(Error::HyperError(msg)) => {
+                    sender.abort();
+                    // sending probably failed due to broken pipe / connection disconnect, log as info
+                    log::info!(
+                        "Error occurred sending bytes to body for object pk {}: {}",
+                        self.object.pk,
+                        &msg
+                    );
+                    return;
+                }
                 Err(e) => {
+                    sender.abort();
                     log::error!(
                         "Error occurred reading range {}-{} for object pk {}: {}",
                         start,
@@ -378,8 +408,13 @@ impl ObjectWriter for MultipartObjectWriter {
             }
         }
 
-        if let Err(e) = writer.write_all(self.end_delimiter.as_bytes()).await {
-            log::error!("Error writing end delimiter: {}", e);
+        if let Err(e) = sender
+            .send_data(Bytes::copy_from_slice(self.end_delimiter.as_bytes()))
+            .await
+        {
+            log::info!("Error writing end delimiter: {}", e);
+            sender.abort();
+            return;
         }
 
         log::debug!("Writer exit for object {}", self.object.pk);
@@ -402,120 +437,14 @@ pub async fn get_object_handler(
         broker.is_aws_region,
     )?;
 
-    let (mut sender, body) = hyper::Body::channel();
-    let (mut writer, mut reader) = tokio::io::duplex(BUFFER_SIZE);
+    let (sender, body) = hyper::Body::channel();
 
-    let response_status;
-    let content_type;
-    let content_length;
-    let content_range;
-
-    if let Some(range) = range {
-        let parsed_range = parse_range(&range, object.size_bytes as u64)?;
-        // handle single range
-        if parsed_range.len() == 1 {
-            let parsed_range = parsed_range[0];
-            let start = parsed_range.0;
-            let end = parsed_range.1;
-
-            response_status = 206;
-            content_type = object.mime_type.clone();
-            content_range = Some(format!("bytes {}-{}/{}", start, end, object.size_bytes));
-
-            let object_writer = ObjectRangeWriter {
-                bucket,
-                object,
-                start,
-                end,
-            };
-
-            content_length = end - start + 1;
-
-            tokio::spawn(async move {
-                object_writer.write_bytes(&mut writer).await;
-            });
-        } else {
-            // handle multipart byteranges
-            check_range_overlap(&parsed_range)?;
-            let mut rng = thread_rng();
-            let boundary: String = (&mut rng)
-                .sample_iter(Alphanumeric)
-                .take(60)
-                .map(char::from)
-                .collect();
-
-            response_status = 206;
-            content_type = format!("multipart/byteranges; boundary={}", &boundary);
-            content_range = None;
-
-            let parts = parsed_range
-                .iter()
-                .map(|range| {
-                    MultipartByteRange::new(
-                        range.0,
-                        range.1,
-                        object.size_bytes as u64,
-                        &object.mime_type,
-                        &boundary,
-                    )
-                })
-                .collect::<Vec<_>>();
-
-            let end_delimiter = format!("\r\n--{}--\r\n", &boundary);
-
-            content_length = parts
-                .iter()
-                .map(MultipartByteRange::content_length)
-                .sum::<u64>()
-                + (end_delimiter.len() as u64);
-
-            let object_writer = MultipartObjectWriter {
-                parts,
-                bucket,
-                object,
-                end_delimiter,
-            };
-
-            tokio::spawn(async move {
-                object_writer.write_bytes(&mut writer).await;
-            });
-        }
-    } else {
-        response_status = 200;
-        content_type = object.mime_type.clone();
-        content_length = object.size_bytes as u64;
-        content_range = None;
-
-        let object_writer = FullObjectWriter { bucket, object };
-
-        tokio::spawn(async move {
-            object_writer.write_bytes(&mut writer).await;
-        });
-    };
-
-    tokio::spawn(async move {
-        let mut buf = BytesMut::with_capacity(BUFFER_SIZE);
-        loop {
-            match reader.read_buf(&mut buf).await {
-                Ok(n) if n > 0 => {
-                    let bytes = buf.copy_to_bytes(n);
-                    log::debug!("sending {} bytes to body", bytes.len());
-                    if let Err(e) = sender.send_data(bytes).await {
-                        log::error!("Error sending bytes to body: {}", e);
-                        sender.abort();
-                        break;
-                    }
-                }
-                Ok(_) => break,
-                Err(e) => {
-                    log::error!("Error reading file to buf: {}", e);
-                    sender.abort();
-                    break;
-                }
-            }
-        }
-        log::debug!("Reader exit for object {}", s3_object_key);
-    });
+    let GetObjectResponse {
+        response_status,
+        content_type,
+        content_length,
+        content_range,
+    } = get_object_response(range, object, bucket, Some(sender))?;
 
     let mut response_builder = Response::builder()
         .header("Content-Type", &content_type)
@@ -536,6 +465,53 @@ pub async fn get_object_handler(
     Ok(response_builder
         .status(response_status)
         .body(body)
+        .map_err(|_| Error::SerialisationError)?)
+}
+
+pub async fn get_object_head_handler(
+    s3_object_key: i32,
+    range: Option<String>,
+) -> Result<impl Reply, Rejection> {
+    let connection = acquire_db_connection()?;
+    let (object, broker) = load_object(s3_object_key, &connection)?;
+    drop(connection);
+
+    let bucket = create_bucket(
+        &broker.bucket,
+        &broker.endpoint,
+        &broker.access_key,
+        &broker.secret_key,
+        broker.is_aws_region,
+    )?;
+
+    let (_, response_code) = bucket
+        .head_object(&object.object_key)
+        .await
+        .map_err(Error::from)?;
+
+    if response_code >= 300 {
+        return Err(warp::reject::custom(Error::S3ResponseError(response_code)));
+    }
+
+    let GetObjectResponse {
+        response_status,
+        content_type,
+        content_length,
+        content_range,
+    } = get_object_response(range, object, bucket, None)?;
+
+    let mut response_builder = Response::builder()
+        .header("Content-Type", &content_type)
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", content_length);
+
+    if let Some(ref content_range) = content_range {
+        response_builder = response_builder.header("Content-Range", content_range);
+    }
+
+    Ok(response_builder
+        .status(response_status)
+        .body(hyper::Body::empty())
         .map_err(|_| Error::SerialisationError)?)
 }
 
@@ -597,6 +573,161 @@ pub fn create_bucket(
                 b.with_path_style()
             }
         })
+}
+
+struct GetObjectResponse {
+    response_status: u16,
+    content_type: String,
+    content_length: u64,
+    content_range: Option<String>,
+}
+
+fn get_object_response(
+    range: Option<String>,
+    object: S3Object,
+    bucket: Bucket,
+    sender: Option<hyper::body::Sender>,
+) -> Result<GetObjectResponse, Error> {
+    let response_status;
+    let content_type;
+    let content_length;
+    let content_range;
+
+    if let Some(range) = range {
+        let parsed_range = parse_range(&range, object.size_bytes as u64)?;
+        // handle single range
+        if parsed_range.len() == 1 {
+            let parsed_range = parsed_range[0];
+            let start = parsed_range.0;
+            let end = parsed_range.1;
+
+            response_status = 206;
+            content_type = object.mime_type.clone();
+            content_range = Some(format!("bytes {}-{}/{}", start, end, object.size_bytes));
+            content_length = end - start + 1;
+
+            if let Some(sender) = sender {
+                let object_writer = ObjectRangeWriter {
+                    bucket,
+                    object,
+                    start,
+                    end,
+                };
+
+                tokio::spawn(async move {
+                    object_writer.write_bytes(sender).await;
+                });
+            }
+        } else {
+            // handle multipart byteranges
+            check_range_overlap(&parsed_range)?;
+            let mut rng = thread_rng();
+            let boundary: String = (&mut rng)
+                .sample_iter(Alphanumeric)
+                .take(60)
+                .map(char::from)
+                .collect();
+
+            response_status = 206;
+            content_type = format!("multipart/byteranges; boundary={}", &boundary);
+            content_range = None;
+
+            let parts = parsed_range
+                .iter()
+                .map(|range| {
+                    MultipartByteRange::new(
+                        range.0,
+                        range.1,
+                        object.size_bytes as u64,
+                        &object.mime_type,
+                        &boundary,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let end_delimiter = format!("\r\n--{}--\r\n", &boundary);
+
+            content_length = parts
+                .iter()
+                .map(MultipartByteRange::content_length)
+                .sum::<u64>()
+                + (end_delimiter.len() as u64);
+
+            if let Some(sender) = sender {
+                let object_writer = MultipartObjectWriter {
+                    parts,
+                    bucket,
+                    object,
+                    end_delimiter,
+                };
+
+                tokio::spawn(async move {
+                    object_writer.write_bytes(sender).await;
+                });
+            }
+        }
+    } else {
+        response_status = 200;
+        content_type = object.mime_type.clone();
+        content_length = object.size_bytes as u64;
+        content_range = None;
+
+        if let Some(sender) = sender {
+            let object_writer = FullObjectWriter { bucket, object };
+
+            tokio::spawn(async move {
+                object_writer.write_bytes(sender).await;
+            });
+        }
+    };
+
+    Ok(GetObjectResponse {
+        response_status,
+        content_type,
+        content_length,
+        content_range,
+    })
+}
+
+async fn get_object_range_stream(
+    bucket: &Bucket,
+    path: &str,
+    start: u64,
+    end: u64,
+    sender: &mut hyper::body::Sender,
+) -> Result<u16, Error> {
+    let command = Command::GetObjectRange {
+        start,
+        end: Some(end),
+    };
+    get_command_stream(command, bucket, path, sender).await
+}
+
+async fn get_object_stream(
+    bucket: &Bucket,
+    path: &str,
+    sender: &mut hyper::body::Sender,
+) -> Result<u16, Error> {
+    let command = Command::GetObject;
+    get_command_stream(command, bucket, path, sender).await
+}
+
+async fn get_command_stream(
+    command: s3::command::Command<'_>,
+    bucket: &Bucket,
+    path: &str,
+    sender: &mut hyper::body::Sender,
+) -> Result<u16, Error> {
+    let request = Reqwest::new(bucket, path, command);
+    let response = request.response().await?;
+    let status = response.status();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        sender.send_data(chunk.map_err(S3Error::from)?).await?;
+    }
+
+    Ok(status.as_u16())
 }
 
 fn parse_range(range: &str, size: u64) -> Result<Vec<(u64, u64)>, Error> {
