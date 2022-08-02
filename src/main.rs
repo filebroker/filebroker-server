@@ -240,7 +240,7 @@ fn setup_logger() {
         .level(logging_level)
         .level_for("filebroker::api", logging_level)
         .chain(std::io::stdout())
-        .chain(fern::DateBased::new("logs/", "logs_%Y-%W.log"))
+        .chain(fern::DateBased::new("logs/", "logs_%Y-%m-%d.log"))
         .apply()
         .expect("Failed to set up logging");
 }
