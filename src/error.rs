@@ -57,6 +57,8 @@ pub enum Error {
     S3ResponseErrorMsg(u16, String),
     #[error("The provided byte range is invalid: {0}")]
     IllegalRangeError(String),
+    #[error("Error occurred in hyper: {0}")]
+    HyperError(String),
 }
 
 impl Reject for Error {}
@@ -73,6 +75,12 @@ impl From<s3::error::S3Error> for Error {
             s3::error::S3Error::Http(code, msg) => Error::S3ResponseErrorMsg(code, msg),
             _ => Error::S3Error(e.to_string()),
         }
+    }
+}
+
+impl From<warp::hyper::Error> for Error {
+    fn from(e: warp::hyper::Error) -> Self {
+        Error::HyperError(e.to_string())
     }
 }
 
@@ -131,7 +139,8 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             | Error::JwtCreationError
             | Error::EncryptionError
             | Error::SerialisationError
-            | Error::S3Error(_) => {
+            | Error::S3Error(_)
+            | Error::HyperError(_) => {
                 log::error!("Encountered internal server error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None)
             }

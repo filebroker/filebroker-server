@@ -182,6 +182,12 @@ async fn setup_tokio_runtime() {
         .and(warp::header::optional::<String>("Range"))
         .and_then(data::get_object_handler);
 
+    let get_object_head_route = warp::path("get-object")
+        .and(warp::head())
+        .and(warp::path::param())
+        .and(warp::header::optional::<String>("Range"))
+        .and_then(data::get_object_head_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(try_refresh_login_route)
@@ -192,7 +198,8 @@ async fn setup_tokio_runtime() {
         .or(upsert_tag_route)
         .or(search_route)
         .or(upload_route)
-        .or(get_object_route);
+        .or(get_object_route)
+        .or(get_object_head_route);
 
     let filter = routes
         .recover(error::handle_rejection)
