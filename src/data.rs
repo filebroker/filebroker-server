@@ -244,6 +244,15 @@ impl ObjectWriter for FullObjectWriter {
                     self.object.pk
                 );
             }
+            Err(Error::HyperError(msg)) => {
+                sender.abort();
+                // sending probably failed due to broken pipe / connection disconnect, log as info
+                log::info!(
+                    "Error occurred sending bytes to body for object pk {}: {}",
+                    self.object.pk,
+                    &msg
+                );
+            }
             Err(e) => {
                 sender.abort();
                 log::error!("Error occurred reading object pk {}: {}", self.object.pk, e);
@@ -284,6 +293,15 @@ impl ObjectWriter for ObjectRangeWriter {
                     "Non success response code {} reading object pk {}",
                     status_code,
                     self.object.pk
+                );
+            }
+            Err(Error::HyperError(msg)) => {
+                sender.abort();
+                // sending probably failed due to broken pipe / connection disconnect, log as info
+                log::info!(
+                    "Error occurred sending bytes to body for object pk {}: {}",
+                    self.object.pk,
+                    &msg
                 );
             }
             Err(e) => {
@@ -340,7 +358,7 @@ impl ObjectWriter for MultipartObjectWriter {
                 .send_data(Bytes::copy_from_slice(part.fields.as_bytes()))
                 .await
             {
-                log::error!("Error writing part fields: {}", e);
+                log::info!("Error writing part fields: {}", e);
                 sender.abort();
                 return;
             }
@@ -366,6 +384,16 @@ impl ObjectWriter for MultipartObjectWriter {
                     );
                     return;
                 }
+                Err(Error::HyperError(msg)) => {
+                    sender.abort();
+                    // sending probably failed due to broken pipe / connection disconnect, log as info
+                    log::info!(
+                        "Error occurred sending bytes to body for object pk {}: {}",
+                        self.object.pk,
+                        &msg
+                    );
+                    return;
+                }
                 Err(e) => {
                     sender.abort();
                     log::error!(
@@ -384,7 +412,7 @@ impl ObjectWriter for MultipartObjectWriter {
             .send_data(Bytes::copy_from_slice(self.end_delimiter.as_bytes()))
             .await
         {
-            log::error!("Error writing end delimiter: {}", e);
+            log::info!("Error writing end delimiter: {}", e);
             sender.abort();
             return;
         }
@@ -696,7 +724,6 @@ async fn get_command_stream(
     let mut stream = response.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
-        println!("test");
         sender.send_data(chunk.map_err(S3Error::from)?).await?;
     }
 
