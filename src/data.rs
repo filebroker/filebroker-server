@@ -22,7 +22,7 @@ use crate::{
     acquire_db_connection,
     diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension, RunQueryDsl},
     error::Error,
-    model::{Broker, NewS3Object, S3Object, User},
+    model::{Broker, S3Object, User},
     schema::{
         broker,
         s3_object::{self},
@@ -132,7 +132,6 @@ where
                     .eq(&hash)
                     .and(s3_object::fk_broker.eq(broker.pk)),
             )
-            .order(s3_object::pk.desc())
             .limit(1)
             .get_result::<S3Object>(&connection)
             .optional()
@@ -171,7 +170,7 @@ where
     }
 
     let s3_object = diesel::insert_into(s3_object::table)
-        .values(&NewS3Object {
+        .values(&S3Object {
             object_key,
             sha256_hash: Some(hash),
             size_bytes: reader.file_size as i64,
@@ -239,27 +238,31 @@ impl ObjectWriter for FullObjectWriter {
             Ok(response_code) => {
                 sender.abort();
                 log::error!(
-                    "Non success response code {} reading object pk {}",
+                    "Non success response code {} reading object {}",
                     response_code,
-                    self.object.pk
+                    &self.object.object_key
                 );
             }
             Err(Error::HyperError(msg)) => {
                 sender.abort();
                 // sending probably failed due to broken pipe / connection disconnect, log as info
                 log::info!(
-                    "Error occurred sending bytes to body for object pk {}: {}",
-                    self.object.pk,
+                    "Error occurred sending bytes to body for object {}: {}",
+                    &self.object.object_key,
                     &msg
                 );
             }
             Err(e) => {
                 sender.abort();
-                log::error!("Error occurred reading object pk {}: {}", self.object.pk, e);
+                log::error!(
+                    "Error occurred reading object {}: {}",
+                    &self.object.object_key,
+                    e
+                );
             }
         }
 
-        log::debug!("Writer exit for object {}", self.object.pk);
+        log::debug!("Writer exit for object {}", &self.object.object_key);
     }
 }
 
@@ -290,33 +293,33 @@ impl ObjectWriter for ObjectRangeWriter {
             Ok(status_code) => {
                 sender.abort();
                 log::error!(
-                    "Non success response code {} reading object pk {}",
+                    "Non success response code {} reading object {}",
                     status_code,
-                    self.object.pk
+                    &self.object.object_key
                 );
             }
             Err(Error::HyperError(msg)) => {
                 sender.abort();
                 // sending probably failed due to broken pipe / connection disconnect, log as info
                 log::info!(
-                    "Error occurred sending bytes to body for object pk {}: {}",
-                    self.object.pk,
+                    "Error occurred sending bytes to body for object {}: {}",
+                    &self.object.object_key,
                     &msg
                 );
             }
             Err(e) => {
                 sender.abort();
                 log::error!(
-                    "Error occurred reading range {}-{} for object pk {}: {}",
+                    "Error occurred reading range {}-{} for object {}: {}",
                     start,
                     end,
-                    self.object.pk,
+                    &self.object.object_key,
                     e
                 );
             }
         }
 
-        log::debug!("Writer exit for object {}", self.object.pk);
+        log::debug!("Writer exit for object {}", &self.object.object_key);
     }
 }
 
@@ -378,9 +381,9 @@ impl ObjectWriter for MultipartObjectWriter {
                 Ok(status_code) => {
                     sender.abort();
                     log::error!(
-                        "Non success response code {} reading object pk {}",
+                        "Non success response code {} reading object {}",
                         status_code,
-                        self.object.pk
+                        &self.object.object_key
                     );
                     return;
                 }
@@ -388,8 +391,8 @@ impl ObjectWriter for MultipartObjectWriter {
                     sender.abort();
                     // sending probably failed due to broken pipe / connection disconnect, log as info
                     log::info!(
-                        "Error occurred sending bytes to body for object pk {}: {}",
-                        self.object.pk,
+                        "Error occurred sending bytes to body for object {}: {}",
+                        &self.object.object_key,
                         &msg
                     );
                     return;
@@ -397,10 +400,10 @@ impl ObjectWriter for MultipartObjectWriter {
                 Err(e) => {
                     sender.abort();
                     log::error!(
-                        "Error occurred reading range {}-{} for object pk {}: {}",
+                        "Error occurred reading range {}-{} for object {}: {}",
                         start,
                         end,
-                        self.object.pk,
+                        &self.object.object_key,
                         e
                     );
                     return;
@@ -417,16 +420,16 @@ impl ObjectWriter for MultipartObjectWriter {
             return;
         }
 
-        log::debug!("Writer exit for object {}", self.object.pk);
+        log::debug!("Writer exit for object {}", &self.object.object_key);
     }
 }
 
 pub async fn get_object_handler(
-    s3_object_key: i32,
+    object_key: String,
     range: Option<String>,
 ) -> Result<impl Reply, Rejection> {
     let connection = acquire_db_connection()?;
-    let (object, broker) = load_object(s3_object_key, &connection)?;
+    let (object, broker) = load_object(&object_key, &connection)?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -469,11 +472,11 @@ pub async fn get_object_handler(
 }
 
 pub async fn get_object_head_handler(
-    s3_object_key: i32,
+    object_key: String,
     range: Option<String>,
 ) -> Result<impl Reply, Rejection> {
     let connection = acquire_db_connection()?;
-    let (object, broker) = load_object(s3_object_key, &connection)?;
+    let (object, broker) = load_object(&object_key, &connection)?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -524,16 +527,16 @@ pub fn load_broker(broker_pk: i32, connection: &DbConnection) -> Result<Broker, 
 }
 
 pub fn load_object(
-    s3_object_key: i32,
+    object_key: &str,
     connection: &DbConnection,
 ) -> Result<(S3Object, Broker), Error> {
     s3_object::table
         .inner_join(broker::table)
-        .filter(s3_object::pk.eq(s3_object_key))
+        .filter(s3_object::object_key.eq(object_key))
         .get_result::<(S3Object, Broker)>(connection)
         .optional()
         .map_err(Error::from)?
-        .ok_or(Error::InaccessibleObjectError(s3_object_key))
+        .ok_or_else(|| Error::InaccessibleObjectError(String::from(object_key)))
 }
 
 pub fn create_bucket(

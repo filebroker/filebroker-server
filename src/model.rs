@@ -61,7 +61,7 @@ pub struct Post {
     pub creation_timestamp: DateTime<Utc>,
     pub fk_create_user: i32,
     pub score: i32,
-    pub fk_s3_object: Option<i32>,
+    pub s3_object: Option<String>,
 }
 
 #[derive(Insertable)]
@@ -73,7 +73,7 @@ pub struct NewPost {
     pub creation_timestamp: DateTime<Utc>,
     pub fk_create_user: i32,
     pub score: i32,
-    pub fk_s3_object: Option<i32>,
+    pub s3_object: Option<String>,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
@@ -158,24 +158,12 @@ pub struct NewBroker {
     pub fk_owner: i32,
 }
 
-#[derive(Associations, Clone, Identifiable, Queryable, Serialize)]
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
 #[belongs_to(Broker, foreign_key = "fk_broker")]
 #[belongs_to(User, foreign_key = "fk_uploader")]
 #[table_name = "s3_object"]
-#[primary_key(pk)]
+#[primary_key(object_key)]
 pub struct S3Object {
-    pub pk: i32,
-    pub object_key: String,
-    pub sha256_hash: Option<String>,
-    pub size_bytes: i64,
-    pub mime_type: String,
-    pub fk_broker: i32,
-    pub fk_uploader: i32,
-}
-
-#[derive(Insertable)]
-#[table_name = "s3_object"]
-pub struct NewS3Object {
     pub object_key: String,
     pub sha256_hash: Option<String>,
     pub size_bytes: i64,

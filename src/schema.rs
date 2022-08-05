@@ -13,6 +13,27 @@ table! {
 }
 
 table! {
+    object_upload (object_key) {
+        object_key -> Varchar,
+        status -> Varchar,
+        bytes_written -> Int8,
+        total_bytes -> Int8,
+        current_rate -> Nullable<Int8>,
+        estimated_millis_remaining -> Nullable<Int8>,
+        completed_object -> Nullable<Varchar>,
+        mime_type -> Varchar,
+        fk_broker -> Int4,
+        fk_uploader -> Int4,
+    }
+}
+
+table! {
+    object_upload_status (unique_id) {
+        unique_id -> Varchar,
+    }
+}
+
+table! {
     post (pk) {
         pk -> Int4,
         data_url -> Varchar,
@@ -21,7 +42,7 @@ table! {
         creation_timestamp -> Timestamptz,
         fk_create_user -> Int4,
         score -> Int4,
-        fk_s3_object -> Nullable<Int4>,
+        s3_object -> Nullable<Varchar>,
     }
 }
 
@@ -54,8 +75,7 @@ table! {
 }
 
 table! {
-    s3_object (pk) {
-        pk -> Int4,
+    s3_object (object_key) {
         object_key -> Varchar,
         sha256_hash -> Nullable<Bpchar>,
         size_bytes -> Int8,
@@ -90,8 +110,12 @@ table! {
 }
 
 joinable!(broker -> registered_user (fk_owner));
+joinable!(object_upload -> broker (fk_broker));
+joinable!(object_upload -> object_upload_status (status));
+joinable!(object_upload -> registered_user (fk_uploader));
+joinable!(object_upload -> s3_object (completed_object));
 joinable!(post -> registered_user (fk_create_user));
-joinable!(post -> s3_object (fk_s3_object));
+joinable!(post -> s3_object (s3_object));
 joinable!(post_tag -> post (fk_post));
 joinable!(post_tag -> tag (fk_tag));
 joinable!(refresh_token -> registered_user (fk_registered_user));
@@ -100,6 +124,8 @@ joinable!(s3_object -> registered_user (fk_uploader));
 
 allow_tables_to_appear_in_same_query!(
     broker,
+    object_upload,
+    object_upload_status,
     post,
     post_tag,
     refresh_token,

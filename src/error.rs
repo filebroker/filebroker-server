@@ -43,8 +43,8 @@ pub enum Error {
     IllegalQueryInputError(String),
     #[error("Cannot access broker with provided pk {0}")]
     InaccessibleBrokerError(i32),
-    #[error("Cannot access object with provided pk {0}")]
-    InaccessibleObjectError(i32),
+    #[error("Cannot access object with provided key {0}")]
+    InaccessibleObjectError(String),
     #[error("The provided S3 bucket is invalid. Error '{0}'.")]
     InvalidBucketError(String),
     #[error("The file upload form is invalid. {0}.")]
