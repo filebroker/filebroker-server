@@ -187,7 +187,13 @@ where
     }
 
     let thumbnail =
-        generate_thumbnail(bucket, &object_key, file_id, &content_type, broker, user).await?;
+        match generate_thumbnail(bucket, &object_key, file_id, &content_type, broker, user).await {
+            Ok(thumbnail) => thumbnail,
+            Err(e) => {
+                log::error!("Failed to generate thumbnail: {}", e);
+                None
+            }
+        };
 
     let s3_object = diesel::insert_into(s3_object::table)
         .values(&S3Object {
@@ -342,6 +348,10 @@ async fn generate_thumbnail(
 
         Ok(Some(s3_object))
     } else {
+        log::debug!(
+            "Not creating thumbnail for unsupported content type '{}'",
+            content_type
+        );
         Ok(None)
     }
 }
