@@ -62,6 +62,7 @@ pub struct Post {
     pub fk_create_user: i32,
     pub score: i32,
     pub s3_object: Option<String>,
+    pub thumbnail_url: Option<String>,
 }
 
 #[derive(Insertable)]
@@ -74,6 +75,7 @@ pub struct NewPost {
     pub fk_create_user: i32,
     pub score: i32,
     pub s3_object: Option<String>,
+    pub thumbnail_url: Option<String>,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
@@ -161,6 +163,7 @@ pub struct NewBroker {
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
 #[belongs_to(Broker, foreign_key = "fk_broker")]
 #[belongs_to(User, foreign_key = "fk_uploader")]
+#[belongs_to(S3Object, foreign_key = "thumbnail_object_key")]
 #[table_name = "s3_object"]
 #[primary_key(object_key)]
 pub struct S3Object {
@@ -170,4 +173,5 @@ pub struct S3Object {
     pub mime_type: String,
     pub fk_broker: i32,
     pub fk_uploader: i32,
+    pub thumbnail_object_key: Option<String>,
 }

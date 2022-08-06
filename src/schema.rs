@@ -43,6 +43,7 @@ table! {
         fk_create_user -> Int4,
         score -> Int4,
         s3_object -> Nullable<Varchar>,
+        thumbnail_url -> Nullable<Varchar>,
     }
 }
 
@@ -82,6 +83,7 @@ table! {
         mime_type -> Varchar,
         fk_broker -> Int4,
         fk_uploader -> Int4,
+        thumbnail_object_key -> Nullable<Varchar>,
     }
 }
 

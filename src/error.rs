@@ -59,6 +59,8 @@ pub enum Error {
     IllegalRangeError(String),
     #[error("Error occurred in hyper: {0}")]
     HyperError(String),
+    #[error("Error in ffmpeg process: {0}")]
+    FfmpegProcessError(String),
 }
 
 impl Reject for Error {}
@@ -80,6 +82,12 @@ impl From<s3::error::S3Error> for Error {
 
 impl From<warp::hyper::Error> for Error {
     fn from(e: warp::hyper::Error) -> Self {
+        Error::HyperError(e.to_string())
+    }
+}
+
+impl From<warp::hyper::header::ToStrError> for Error {
+    fn from(e: warp::hyper::header::ToStrError) -> Self {
         Error::HyperError(e.to_string())
     }
 }
@@ -140,7 +148,8 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             | Error::EncryptionError
             | Error::SerialisationError
             | Error::S3Error(_)
-            | Error::HyperError(_) => {
+            | Error::HyperError(_)
+            | Error::FfmpegProcessError(_) => {
                 log::error!("Encountered internal server error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None)
             }
