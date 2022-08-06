@@ -145,6 +145,7 @@ pub struct Broker {
     pub is_aws_region: bool,
     pub remove_duplicate_files: bool,
     pub fk_owner: i32,
+    pub creation_timestamp: DateTime<Utc>,
 }
 
 #[derive(Insertable)]
@@ -158,6 +159,7 @@ pub struct NewBroker {
     pub is_aws_region: bool,
     pub remove_duplicate_files: bool,
     pub fk_owner: i32,
+    pub creation_timestamp: DateTime<Utc>,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -174,4 +176,5 @@ pub struct S3Object {
     pub fk_broker: i32,
     pub fk_uploader: i32,
     pub thumbnail_object_key: Option<String>,
+    pub creation_timestamp: DateTime<Utc>,
 }

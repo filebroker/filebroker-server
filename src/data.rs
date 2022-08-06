@@ -2,6 +2,7 @@ use std::{ffi::OsStr, path::Path, task::Poll};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::Utc;
 use diesel::QueryDsl;
 use futures::io::BufReader;
 use futures::AsyncReadExt;
@@ -204,6 +205,7 @@ where
             fk_broker: broker.pk,
             fk_uploader: user.pk,
             thumbnail_object_key: thumbnail.map(|t| t.object_key),
+            creation_timestamp: Utc::now(),
         })
         .get_result::<S3Object>(&connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;
@@ -342,6 +344,7 @@ async fn generate_thumbnail(
                 fk_broker: broker.pk,
                 fk_uploader: user.pk,
                 thumbnail_object_key: None,
+                creation_timestamp: Utc::now(),
             })
             .get_result::<S3Object>(&connection)
             .map_err(|e| Error::QueryError(e.to_string()))?;

@@ -9,6 +9,7 @@ table! {
         is_aws_region -> Bool,
         remove_duplicate_files -> Bool,
         fk_owner -> Int4,
+        creation_timestamp -> Timestamptz,
     }
 }
 
@@ -84,6 +85,7 @@ table! {
         fk_broker -> Int4,
         fk_uploader -> Int4,
         thumbnail_object_key -> Nullable<Varchar>,
+        creation_timestamp -> Timestamptz,
     }
 }
 
