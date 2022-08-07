@@ -34,7 +34,7 @@ lazy_static! {
 #[derive(Deserialize, Validate)]
 pub struct CreatePostRequest {
     #[validate(url)]
-    pub data_url: String,
+    pub data_url: Option<String>,
     #[validate(url)]
     pub source_url: Option<String>,
     pub title: Option<String>,

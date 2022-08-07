@@ -11,7 +11,6 @@ use super::{
 pub enum Type {
     Any,
     Boolean,
-    #[allow(dead_code)] // keep for completion's sake
     Date,
     DateTime,
     Number,
@@ -39,6 +38,13 @@ lazy_static! {
             "score",
             Attribute {
                 selection_expression: String::from("post.score"),
+                return_type: Type::Number
+            }
+        ),
+        (
+            "uploader",
+            Attribute {
+                selection_expression: String::from("post.fk_create_user"),
                 return_type: Type::Number
             }
         )
@@ -133,7 +139,10 @@ lazy_static! {
                     parameter_type: ParameterType::Attribute(Type::Number)
                 }],
                 return_type: Type::Number,
-                accept_arguments
+                accept_arguments,
+                write_expression_fn: |visitor, args, _location, log| {
+                    write_post_aggregate_function_expr("AVG", visitor, args, log)
+                }
             }
         ),
         (
@@ -143,7 +152,10 @@ lazy_static! {
                     parameter_type: ParameterType::Attribute(Type::Number)
                 }],
                 return_type: Type::Number,
-                accept_arguments
+                accept_arguments,
+                write_expression_fn: |visitor, args, _location, log| {
+                    write_post_aggregate_function_expr("MAX", visitor, args, log)
+                }
             }
         ),
         (
@@ -153,7 +165,28 @@ lazy_static! {
                     parameter_type: ParameterType::Attribute(Type::Number)
                 }],
                 return_type: Type::Number,
-                accept_arguments
+                accept_arguments,
+                write_expression_fn: |visitor, args, _location, log| {
+                    write_post_aggregate_function_expr("MIX", visitor, args, log)
+                }
+            }
+        ),
+        (
+            "find_user",
+            Function {
+                params: vec![Parameter {
+                    parameter_type: ParameterType::Object(Type::String)
+                }],
+                return_type: Type::Number,
+                accept_arguments,
+                write_expression_fn: |visitor, args, location, log| write_subquery_function_expr(
+                    "registered_user",
+                    "user_name",
+                    visitor,
+                    args,
+                    location,
+                    log
+                )
             }
         )
     ]);
@@ -164,6 +197,8 @@ pub struct Function {
     pub params: Vec<Parameter>,
     pub return_type: Type,
     pub accept_arguments: fn(&[Parameter], &[Box<Node<dyn ExpressionNode>>], Location, &mut Log),
+    pub write_expression_fn:
+        fn(&mut QueryBuilderVisitor, &[Box<Node<dyn ExpressionNode>>], Location, &mut Log),
 }
 
 lazy_static! {
@@ -196,6 +231,55 @@ lazy_static! {
             }
         )
     ]);
+}
+
+fn write_subquery_function_expr(
+    table: &str,
+    column: &str,
+    visitor: &mut QueryBuilderVisitor,
+    args: &[Box<Node<dyn ExpressionNode>>],
+    location: Location,
+    log: &mut Log,
+) {
+    visitor.write_buff("(SELECT pk FROM ");
+    visitor.write_buff(table);
+    visitor.write_buff(" WHERE ");
+    visitor.write_buff(column);
+    visitor.write_buff(" = ");
+
+    if args.len() == 1 {
+        args[0].accept(visitor, log);
+    } else {
+        log.errors.push(Error {
+            location,
+            msg: format!("Expected 1 argument but got {}", args.len()),
+        });
+        visitor.write_buff("NULL");
+    }
+
+    visitor.write_buff(")");
+}
+
+fn write_post_aggregate_function_expr(
+    identifier: &str,
+    visitor: &mut QueryBuilderVisitor,
+    args: &[Box<Node<dyn ExpressionNode>>],
+    log: &mut Log,
+) {
+    visitor.write_buff("(SELECT ");
+    visitor.write_buff(identifier);
+    visitor.write_buff("(");
+
+    let argument_count = args.len();
+    for (i, argument) in args.iter().enumerate() {
+        argument.accept(visitor, log);
+
+        if i < argument_count - 1 {
+            visitor.write_buff(", ");
+        }
+    }
+
+    visitor.write_buff(") FROM post)");
 }
 
 #[allow(clippy::type_complexity)]
@@ -247,4 +331,44 @@ fn accept_sort_modifier_arguments(
             }
         }
     }
+}
+
+pub struct Variable {
+    pub return_type: Type,
+    pub get_expression_fn: fn(&HashMap<String, String>) -> String,
+}
+
+lazy_static! {
+    pub static ref VARIABLES: HashMap<&'static str, Variable> = HashMap::from([
+        (
+            "self",
+            Variable {
+                return_type: Type::Number,
+                get_expression_fn: |vars| vars
+                    .get("current_user_key")
+                    .map(String::clone)
+                    .unwrap_or_else(|| String::from("NULL"))
+            }
+        ),
+        (
+            "now",
+            Variable {
+                return_type: Type::DateTime,
+                get_expression_fn: |vars| vars
+                    .get("current_utc_timestamp")
+                    .map(|s| format!("'{}'", s))
+                    .unwrap_or_else(|| String::from("NULL"))
+            }
+        ),
+        (
+            "now_date",
+            Variable {
+                return_type: Type::Date,
+                get_expression_fn: |vars| vars
+                    .get("current_utc_date")
+                    .map(|s| format!("'{}'", s))
+                    .unwrap_or_else(|| String::from("NULL"))
+            }
+        )
+    ]);
 }

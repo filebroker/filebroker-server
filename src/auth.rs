@@ -60,7 +60,6 @@ struct Claims {
 }
 
 /// Warp filter for requests that optionally receive the logged in user from the auth header.
-#[allow(dead_code)] // keep for completion's sake and future usage
 pub fn with_user_optional(
 ) -> impl warp::Filter<Extract = (Option<User>,), Error = Rejection> + Clone {
     headers_cloned().and_then(get_user_from_auth_header)

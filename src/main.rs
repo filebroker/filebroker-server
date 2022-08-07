@@ -165,8 +165,15 @@ async fn setup_tokio_runtime() {
 
     let search_route = warp::path("search")
         .and(warp::get())
+        .and(auth::with_user_optional())
         .and(warp::query::<QueryParametersFilter>())
         .and_then(query::search_handler);
+
+    let get_post_route = warp::path("get-post")
+        .and(warp::get())
+        .and(auth::with_user_optional())
+        .and(warp::path::param())
+        .and_then(query::get_post_handler);
 
     let upload_route = warp::path("upload")
         .and(warp::post())
@@ -197,6 +204,7 @@ async fn setup_tokio_runtime() {
         .or(create_tags_route)
         .or(upsert_tag_route)
         .or(search_route)
+        .or(get_post_route)
         .or(upload_route)
         .or(get_object_route)
         .or(get_object_head_route);
@@ -210,6 +218,7 @@ async fn setup_tokio_runtime() {
         warp::cors()
             .allow_origin("http://localhost:3000")
             .allow_header("content-type")
+            .allow_header("Authorization")
             .allow_credentials(true)
             .allow_method(warp::http::Method::DELETE)
             .allow_method(warp::http::Method::GET)

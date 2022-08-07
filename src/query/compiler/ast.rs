@@ -109,9 +109,7 @@ impl Operator {
             | Self::LessEqual
             | Self::Equal
             | Self::Unequal
-                if (left == Type::String && (right == Type::Date || right == Type::DateTime))
-                    || (right == Type::String
-                        && (left == Type::Date || left == Type::DateTime)) =>
+                if type_is_date_or_string(left) && type_is_date_or_string(right) =>
             {
                 Some(Type::Boolean)
             }
@@ -126,6 +124,11 @@ impl Operator {
             _ => None,
         }
     }
+}
+
+#[inline]
+fn type_is_date_or_string(t: Type) -> bool {
+    t == Type::String || t == Type::Date || t == Type::DateTime
 }
 
 pub trait Visitor {
@@ -190,6 +193,13 @@ pub trait Visitor {
     fn visit_modifier_node(
         &mut self,
         modifier_node: &ModifierNode,
+        log: &mut Log,
+        location: Location,
+    );
+
+    fn visit_variable_node(
+        &mut self,
+        variable_node: &VariableNode,
         log: &mut Log,
         location: Location,
     );
@@ -388,6 +398,21 @@ impl Visitor for SemanticAnalysisVisitor {
             });
         }
     }
+
+    fn visit_variable_node(
+        &mut self,
+        variable_node: &VariableNode,
+        log: &mut Log,
+        location: Location,
+    ) {
+        let identifier: &str = &variable_node.identifier;
+        if !dict::VARIABLES.contains_key(identifier) {
+            log.errors.push(Error {
+                location,
+                msg: format!("No such variable '{}'", identifier),
+            });
+        }
+    }
 }
 
 pub struct QueryBuilderVisitor<'p> {
@@ -451,7 +476,7 @@ impl QueryBuilderVisitor<'_> {
         }
     }
 
-    fn write_buff(&mut self, s: &str) {
+    pub(crate) fn write_buff(&mut self, s: &str) {
         self.buffer
             .as_mut()
             .expect("No current querybuilder buffer")
@@ -579,23 +604,15 @@ impl Visitor for QueryBuilderVisitor<'_> {
         &mut self,
         function_call_node: &FunctionCallNode,
         log: &mut Log,
-        _location: Location,
+        location: Location,
     ) {
         let identifier: &str = &function_call_node.identifier;
-        self.write_buff("(SELECT ");
-        self.write_buff(identifier);
-        self.write_buff("(");
-
-        let argument_count = function_call_node.arguments.len();
-        for (i, argument) in function_call_node.arguments.iter().enumerate() {
-            argument.accept(self, log);
-
-            if i < argument_count - 1 {
-                self.write_buff(", ");
-            }
+        if let Some(function) = dict::FUNCTIONS.get(identifier) {
+            let arguments = &function_call_node.arguments;
+            (function.write_expression_fn)(self, arguments, location, log);
+        } else {
+            self.write_buff("NULL");
         }
-
-        self.write_buff(") FROM post)");
     }
 
     fn visit_modifier_node(
@@ -607,6 +624,22 @@ impl Visitor for QueryBuilderVisitor<'_> {
         let identifier: &str = &modifier_node.identifier;
         if let Some(modifier) = dict::MODIFIERS.get(identifier) {
             (modifier.visit_query_builder)(self, &modifier_node.arguments, log);
+        }
+    }
+
+    fn visit_variable_node(
+        &mut self,
+        variable_node: &VariableNode,
+        _log: &mut Log,
+        _location: Location,
+    ) {
+        let identifier: &str = &variable_node.identifier;
+        if let Some(variable) = dict::VARIABLES.get(identifier) {
+            let variable_expression =
+                (variable.get_expression_fn)(&self.query_parameters.variables);
+            self.write_buff(&variable_expression);
+        } else {
+            self.write_buff("NULL");
         }
     }
 }
@@ -819,5 +852,27 @@ impl ExpressionNode for UnaryExpressionNode {
         self.op
             .accepts_unary_expression(self.operand.node_type.get_return_type())
             .unwrap_or(Type::Void)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct VariableNode {
+    pub identifier: String,
+}
+
+impl NodeType for VariableNode {
+    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
+        visitor.visit_variable_node(self, log, location);
+    }
+}
+
+impl ExpressionNode for VariableNode {
+    fn get_return_type(&self) -> Type {
+        let identifier: &str = &self.identifier;
+        if let Some(variable) = dict::VARIABLES.get(identifier) {
+            variable.return_type
+        } else {
+            Type::Void
+        }
     }
 }

@@ -28,6 +28,7 @@ pub enum Tag {
     Unequal,
     // punctuation
     CloseParenthesis,
+    Colon,
     Comma,
     OpenParenthesis,
     Period,
@@ -49,6 +50,7 @@ impl TryFrom<char> for Tag {
             '+' => Ok(Tag::Plus),
             '*' => Ok(Tag::Times),
             '(' => Ok(Tag::OpenParenthesis),
+            ':' => Ok(Tag::Colon),
             ',' => Ok(Tag::Comma),
             ')' => Ok(Tag::CloseParenthesis),
             '.' => Ok(Tag::Period),

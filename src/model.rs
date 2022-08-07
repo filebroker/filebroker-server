@@ -1,6 +1,7 @@
 #![allow(clippy::extra_unused_lifetimes)]
 
 use chrono::{offset::Utc, DateTime};
+use diesel::sql_types::{Int4, Int8, Nullable, Timestamptz, Varchar};
 use diesel::{Associations, Identifiable, Insertable, Queryable};
 use serde::Serialize;
 
@@ -55,7 +56,7 @@ pub struct NewRefreshToken {
 #[belongs_to(User, foreign_key = "fk_create_user")]
 pub struct Post {
     pub pk: i32,
-    pub data_url: String,
+    pub data_url: Option<String>,
     pub source_url: Option<String>,
     pub title: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
@@ -68,7 +69,7 @@ pub struct Post {
 #[derive(Insertable)]
 #[table_name = "post"]
 pub struct NewPost {
-    pub data_url: String,
+    pub data_url: Option<String>,
     pub source_url: Option<String>,
     pub title: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
@@ -76,6 +77,36 @@ pub struct NewPost {
     pub score: i32,
     pub s3_object: Option<String>,
     pub thumbnail_url: Option<String>,
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+pub struct PostQueryObject {
+    #[sql_type = "Int4"]
+    pub pk: i32,
+    #[sql_type = "Nullable<Varchar>"]
+    pub data_url: Option<String>,
+    #[sql_type = "Nullable<Varchar>"]
+    pub source_url: Option<String>,
+    #[sql_type = "Nullable<Varchar>"]
+    pub title: Option<String>,
+    #[sql_type = "Timestamptz"]
+    pub creation_timestamp: DateTime<Utc>,
+    #[sql_type = "Int4"]
+    pub fk_create_user: i32,
+    #[sql_type = "Int4"]
+    pub score: i32,
+    #[sql_type = "Nullable<Varchar>"]
+    pub s3_object: Option<String>,
+    #[sql_type = "Nullable<Varchar>"]
+    pub thumbnail_url: Option<String>,
+    #[sql_type = "Nullable<Varchar>"]
+    pub thumbnail_object_key: Option<String>,
+    #[serde(skip_serializing)]
+    #[sql_type = "Int8"]
+    pub full_count: i64,
+    #[serde(skip_serializing)]
+    #[sql_type = "Int4"]
+    pub evaluated_limit: i32,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]

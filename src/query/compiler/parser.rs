@@ -4,7 +4,7 @@ use super::{
     ast::{
         AttributeNode, BinaryExpressionNode, ExpressionNode, ExpressionStatement, FunctionCallNode,
         IntegerLiteralNode, ModifierNode, Node, Operator, PostTagNode, QueryNode, StatementNode,
-        StringLiteralNode, UnaryExpressionNode,
+        StringLiteralNode, UnaryExpressionNode, VariableNode,
     },
     lexer::{ParsedToken, Tag, Token},
     Error, Location, Log,
@@ -60,7 +60,7 @@ impl Parser<'_> {
         let start = self.current_start;
         if self.curr_is_tag(Tag::Modulo) {
             self.next()?;
-            let identifier = self.read_identifier()?;
+            let identifier = self.read_identifier();
             let arguments = self.parse_arguments()?;
             Ok(Box::new(Node {
                 location: Location {
@@ -263,7 +263,7 @@ impl Parser<'_> {
                 ..
             }) => {
                 self.next()?;
-                let identifier = self.read_identifier()?;
+                let identifier = self.read_identifier();
                 Ok(Box::new(Node {
                     location: Location {
                         start,
@@ -277,7 +277,7 @@ impl Parser<'_> {
                 ..
             }) => {
                 self.next()?;
-                let identifier = self.read_identifier()?;
+                let identifier = self.read_identifier();
                 let arguments = self.parse_arguments()?;
                 Ok(Box::new(Node {
                     location: Location {
@@ -288,6 +288,20 @@ impl Parser<'_> {
                         identifier,
                         arguments,
                     },
+                }))
+            }
+            Some(Token {
+                parsed_token: ParsedToken::StaticToken(Tag::Colon),
+                ..
+            }) => {
+                self.next()?;
+                let identifier = self.read_identifier();
+                Ok(Box::new(Node {
+                    location: Location {
+                        start,
+                        end: self.prev_end,
+                    },
+                    node_type: VariableNode { identifier },
                 }))
             }
             Some(ref token) => Err(ParserError::UnexpectedToken(token.clone())),
@@ -362,18 +376,20 @@ impl Parser<'_> {
         }
     }
 
-    fn read_identifier(&mut self) -> Result<String, ParserError> {
+    fn read_identifier(&mut self) -> String {
         match self.curr_tok {
             Some(Token {
                 parsed_token: ParsedToken::IdentifierToken(ref mut ident),
                 ..
             }) => {
                 let val = mem::take(ident);
-                self.next().map(|_| val)
+                self.advance();
+                val
             }
             _ => {
                 self.report_error(String::from("Expected identifier"));
-                self.next().map(|_| String::from(ERROR_IDENTIFIER))
+                self.advance();
+                String::from(ERROR_IDENTIFIER)
             }
         }
     }
@@ -467,7 +483,7 @@ mod tests {
         ast::{
             AttributeNode, BinaryExpressionNode, ExpressionNode, ExpressionStatement,
             IntegerLiteralNode, ModifierNode, Node, Operator, PostTagNode, QueryNode,
-            StatementNode, StringLiteralNode,
+            StatementNode, StringLiteralNode, VariableNode,
         },
         lexer::Lexer,
         parser::Parser,
@@ -731,6 +747,36 @@ mod tests {
                 node_type: IntegerLiteralNode { val: 4 },
             },
         );
+    }
+
+    #[test]
+    fn test_variable_node() {
+        let query = parse(String::from("@uploader = :self")).node_type;
+        assert_eq!(query.statements.len(), 1);
+
+        let statement = &query.statements[0];
+        assert_eq!(statement.location, Location { start: 0, end: 16 });
+        let expression_statement = statement.node_type.downcast_ref::<ExpressionStatement>();
+        assert!(expression_statement.is_some());
+        let expression = &expression_statement.unwrap().expression_node;
+        assert_binary_expression_node(
+            &expression,
+            0,
+            16,
+            Operator::Equal,
+            Node {
+                location: Location { start: 0, end: 8 },
+                node_type: AttributeNode {
+                    identifier: String::from("uploader"),
+                },
+            },
+            Node {
+                location: Location { start: 12, end: 16 },
+                node_type: VariableNode {
+                    identifier: String::from("self"),
+                },
+            },
+        )
     }
 
     #[test]

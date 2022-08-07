@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use lexer::Lexer;
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 use self::{
     ast::{QueryBuilderVisitor, SemanticAnalysisVisitor},
@@ -10,7 +10,7 @@ use self::{
 
 use super::QueryParameters;
 
-use crate::query::{Direction, Ordering};
+use crate::query::{Direction, Ordering, DEFAULT_LIMIT_STR, MAX_LIMIT, MAX_LIMIT_STR};
 
 pub mod ast;
 pub mod dict;
@@ -50,7 +50,7 @@ pub fn compile_sql(
     query: Option<String>,
     mut query_parameters: QueryParameters,
 ) -> Result<String, crate::Error> {
-    let query_builder_visitor = if let Some(query) = query {
+    let (ctes, where_expressions) = if let Some(query) = query {
         let len = query.len();
         let mut log = Log { errors: Vec::new() };
         let token_stream = Lexer::new_for_string(query, &mut log).read_token_stream();
@@ -111,14 +111,17 @@ pub fn compile_sql(
             ));
         }
 
-        query_builder_visitor
+        (
+            query_builder_visitor.ctes,
+            query_builder_visitor.where_expressions,
+        )
     } else {
-        QueryBuilderVisitor::new(&mut query_parameters)
+        (HashMap::new(), Vec::new())
     };
 
     let mut sql_query = String::new();
 
-    let cte_len = query_builder_visitor.ctes.len();
+    let cte_len = ctes.len();
     if cte_len > 50 {
         return Err(crate::Error::IllegalQueryInputError(format!(
             "Exceeded maximum number of CTEs of 50 (recorded {}), too many tags supplied.",
@@ -127,7 +130,7 @@ pub fn compile_sql(
     } else if cte_len > 0 {
         sql_query.push_str("WITH ");
 
-        for (i, cte) in query_builder_visitor.ctes.values().enumerate() {
+        for (i, cte) in ctes.values().enumerate() {
             sql_query.push_str(&cte.expression);
             if i < cte_len - 1 {
                 sql_query.push_str(", ");
@@ -135,13 +138,23 @@ pub fn compile_sql(
         }
     }
 
-    sql_query.push_str(" SELECT * FROM post");
+    sql_query.push_str(" SELECT *, obj.thumbnail_object_key, count(*) OVER() AS full_count, ");
+    // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
+    // since the effective limit is needed to calculate the number of pages
+    let limit = query_parameters
+        .limit
+        .as_deref()
+        .unwrap_or(DEFAULT_LIMIT_STR);
+    sql_query.push_str(limit);
+    sql_query.push_str(
+        " AS evaluated_limit FROM post LEFT JOIN s3_object obj ON obj.object_key = post.s3_object",
+    );
 
-    let where_expressions_len = query_builder_visitor.where_expressions.len();
+    let where_expressions_len = where_expressions.len();
     if where_expressions_len > 0 {
         sql_query.push_str(" WHERE ");
 
-        for (i, where_expression) in query_builder_visitor.where_expressions.iter().enumerate() {
+        for (i, where_expression) in where_expressions.iter().enumerate() {
             sql_query.push_str(where_expression);
 
             if i < where_expressions_len - 1 {
@@ -174,22 +187,25 @@ pub fn compile_sql(
         }
     }
 
-    let limit = query_parameters.limit.as_deref().unwrap_or("50");
     let page = query_parameters.page.unwrap_or(0);
 
-    let parsed_limit = limit.parse::<u16>().map_err(|_| {
-        crate::Error::IllegalQueryInputError(format!("'{}' is not a valid u16 value", limit))
-    })?;
-    if parsed_limit > 100 {
-        return Err(crate::Error::IllegalQueryInputError(format!(
-            "Limit '{}' exceeds maximum limit of 100.",
-            parsed_limit
-        )));
+    // If the limit is not a valid u16 (e.g. if it's a binary expression '50 + 10'), the error is returned
+    // after the query has been evaluated, the limit is supplied to the LEAST function to protect agains large
+    // limits and enforce max limit
+    if let Ok(parsed_limit) = limit.parse::<u16>() {
+        if parsed_limit > MAX_LIMIT {
+            return Err(crate::Error::IllegalQueryInputError(format!(
+                "Limit '{}' exceeds maximum limit of {}.",
+                parsed_limit, MAX_LIMIT
+            )));
+        }
     }
 
-    sql_query.push_str(" LIMIT ");
+    sql_query.push_str(" LIMIT LEAST(");
     sql_query.push_str(limit);
-    sql_query.push_str(" OFFSET (");
+    sql_query.push_str(", ");
+    sql_query.push_str(MAX_LIMIT_STR);
+    sql_query.push_str(") OFFSET (");
     sql_query.push_str(limit);
     sql_query.push_str(") * ");
     sql_query.push_str(&page.to_string());

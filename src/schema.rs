@@ -37,7 +37,7 @@ table! {
 table! {
     post (pk) {
         pk -> Int4,
-        data_url -> Varchar,
+        data_url -> Nullable<Varchar>,
         source_url -> Nullable<Varchar>,
         title -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
