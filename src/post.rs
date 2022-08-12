@@ -49,7 +49,7 @@ fn validate_tags(tags: &Vec<String>) -> Result<(), ValidationError> {
     for tag in tags {
         if !tag_is_valid(tag) {
             return Err(ValidationError::new(
-                "Invalid tag, tags must be alphanumeric (or ['_', ''']) and 50 or less in length",
+                "Invalid tag, tags must be 50 or less in length",
             ));
         }
     }
