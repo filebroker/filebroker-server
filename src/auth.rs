@@ -13,7 +13,7 @@ use warp::{
         header::{self, HeaderMap},
         Response, StatusCode,
     },
-    Filter, Rejection, Reply,
+    hyper, Filter, Rejection, Reply,
 };
 
 use crate::{
@@ -177,7 +177,6 @@ fn create_refresh_token_cookie(
     let uuid = refresh_token.uuid.to_string();
     let expiry = refresh_token.expiry.to_rfc2822();
 
-    // TODO set Secure once moving to production
     Ok(format_refresh_token_cookie(&uuid, &expiry))
 }
 
@@ -258,14 +257,14 @@ pub async fn try_refresh_login_handler(
     refresh_token: Option<String>,
 ) -> Result<impl Reply, Rejection> {
     let (login_response, refresh_token_cookie) = match refresh_token {
-        Some(refresh_token) => {
+        Some(refresh_token) if !refresh_token.is_empty() => {
             let (user, refresh_token_cookie) = refresh_user_login_data(refresh_token)?;
             (
                 Some(create_login_response_struct(user)?),
                 Some(refresh_token_cookie),
             )
         }
-        None => (None, None),
+        _ => (None, None),
     };
 
     let json_response = serde_json::to_vec(&login_response)
@@ -282,6 +281,23 @@ pub async fn try_refresh_login_handler(
         .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
 
     Ok(response_body)
+}
+
+pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply, Rejection> {
+    let mut response_builder = Response::builder().status(StatusCode::OK);
+    if let Some(refresh_token) = refresh_token {
+        let curr_token_uuid =
+            Uuid::parse_str(&refresh_token).map_err(|_| Error::BadRequestError)?;
+        let connection = acquire_db_connection()?;
+        diesel::delete(refresh_token::table.filter(refresh_token::uuid.eq(&curr_token_uuid)))
+            .execute(&connection)
+            .map_err(Error::from)?;
+
+        let refresh_token_cookie = format_refresh_token_cookie("", &Utc::now().to_rfc2822());
+        response_builder = response_builder.header(header::SET_COOKIE, refresh_token_cookie);
+    }
+
+    Ok(response_builder.body(hyper::Body::empty()))
 }
 
 fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Error> {
@@ -323,7 +339,6 @@ fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Erro
         let uuid = updated_token.uuid.to_string();
         let expiry = updated_token.expiry.to_rfc2822();
 
-        // TODO set Secure once moving to production
         let refresh_token_cookie = format_refresh_token_cookie(&uuid, &expiry);
         Ok((user, refresh_token_cookie))
     })

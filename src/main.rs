@@ -136,6 +136,11 @@ async fn setup_tokio_runtime() {
         .and(warp::cookie::optional("refresh_token"))
         .and_then(auth::try_refresh_login_handler);
 
+    let logout_route = warp::path("logout")
+        .and(warp::post())
+        .and(warp::cookie::optional("refresh_token"))
+        .and_then(auth::logout_handler);
+
     let register_route = warp::path("register")
         .and(warp::post())
         .and(warp::body::json())
@@ -199,6 +204,7 @@ async fn setup_tokio_runtime() {
     let routes = login_route
         .or(refresh_login_route)
         .or(try_refresh_login_route)
+        .or(logout_route)
         .or(register_route)
         .or(current_user_info_route)
         .or(create_post_route)
