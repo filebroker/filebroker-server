@@ -10,7 +10,11 @@ use self::{
 
 use super::QueryParameters;
 
-use crate::query::{Direction, Ordering, DEFAULT_LIMIT_STR, MAX_LIMIT, MAX_LIMIT_STR};
+use crate::{
+    model::User,
+    perms,
+    query::{Direction, Ordering, DEFAULT_LIMIT_STR, MAX_LIMIT, MAX_LIMIT_STR},
+};
 
 pub mod ast;
 pub mod dict;
@@ -49,8 +53,9 @@ pub struct Cte {
 pub fn compile_sql(
     query: Option<String>,
     mut query_parameters: QueryParameters,
+    user: &Option<User>,
 ) -> Result<String, crate::Error> {
-    let (ctes, where_expressions) = if let Some(query) = query {
+    let (ctes, mut where_expressions) = if let Some(query) = query {
         let len = query.len();
         let mut log = Log { errors: Vec::new() };
         let token_stream = Lexer::new_for_string(query, &mut log).read_token_stream();
@@ -149,6 +154,8 @@ pub fn compile_sql(
     sql_query.push_str(
         " AS evaluated_limit FROM post LEFT JOIN s3_object obj ON obj.object_key = post.s3_object",
     );
+
+    perms::append_secure_query_condition(&mut where_expressions, user);
 
     let where_expressions_len = where_expressions.len();
     if where_expressions_len > 0 {

@@ -209,3 +209,69 @@ pub struct S3Object {
     pub thumbnail_object_key: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
 }
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[belongs_to(User, foreign_key = "fk_owner")]
+#[table_name = "user_group"]
+#[primary_key(pk)]
+pub struct UserGroup {
+    pub pk: i32,
+    pub name: String,
+    pub public: bool,
+    pub hidden: bool,
+    pub fk_owner: i32,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[belongs_to(UserGroup, foreign_key = "fk_group")]
+#[belongs_to(User, foreign_key = "fk_user")]
+#[table_name = "user_group_membership"]
+#[primary_key(fk_group, fk_user)]
+pub struct UserGroupMembership {
+    pub fk_group: i32,
+    pub fk_user: i32,
+    pub administrator: bool,
+    pub revoked: bool,
+    pub fk_granted_by: i32,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[belongs_to(User, foreign_key = "fk_owner")]
+#[table_name = "post_collection"]
+#[primary_key(pk)]
+pub struct PostCollection {
+    pub pk: i32,
+    pub name: String,
+    pub fk_owner: i32,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[belongs_to(User, foreign_key = "fk_added_by")]
+#[table_name = "post_collection_item"]
+#[primary_key(fk_post, fk_post_collection)]
+pub struct PostCollectionItem {
+    pub fk_post: i32,
+    pub fk_post_collection: i32,
+    pub fk_added_by: i32,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[belongs_to(UserGroup, foreign_key = "fk_granted_group")]
+#[table_name = "permission_target"]
+#[primary_key(pk)]
+pub struct PermissionTarget {
+    pub pk: i32,
+    pub public: bool,
+    pub administrator: bool,
+    pub fk_granted_group: Option<i32>,
+    pub quota: Option<i64>,
+    pub fk_post: Option<i32>,
+    pub fk_broker: Option<i32>,
+    pub fk_post_collection: Option<i32>,
+    pub fk_granted_by: Option<i32>,
+    pub creation_timestamp: DateTime<Utc>,
+}

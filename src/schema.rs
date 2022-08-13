@@ -35,6 +35,21 @@ table! {
 }
 
 table! {
+    permission_target (pk) {
+        pk -> Int4,
+        public -> Bool,
+        administrator -> Bool,
+        fk_granted_group -> Nullable<Int4>,
+        quota -> Nullable<Int8>,
+        fk_post -> Nullable<Int4>,
+        fk_broker -> Nullable<Int4>,
+        fk_post_collection -> Nullable<Int4>,
+        fk_granted_by -> Nullable<Int4>,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+table! {
     post (pk) {
         pk -> Int4,
         data_url -> Nullable<Varchar>,
@@ -45,6 +60,24 @@ table! {
         score -> Int4,
         s3_object -> Nullable<Varchar>,
         thumbnail_url -> Nullable<Varchar>,
+    }
+}
+
+table! {
+    post_collection (pk) {
+        pk -> Int4,
+        name -> Varchar,
+        fk_owner -> Int4,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+table! {
+    post_collection_item (fk_post, fk_post_collection) {
+        fk_post -> Int4,
+        fk_post_collection -> Int4,
+        fk_added_by -> Int4,
+        creation_timestamp -> Timestamptz,
     }
 }
 
@@ -113,24 +146,60 @@ table! {
     }
 }
 
+table! {
+    user_group (pk) {
+        pk -> Int4,
+        name -> Varchar,
+        public -> Bool,
+        hidden -> Bool,
+        fk_owner -> Int4,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+table! {
+    user_group_membership (fk_group, fk_user) {
+        fk_group -> Int4,
+        fk_user -> Int4,
+        administrator -> Bool,
+        revoked -> Bool,
+        fk_granted_by -> Int4,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
 joinable!(broker -> registered_user (fk_owner));
 joinable!(object_upload -> broker (fk_broker));
 joinable!(object_upload -> object_upload_status (status));
 joinable!(object_upload -> registered_user (fk_uploader));
 joinable!(object_upload -> s3_object (completed_object));
+joinable!(permission_target -> broker (fk_broker));
+joinable!(permission_target -> post (fk_post));
+joinable!(permission_target -> post_collection (fk_post_collection));
+joinable!(permission_target -> registered_user (fk_granted_by));
+joinable!(permission_target -> user_group (fk_granted_group));
 joinable!(post -> registered_user (fk_create_user));
 joinable!(post -> s3_object (s3_object));
+joinable!(post_collection -> registered_user (fk_owner));
+joinable!(post_collection_item -> post (fk_post));
+joinable!(post_collection_item -> post_collection (fk_post_collection));
+joinable!(post_collection_item -> registered_user (fk_added_by));
 joinable!(post_tag -> post (fk_post));
 joinable!(post_tag -> tag (fk_tag));
 joinable!(refresh_token -> registered_user (fk_registered_user));
 joinable!(s3_object -> broker (fk_broker));
 joinable!(s3_object -> registered_user (fk_uploader));
+joinable!(user_group -> registered_user (fk_owner));
+joinable!(user_group_membership -> user_group (fk_group));
 
 allow_tables_to_appear_in_same_query!(
     broker,
     object_upload,
     object_upload_status,
+    permission_target,
     post,
+    post_collection,
+    post_collection_item,
     post_tag,
     refresh_token,
     registered_user,
@@ -138,4 +207,6 @@ allow_tables_to_appear_in_same_query!(
     tag,
     tag_alias,
     tag_closure_table,
+    user_group,
+    user_group_membership,
 );

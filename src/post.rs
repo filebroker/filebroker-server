@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use diesel::{
-    dsl::exists,
+    dsl::{any, exists},
     sql_types::{Array, Integer},
     BoolExpressionMethods, OptionalExtension,
 };
@@ -196,7 +196,7 @@ pub fn get_or_create_tags(
 ) -> Result<(Vec<Tag>, Vec<Tag>), TransactionRuntimeError> {
     let lower_tags = tags.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>();
     let existing_tags = tag::table
-        .filter(lower(tag::tag_name).eq_any(&lower_tags))
+        .filter(lower(tag::tag_name).eq(any(&lower_tags)))
         .load::<Tag>(connection)?;
 
     let mut existing_tag_map = HashMap::new();

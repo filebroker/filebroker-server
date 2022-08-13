@@ -20,6 +20,7 @@ mod auth;
 mod data;
 mod error;
 mod model;
+mod perms;
 mod post;
 mod query;
 mod schema;

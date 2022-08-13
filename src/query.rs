@@ -8,10 +8,9 @@ use warp::{Rejection, Reply};
 
 use crate::{
     acquire_db_connection,
-    diesel::{ExpressionMethods, QueryDsl},
     error::Error,
-    model::{Post, PostQueryObject, S3Object, User},
-    schema::{post, s3_object},
+    model::{PostQueryObject, S3Object, User},
+    perms,
 };
 
 pub mod compiler;
@@ -71,7 +70,7 @@ pub async fn search_handler(
     );
     variables.insert(String::from("current_utc_date"), Utc::today().to_string());
 
-    if let Some(user) = user {
+    if let Some(ref user) = user {
         variables.insert(String::from("current_user_key"), user.pk.to_string());
     }
 
@@ -82,7 +81,7 @@ pub async fn search_handler(
         variables,
     };
 
-    let sql_query = compiler::compile_sql(query_parameters_filter.query, query_parameters)?;
+    let sql_query = compiler::compile_sql(query_parameters_filter.query, query_parameters, &user)?;
     let connection = acquire_db_connection()?;
     let posts = diesel::sql_query(&sql_query)
         .load::<PostQueryObject>(&connection)
@@ -126,36 +125,22 @@ pub struct PostDetailed {
     pub thumbnail_url: Option<String>,
 }
 
-pub async fn get_post_handler(_user: Option<User>, post_pk: i32) -> Result<impl Reply, Rejection> {
+pub async fn get_post_handler(user: Option<User>, post_pk: i32) -> Result<impl Reply, Rejection> {
     let connection = acquire_db_connection()?;
 
-    let posts = post::table
-        .left_join(s3_object::table)
-        .filter(post::pk.eq(post_pk))
-        .load::<(Post, Option<S3Object>)>(&connection)
-        .map_err(Error::from)?;
+    let (post, s3_object) = perms::load_post_secured(post_pk, &connection, user.as_ref())?;
 
-    let posts_detailed = posts
-        .into_iter()
-        .map(|p| {
-            let post = p.0;
-            let s3_object = p.1;
-
-            PostDetailed {
-                pk: post.pk,
-                data_url: post.data_url,
-                source_url: post.source_url,
-                title: post.title,
-                creation_timestamp: post.creation_timestamp,
-                fk_create_user: post.fk_create_user,
-                score: post.score,
-                s3_object,
-                thumbnail_url: post.thumbnail_url,
-            }
-        })
-        .collect::<Vec<_>>();
-
-    Ok(warp::reply::json(&posts_detailed))
+    Ok(warp::reply::json(&PostDetailed {
+        pk: post.pk,
+        data_url: post.data_url,
+        source_url: post.source_url,
+        title: post.title,
+        creation_timestamp: post.creation_timestamp,
+        fk_create_user: post.fk_create_user,
+        score: post.score,
+        s3_object,
+        thumbnail_url: post.thumbnail_url,
+    }))
 }
 
 pub mod functions {

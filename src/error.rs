@@ -41,15 +41,15 @@ pub enum Error {
     QueryCompilationError(String, Vec<compiler::Error>),
     #[error("The provided query is invalid: {0}")]
     IllegalQueryInputError(String),
-    #[error("Cannot access broker with provided pk {0}")]
-    InaccessibleBrokerError(i32),
+    #[error("Cannot access object with provided pk {0}")]
+    InaccessibleObjectError(i32),
     #[error("Cannot access object with provided key {0}")]
-    InaccessibleObjectError(String),
+    InaccessibleS3ObjectError(String),
     #[error("The provided S3 bucket is invalid. Error '{0}'.")]
     InvalidBucketError(String),
     #[error("The file upload form is invalid. {0}.")]
     InvalidFileError(String),
-    #[error("An error occured connecting to S3: {0}")]
+    #[error("An error occurred connecting to S3: {0}")]
     S3Error(String),
     #[error("Received error response code from S3: {0}")]
     S3ResponseError(u16),
@@ -126,7 +126,7 @@ struct ErrorResponse {
 pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(e) = err.find::<Error>() {
         let (code, message, compilation_errors) = match e {
-            Error::InaccessibleBrokerError(_) | Error::InaccessibleObjectError(_) => {
+            Error::InaccessibleObjectError(_) | Error::InaccessibleS3ObjectError(_) => {
                 (StatusCode::FORBIDDEN, e.to_string(), None)
             }
             Error::InvalidCredentialsError

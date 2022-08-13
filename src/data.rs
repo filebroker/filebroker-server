@@ -16,10 +16,8 @@ use crate::{
     diesel::{ExpressionMethods, OptionalExtension, RunQueryDsl},
     error::Error,
     model::{Broker, S3Object, User},
-    schema::{
-        broker,
-        s3_object::{self},
-    },
+    perms,
+    schema::{broker, s3_object},
     DbConnection,
 };
 
@@ -39,7 +37,7 @@ pub async fn upload_handler(
         .ok_or_else(|| Error::InvalidFileError(String::from("No mime boundary")))?;
 
     let connection = acquire_db_connection()?;
-    let broker = load_broker(broker_pk, &connection)?;
+    let broker = perms::load_broker_secured(broker_pk, &connection, Some(&user))?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -206,14 +204,6 @@ pub async fn get_object_head_handler(
         .map_err(|_| Error::SerialisationError)?)
 }
 
-pub fn load_broker(broker_pk: i32, connection: &DbConnection) -> Result<Broker, Error> {
-    broker::table
-        .filter(broker::pk.eq(broker_pk))
-        .first::<Broker>(connection)
-        .optional()?
-        .ok_or(Error::InaccessibleBrokerError(broker_pk))
-}
-
 pub fn load_object(
     object_key: &str,
     connection: &DbConnection,
@@ -224,7 +214,7 @@ pub fn load_object(
         .get_result::<(S3Object, Broker)>(connection)
         .optional()
         .map_err(Error::from)?
-        .ok_or_else(|| Error::InaccessibleObjectError(String::from(object_key)))
+        .ok_or_else(|| Error::InaccessibleS3ObjectError(String::from(object_key)))
 }
 
 pub fn create_bucket(
