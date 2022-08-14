@@ -18,7 +18,7 @@ pub fn append_secure_query_condition(where_expressions: &mut Vec<String>, user: 
         .unwrap_or_else(|| String::from("NULL"));
     where_expressions.push(format!(
         r#"
-        post.fk_create_user = {user_key}
+        (post.fk_create_user = {user_key}
         OR EXISTS(
             SELECT pk FROM permission_target
             WHERE fk_post = post.pk 
@@ -33,7 +33,7 @@ pub fn append_secure_query_condition(where_expressions: &mut Vec<String>, user: 
                     )
                 )
             )
-        )"#
+        ))"#
     ));
 }
 
