@@ -27,8 +27,8 @@ pub enum Error {
     InvalidAuthHeaderError,
     #[error("No auth header provided")]
     MissingAuthHeaderError,
-    #[error("The request is not formatted correctly")]
-    BadRequestError,
+    #[error("The request is invalid: {0}")]
+    BadRequestError(String),
     #[error("The JWT is not or no longer valid")]
     InvalidJwtError,
     #[error("Failed to serialise data")]
@@ -61,6 +61,10 @@ pub enum Error {
     HyperError(String),
     #[error("Error in ffmpeg process: {0}")]
     FfmpegProcessError(String),
+    #[error("No entity found for key: {0}")]
+    InvalidEntityReferenceError(String),
+    #[error("Internal error: {0}")]
+    StdError(String),
 }
 
 impl Reject for Error {}
@@ -136,11 +140,14 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             Error::UserExistsError(_)
             | Error::UtfEncodingError
             | Error::InvalidAuthHeaderError
-            | Error::BadRequestError
+            | Error::BadRequestError(_)
             | Error::InvalidRequestInputError(_)
             | Error::IllegalQueryInputError(_)
             | Error::InvalidBucketError(_)
-            | Error::InvalidFileError(_) => (StatusCode::BAD_REQUEST, e.to_string(), None),
+            | Error::InvalidFileError(_)
+            | Error::InvalidEntityReferenceError(_) => {
+                (StatusCode::BAD_REQUEST, e.to_string(), None)
+            }
             Error::DatabaseConnectionError
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -149,7 +156,8 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             | Error::SerialisationError
             | Error::S3Error(_)
             | Error::HyperError(_)
-            | Error::FfmpegProcessError(_) => {
+            | Error::FfmpegProcessError(_)
+            | Error::StdError(_) => {
                 log::error!("Encountered internal server error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None)
             }

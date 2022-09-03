@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Write};
 
 use chrono::Utc;
 use diesel::{
@@ -18,12 +18,10 @@ use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, QueryDsl, RunQueryDsl},
     error::{Error, TransactionRuntimeError},
-    model::{
-        NewPost, NewTag, NewTagClosureTable, Post, PostTag, Tag, TagAlias, TagClosureTable, User,
-    },
+    model::{NewPost, NewTag, Post, PostTag, Tag, TagClosureTable, TagEdge, User},
     query::functions::*,
     retry_on_constraint_violation, run_retryable_transaction,
-    schema::{post, post_tag, tag, tag_alias, tag_closure_table},
+    schema::{post, post_tag, tag, tag_alias, tag_closure_table, tag_edge},
     DbConnection,
 };
 
@@ -221,22 +219,6 @@ pub fn get_or_create_tags(
         .get_results::<Tag>(connection)
         .map_err(retry_on_constraint_violation)?;
 
-    if !created_tags.is_empty() {
-        // create self referencing closure table entries for all inserted tags
-        let tag_closure_table_entries = created_tags
-            .iter()
-            .map(|created_tag| NewTagClosureTable {
-                fk_parent: created_tag.pk,
-                fk_child: created_tag.pk,
-                depth: 0,
-            })
-            .collect::<Vec<_>>();
-
-        diesel::insert_into(tag_closure_table::table)
-            .values(&tag_closure_table_entries)
-            .execute(connection)?;
-    }
-
     Ok((set_tags, created_tags))
 }
 
@@ -293,18 +275,7 @@ pub fn get_tag_hierarchy_information(
         parent_depth_map.insert(tag_closure.fk_parent, tag_closure.depth);
     }
 
-    let tag_aliases = tag::table
-        .filter(exists(
-            tag_alias::table.filter(
-                (tag_alias::fk_source
-                    .eq(tag.pk)
-                    .and(tag_alias::fk_target.eq(tag::pk)))
-                .or(tag_alias::fk_source
-                    .eq(tag::pk)
-                    .and(tag_alias::fk_target.eq(tag.pk))),
-            ),
-        ))
-        .load::<Tag>(connection)?;
+    let tag_aliases = get_tag_aliases(tag.pk, connection)?;
 
     Ok(TagHierarchyInformation {
         tag: tag.clone(),
@@ -317,13 +288,43 @@ pub fn get_tag_hierarchy_information(
 pub struct UpsertTagRequest {
     #[validate(custom = "validate_tag")]
     pub tag_name: String,
-    pub parent_pk: Option<i32>,
+    #[validate(length(min = 0, max = 25))]
+    pub parent_pks: Option<Vec<i32>>,
+    #[validate(length(min = 0, max = 25))]
     pub alias_pks: Option<Vec<i32>>,
 }
 
 #[derive(Serialize)]
 pub struct UpsertTagResponse {
     pub inserted: bool,
+    pub tag_pk: i32,
+}
+
+macro_rules! report_missing_pks {
+    ($tab:ident, $pks:expr, $connection:expr) => {
+        $tab::table
+            .select($tab::pk)
+            .filter($tab::pk.eq(any($pks)))
+            .load::<i32>($connection)
+            .map(|found_pks| {
+                let missing_pks = $pks
+                    .iter()
+                    .filter(|pk| !found_pks.contains(pk))
+                    .collect::<Vec<_>>();
+                if missing_pks.is_empty() {
+                    Ok(())
+                } else {
+                    Err(crate::Error::InvalidEntityReferenceError(
+                        itertools::Itertools::intersperse(
+                            missing_pks.into_iter().map(i32::to_string),
+                            String::from(", "),
+                        )
+                        .collect::<String>(),
+                    ))
+                }
+            })
+            .map_err(crate::Error::from)
+    };
 }
 
 /// Creates a tag with the given tag_name, parent and aliases. If the tag already exists, the existing tag is updated
@@ -342,22 +343,48 @@ pub async fn upsert_tag_handler(
     let tag_name = sanitize_tag(upsert_tag_request.tag_name);
 
     let connection = acquire_db_connection()?;
+
+    if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
+        report_missing_pks!(tag, parent_pks, &connection)??;
+    }
+
+    if let Some(ref alias_pks) = upsert_tag_request.alias_pks {
+        report_missing_pks!(tag, alias_pks, &connection)??;
+    }
+
     run_retryable_transaction(&connection, || {
         let (inserted, tag) = get_or_create_tag(&tag_name, &connection)?;
 
-        if let Some(parent_pk) = upsert_tag_request.parent_pk {
-            if parent_pk == tag.pk {
+        let parents_to_set = if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
+            if parent_pks.iter().any(|parent_pk| *parent_pk == tag.pk) {
                 return Err(TransactionRuntimeError::Rollback(
                     Error::InvalidRequestInputError(format!(
                         "Cannot set tag {} as its own parent",
-                        parent_pk
+                        tag.pk
                     )),
                 ));
             }
-            set_tag_parent(&tag, parent_pk, &connection)?;
-        }
 
-        match upsert_tag_request.alias_pks {
+            let curr_parents = get_tag_parents_pks(tag.pk, &connection)?;
+            let parents_to_set = parent_pks
+                .iter()
+                .cloned()
+                .filter(|parent_pk| !curr_parents.contains(parent_pk))
+                .collect::<Vec<_>>();
+
+            if curr_parents.len() + parents_to_set.len() > 25 {
+                return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                    String::from("Cannot set more than 25 parents"),
+                )));
+            }
+
+            add_tag_parents(tag.pk, &parents_to_set, &connection)?;
+            Some(parents_to_set)
+        } else {
+            None
+        };
+
+        let aliases_to_set = match upsert_tag_request.alias_pks {
             Some(ref alias_pks) if !alias_pks.is_empty() => {
                 if alias_pks.iter().any(|alias_pk| *alias_pk == tag.pk) {
                     return Err(TransactionRuntimeError::Rollback(
@@ -368,32 +395,67 @@ pub async fn upsert_tag_handler(
                     ));
                 }
 
-                // set parent of all added aliases to the parent of this tag
-                if let Some(parent_pk) = get_tag_parent_pk(tag.pk, &connection)? {
-                    set_tags_parent(alias_pks, parent_pk, &connection)?;
-                } else {
-                    remove_tags_from_ancestry(alias_pks, &connection)?;
-                }
-
-                let tag_aliases = alias_pks
+                let curr_aliases = get_tag_aliases_pks(tag.pk, &connection)?;
+                let aliases_to_set = alias_pks
                     .iter()
-                    .map(|alias_pk| TagAlias {
-                        fk_source: tag.pk,
-                        fk_target: *alias_pk,
-                    })
+                    .cloned()
+                    .filter(|alias_pk| !curr_aliases.contains(alias_pk))
                     .collect::<Vec<_>>();
 
-                // do nothing on conflict, i.e. if the alias already exists,
-                // since the table has a bi-directional unique index this also works if one of the provided aliases already has this tag as an alias
-                diesel::insert_into(tag_alias::table)
-                    .values(&tag_aliases)
-                    .on_conflict_do_nothing()
-                    .execute(&connection)?;
+                if curr_aliases.len() + aliases_to_set.len() > 25 {
+                    return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                        String::from("Cannot set more than 25 aliases"),
+                    )));
+                }
+
+                // remove added tags from existing hierarchy to sync this this tag's hierarchy
+                remove_tags_from_hierarchy(&aliases_to_set, &connection)?;
+                add_tag_aliases(&tag, &aliases_to_set, &connection)?;
+                Some(aliases_to_set)
             }
-            _ => {}
+            _ => None,
+        };
+
+        if aliases_to_set.as_ref().map_or(false, |pks| !pks.is_empty())
+            || parents_to_set.as_ref().map_or(false, |pks| !pks.is_empty())
+        {
+            log::debug!("syncing parents with aliases");
+            let curr_aliases = get_tag_aliases(tag.pk, &connection)?;
+            // add current parents of tag as parents for all current aliases if either changed
+            let curr_parents = get_tag_parents_pks(tag.pk, &connection)?;
+            log::debug!("curr parents: {:?}", &curr_parents);
+            if !curr_parents.is_empty() {
+                for alias in curr_aliases.iter() {
+                    log::debug!(
+                        "updating alias: setting {:?} as parents of alias {}",
+                        &curr_parents,
+                        alias.pk
+                    );
+                    add_tag_parents(alias.pk, &curr_parents, &connection)?;
+                }
+            }
+
+            let curr_children = get_tag_children_pks(tag.pk, &connection)?;
+            if !curr_children.is_empty() {
+                let curr_alias_pks = curr_aliases
+                    .iter()
+                    .map(|alias| alias.pk)
+                    .collect::<Vec<_>>();
+                for child in curr_children {
+                    log::debug!(
+                        "updating child: setting curr aliases {:?} as parents of child {}",
+                        &curr_alias_pks,
+                        child
+                    );
+                    add_tag_parents(child, &curr_alias_pks, &connection)?;
+                }
+            }
         }
 
-        Ok(warp::reply::json(&UpsertTagResponse { inserted }))
+        Ok(warp::reply::json(&UpsertTagResponse {
+            inserted,
+            tag_pk: tag.pk,
+        }))
     })
     .map_err(warp::reject::custom)
 }
@@ -419,117 +481,146 @@ pub fn get_or_create_tag(
             .map_err(retry_on_constraint_violation)?,
     };
 
-    // Create self referencing closure tag entry for newly inserted tag
-    if inserted {
-        diesel::insert_into(tag_closure_table::table)
-            .values(&NewTagClosureTable {
-                fk_parent: tag.pk,
-                fk_child: tag.pk,
-                depth: 0,
-            })
-            .execute(connection)?;
-    }
-
     Ok((inserted, tag))
 }
 
-pub fn get_tag_parent_pk(
+pub fn get_tag_parents_pks(
     tag_pk: i32,
     connection: &DbConnection,
-) -> Result<Option<i32>, diesel::result::Error> {
-    tag_closure_table::table
-        .select(tag_closure_table::fk_parent)
-        .filter(
-            tag_closure_table::fk_child
-                .eq(tag_pk)
-                .and(tag_closure_table::depth.eq(1)),
-        )
-        .get_result::<i32>(connection)
-        .optional()
+) -> Result<Vec<i32>, diesel::result::Error> {
+    tag_edge::table
+        .select(tag_edge::fk_parent)
+        .filter(tag_edge::fk_child.eq(tag_pk))
+        .load::<i32>(connection)
 }
 
-pub fn set_tag_parent(
+pub fn get_tag_children_pks(
+    tag_pk: i32,
+    connection: &DbConnection,
+) -> Result<Vec<i32>, diesel::result::Error> {
+    tag_edge::table
+        .select(tag_edge::fk_child)
+        .filter(tag_edge::fk_parent.eq(tag_pk))
+        .load::<i32>(connection)
+}
+
+pub fn get_tag_aliases_pks(
+    tag_pk: i32,
+    connection: &DbConnection,
+) -> Result<Vec<i32>, diesel::result::Error> {
+    tag::table
+        .select(tag::pk)
+        .filter(exists(
+            tag_alias::table.filter(
+                (tag_alias::fk_source
+                    .eq(tag_pk)
+                    .and(tag_alias::fk_target.eq(tag::pk)))
+                .or(tag_alias::fk_source
+                    .eq(tag::pk)
+                    .and(tag_alias::fk_target.eq(tag_pk))),
+            ),
+        ))
+        .load::<i32>(connection)
+}
+
+pub fn get_tag_aliases(
+    tag_pk: i32,
+    connection: &DbConnection,
+) -> Result<Vec<Tag>, diesel::result::Error> {
+    tag::table
+        .filter(exists(
+            tag_alias::table.filter(
+                (tag_alias::fk_source
+                    .eq(tag_pk)
+                    .and(tag_alias::fk_target.eq(tag::pk)))
+                .or(tag_alias::fk_source
+                    .eq(tag::pk)
+                    .and(tag_alias::fk_target.eq(tag_pk))),
+            ),
+        ))
+        .load::<Tag>(connection)
+}
+
+pub fn add_tag_aliases(
     tag: &Tag,
-    parent_pk: i32,
+    alias_pks: &Vec<i32>,
     connection: &DbConnection,
 ) -> Result<(), TransactionRuntimeError> {
-    remove_tag_from_ancestry(tag, connection)?;
     diesel::sql_query(
         r#"
-        INSERT INTO tag_closure_table(fk_parent, fk_child, depth)
-        SELECT p.fk_parent, c.fk_child, p.depth + c.depth + 1
-        FROM tag_closure_table p, tag_closure_table c
-        WHERE p.fk_child = $1 AND c.fk_parent = $2
-    "#,
-    )
-    .bind::<Integer, _>(parent_pk)
-    .bind::<Integer, _>(tag.pk)
-    .execute(connection)
-    .map_err(retry_on_constraint_violation)?;
-    Ok(())
-}
-
-pub fn remove_tag_from_ancestry(
-    tag: &Tag,
-    connection: &DbConnection,
-) -> Result<(), TransactionRuntimeError> {
-    // delete all links to node for all neighboring nodes (i.e. depth = 1)
-    // keeping the self reference (depth = 0) since to node is not deleted, only removed from the current hierarchy
-    diesel::sql_query(r#"
-        DELETE FROM tag_closure_table WHERE pk IN(
-            SELECT link.pk
-            FROM tag_closure_table p, tag_closure_table link, tag_closure_table c, tag_closure_table to_delete
-            WHERE p.fk_parent = link.fk_parent AND c.fk_child = link.fk_child
-            AND p.fk_child  = to_delete.fk_parent AND c.fk_parent = to_delete.fk_child
-            AND (to_delete.fk_parent = $1 OR to_delete.fk_child = $1)
-            AND to_delete.depth = 1
+        INSERT INTO tag_alias
+        SELECT $1, pk
+        FROM tag WHERE pk = ANY($2) OR EXISTS(
+            SELECT * FROM tag_alias AS inner_alias
+            WHERE fk_source = ANY($2) OR fk_target = ANY($2)
         )
-    "#)
+        ON CONFLICT DO NOTHING
+        "#,
+    )
     .bind::<Integer, _>(tag.pk)
+    .bind::<Array<Integer>, _>(alias_pks)
     .execute(connection)
     .map_err(retry_on_constraint_violation)?;
+
     Ok(())
 }
 
-pub fn set_tags_parent(
-    tag_pks: &Vec<i32>,
-    parent_pk: i32,
+pub fn add_tag_parents(
+    tag_pk: i32,
+    parent_pks: &Vec<i32>,
     connection: &DbConnection,
 ) -> Result<(), TransactionRuntimeError> {
-    remove_tags_from_ancestry(tag_pks, connection)?;
+    // avoiding cycles:
+    // for `tag`, remove all edges to parents that are children of any of the added parents (or an added parent itself, in case an added parent already is a direct parent)
+    // for all added parents, remove edges to parents that are children of `tag`
+    let mut delete_cyclic_edges_query = String::from(
+        r#"
+            DELETE FROM tag_edge
+            WHERE (
+                fk_child = $2
+                AND fk_parent IN(SELECT fk_child FROM tag_closure_table WHERE fk_parent = ANY($1))
+            )
+        "#,
+    );
+
+    for parent_pk in parent_pks.iter() {
+        // remove edges to parents that are a child of `tag_pk` (or `tag_pk` itself)
+        write!(delete_cyclic_edges_query, " OR (fk_child = {parent_pk} AND fk_parent IN(SELECT fk_child FROM tag_closure_table WHERE fk_parent = {tag_pk}))").map_err(|e| Error::StdError(e.to_string()))?;
+    }
+
+    diesel::sql_query(delete_cyclic_edges_query)
+        .bind::<Array<Integer>, _>(parent_pks)
+        .bind::<Integer, _>(tag_pk)
+        .execute(connection)
+        .map_err(retry_on_constraint_violation)?;
+
+    let edges_to_insert = parent_pks
+        .iter()
+        .map(|parent_pk| TagEdge {
+            fk_parent: *parent_pk,
+            fk_child: tag_pk,
+        })
+        .collect::<Vec<_>>();
+
+    diesel::insert_into(tag_edge::table)
+        .values(edges_to_insert)
+        .execute(connection)
+        .map_err(retry_on_constraint_violation)?;
+
+    Ok(())
+}
+
+pub fn remove_tags_from_hierarchy(
+    tags: &Vec<i32>,
+    connection: &DbConnection,
+) -> Result<usize, diesel::result::Error> {
     diesel::sql_query(
         r#"
-        INSERT INTO tag_closure_table(fk_parent, fk_child, depth)
-        SELECT p.fk_parent, c.fk_child, p.depth + c.depth + 1
-        FROM tag_closure_table p, tag_closure_table c
-        WHERE p.fk_child = $1 AND c.fk_parent = ANY($2)
+        DELETE FROM tag_edge
+        WHERE fk_parent = ANY($1)
+        OR fk_child = ANY($1)
     "#,
     )
-    .bind::<Integer, _>(parent_pk)
-    .bind::<Array<Integer>, _>(tag_pks)
+    .bind::<Array<Integer>, _>(tags)
     .execute(connection)
-    .map_err(retry_on_constraint_violation)?;
-    Ok(())
-}
-
-pub fn remove_tags_from_ancestry(
-    tag_pks: &Vec<i32>,
-    connection: &DbConnection,
-) -> Result<(), TransactionRuntimeError> {
-    // delete all links to node for all neighboring nodes (i.e. depth = 1)
-    // keeping the self reference (depth = 0) since to node is not deleted, only removed from the current hierarchy
-    diesel::sql_query(r#"
-        DELETE FROM tag_closure_table WHERE pk IN(
-            SELECT link.pk
-            FROM tag_closure_table p, tag_closure_table link, tag_closure_table c, tag_closure_table to_delete
-            WHERE p.fk_parent = link.fk_parent AND c.fk_child = link.fk_child
-            AND p.fk_child  = to_delete.fk_parent AND c.fk_parent = to_delete.fk_child
-            AND (to_delete.fk_parent = ANY($1) OR to_delete.fk_child = ANY($1))
-            AND to_delete.depth = 1
-        )
-    "#)
-    .bind::<Array<Integer>, _>(tag_pks)
-    .execute(connection)
-    .map_err(retry_on_constraint_violation)?;
-    Ok(())
 }

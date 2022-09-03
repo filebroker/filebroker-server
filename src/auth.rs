@@ -286,8 +286,8 @@ pub async fn try_refresh_login_handler(
 pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply, Rejection> {
     let mut response_builder = Response::builder().status(StatusCode::OK);
     if let Some(refresh_token) = refresh_token {
-        let curr_token_uuid =
-            Uuid::parse_str(&refresh_token).map_err(|_| Error::BadRequestError)?;
+        let curr_token_uuid = Uuid::parse_str(&refresh_token)
+            .map_err(|_| Error::BadRequestError(String::from("Invalid refresh token")))?;
         let connection = acquire_db_connection()?;
         diesel::delete(refresh_token::table.filter(refresh_token::uuid.eq(&curr_token_uuid)))
             .execute(&connection)
@@ -303,8 +303,8 @@ pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply,
 fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Error> {
     let connection = acquire_db_connection()?;
     connection.transaction(|| {
-        let curr_token_uuid =
-            Uuid::parse_str(&refresh_token).map_err(|_| Error::BadRequestError)?;
+        let curr_token_uuid = Uuid::parse_str(&refresh_token)
+            .map_err(|_| Error::BadRequestError(String::from("Invalid refresh token")))?;
         let current_utc = Utc::now();
 
         let refresh_token = refresh_token::table

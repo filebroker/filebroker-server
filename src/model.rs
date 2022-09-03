@@ -154,12 +154,12 @@ pub struct TagClosureTable {
     pub depth: i32,
 }
 
-#[derive(Insertable)]
-#[table_name = "tag_closure_table"]
-pub struct NewTagClosureTable {
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[table_name = "tag_edge"]
+#[primary_key(fk_parent, fk_child)]
+pub struct TagEdge {
     pub fk_parent: i32,
     pub fk_child: i32,
-    pub depth: i32,
 }
 
 #[derive(Associations, Identifiable, Queryable, Serialize)]

@@ -147,6 +147,13 @@ table! {
 }
 
 table! {
+    tag_edge (fk_parent, fk_child) {
+        fk_parent -> Int4,
+        fk_child -> Int4,
+    }
+}
+
+table! {
     user_group (pk) {
         pk -> Int4,
         name -> Varchar,
@@ -207,6 +214,7 @@ allow_tables_to_appear_in_same_query!(
     tag,
     tag_alias,
     tag_closure_table,
+    tag_edge,
     user_group,
     user_group_membership,
 );
