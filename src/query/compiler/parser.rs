@@ -2,9 +2,10 @@ use std::{iter::Peekable, mem, vec::IntoIter};
 
 use super::{
     ast::{
-        AttributeNode, BinaryExpressionNode, ExpressionNode, ExpressionStatement, FunctionCallNode,
-        IntegerLiteralNode, ModifierNode, Node, Operator, PostTagNode, QueryNode, StatementNode,
-        StringLiteralNode, UnaryExpressionNode, VariableNode,
+        AttributeNode, BinaryExpressionNode, BooleanLiteralNode, ExpressionNode,
+        ExpressionStatement, FunctionCallNode, IntegerLiteralNode, ModifierNode, Node,
+        NullLiteralNode, Operator, PostTagNode, QueryNode, StatementNode, StringLiteralNode,
+        UnaryExpressionNode, VariableNode,
     },
     lexer::{ParsedToken, Tag, Token},
     Error, Location, Log,
@@ -304,7 +305,36 @@ impl Parser<'_> {
                     node_type: VariableNode { identifier },
                 }))
             }
-            Some(ref token) => Err(ParserError::UnexpectedToken(token.clone())),
+            Some(ref token) => match token {
+                Token {
+                    parsed_token: ParsedToken::StaticToken(tag),
+                    ..
+                } if *tag == Tag::False || *tag == Tag::True => {
+                    let val = *tag == Tag::True;
+                    self.advance();
+                    Ok(Box::new(Node {
+                        location: Location {
+                            start,
+                            end: self.prev_end,
+                        },
+                        node_type: BooleanLiteralNode { val },
+                    }))
+                }
+                Token {
+                    parsed_token: ParsedToken::StaticToken(tag),
+                    ..
+                } if *tag == Tag::Null => {
+                    self.advance();
+                    Ok(Box::new(Node {
+                        location: Location {
+                            start,
+                            end: self.prev_end,
+                        },
+                        node_type: NullLiteralNode {},
+                    }))
+                }
+                _ => Err(ParserError::UnexpectedToken(token.clone())),
+            },
             None => Err(ParserError::PrematureEof),
         }
     }
@@ -481,9 +511,9 @@ mod tests {
 
     use crate::query::compiler::{
         ast::{
-            AttributeNode, BinaryExpressionNode, ExpressionNode, ExpressionStatement,
-            IntegerLiteralNode, ModifierNode, Node, Operator, PostTagNode, QueryNode,
-            StatementNode, StringLiteralNode, VariableNode,
+            AttributeNode, BinaryExpressionNode, BooleanLiteralNode, ExpressionNode,
+            ExpressionStatement, IntegerLiteralNode, ModifierNode, Node, Operator, PostTagNode,
+            QueryNode, StatementNode, StringLiteralNode, VariableNode,
         },
         lexer::Lexer,
         parser::Parser,
@@ -856,6 +886,58 @@ mod tests {
             Node {
                 location: Location { start: 34, end: 34 },
                 node_type: IntegerLiteralNode { val: 5 },
+            },
+        );
+    }
+
+    #[test]
+    fn test_parse_boolean_literal() {
+        let query = parse(String::from("Liara = true ME2 = false"));
+        assert_eq!(query.location, Location { start: 0, end: 23 });
+        let query_node = query.node_type;
+        assert_eq!(query_node.statements.len(), 2);
+
+        let statement1 = &query_node.statements[0];
+        assert_eq!(statement1.location, Location { start: 0, end: 11 });
+        let expression_statement1 = statement1.node_type.downcast_ref::<ExpressionStatement>();
+        assert!(expression_statement1.is_some());
+
+        assert_binary_expression_node(
+            &expression_statement1.unwrap().expression_node,
+            0,
+            11,
+            Operator::Equal,
+            Node {
+                location: Location { start: 0, end: 4 },
+                node_type: PostTagNode {
+                    identifier: String::from("liara"),
+                },
+            },
+            Node {
+                location: Location { start: 8, end: 11 },
+                node_type: BooleanLiteralNode { val: true },
+            },
+        );
+
+        let statement2 = &query_node.statements[1];
+        assert_eq!(statement2.location, Location { start: 13, end: 23 });
+        let expression_statement2 = statement2.node_type.downcast_ref::<ExpressionStatement>();
+        assert!(expression_statement2.is_some());
+
+        assert_binary_expression_node(
+            &expression_statement2.unwrap().expression_node,
+            13,
+            23,
+            Operator::Equal,
+            Node {
+                location: Location { start: 13, end: 15 },
+                node_type: PostTagNode {
+                    identifier: String::from("me2"),
+                },
+            },
+            Node {
+                location: Location { start: 19, end: 23 },
+                node_type: BooleanLiteralNode { val: false },
             },
         );
     }

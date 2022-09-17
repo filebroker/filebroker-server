@@ -63,11 +63,17 @@ impl Operator {
         }
     }
 
-    pub fn get_sql_string(&self) -> &str {
+    pub fn get_sql_string(&self, binary_types: Option<(Type, Type)>) -> &str {
         match self {
             Self::And => "AND",
             Self::Divide => "/",
-            Self::Equal => "=",
+            Self::Equal => {
+                if let Some((_, Type::Null)) = binary_types {
+                    "IS"
+                } else {
+                    "="
+                }
+            }
             Self::Greater => ">",
             Self::GreaterEqual => ">=",
             Self::Less => "<",
@@ -76,7 +82,13 @@ impl Operator {
             Self::Modulo => "%",
             Self::Not => "NOT",
             Self::Or => "OR",
-            Self::Plus => "+",
+            Self::Plus => {
+                if let Some((Type::String, Type::String)) = binary_types {
+                    "||"
+                } else {
+                    "+"
+                }
+            }
             Self::Times => "*",
             Self::Unequal => "!=",
         }
@@ -84,25 +96,31 @@ impl Operator {
 
     pub fn accepts_binary_expression(&self, left: Type, right: Type) -> Option<Type> {
         match self {
-            Self::And if left == Type::Boolean && right == Type::Boolean => Some(Type::Boolean),
-            Self::Divide if left == Type::Number && right == Type::Number => Some(Type::Number),
-            Self::Equal if left == right => Some(Type::Boolean),
-            Self::Greater if left == Type::Number && right == Type::Number => Some(Type::Boolean),
-            Self::GreaterEqual if left == Type::Number && right == Type::Number => {
+            Self::And if both_of_type_or_null(left, right, Type::Boolean) => Some(Type::Boolean),
+            Self::Divide if both_of_type_or_null(left, right, Type::Number) => Some(Type::Number),
+            Self::Equal if left == right || left == Type::Null || right == Type::Null => {
                 Some(Type::Boolean)
             }
-            Self::Less if left == Type::Number && right == Type::Number => Some(Type::Boolean),
-            Self::LessEqual if left == Type::Number && right == Type::Number => Some(Type::Boolean),
-            Self::Minus if left == Type::Number && right == Type::Number => Some(Type::Number),
-            Self::Modulo if left == Type::Number && right == Type::Number => Some(Type::Number),
+            Self::Greater if both_of_type_or_null(left, right, Type::Number) => Some(Type::Boolean),
+            Self::GreaterEqual if both_of_type_or_null(left, right, Type::Number) => {
+                Some(Type::Boolean)
+            }
+            Self::Less if both_of_type_or_null(left, right, Type::Number) => Some(Type::Boolean),
+            Self::LessEqual if both_of_type_or_null(left, right, Type::Number) => {
+                Some(Type::Boolean)
+            }
+            Self::Minus if both_of_type_or_null(left, right, Type::Number) => Some(Type::Number),
+            Self::Modulo if both_of_type_or_null(left, right, Type::Number) => Some(Type::Number),
             // Not is a unary operator only
             Self::Not => None,
             Self::Or if left == Type::Boolean && right == Type::Boolean => Some(Type::Boolean),
-            Self::Plus if left == Type::Number && right == Type::Number => Some(Type::Number),
-            Self::Plus if left == Type::String && right == Type::String => Some(Type::String),
-            Self::Times if left == Type::Number && right == Type::Number => Some(Type::Number),
-            Self::Unequal if left == right => Some(Type::Boolean),
-            // handle date to string comparisons
+            Self::Plus if both_of_type_or_null(left, right, Type::Number) => Some(Type::Number),
+            Self::Plus if both_of_type_or_null(left, right, Type::String) => Some(Type::String),
+            Self::Times if both_of_type_or_null(left, right, Type::Number) => Some(Type::Number),
+            Self::Unequal if left == right || left == Type::Null || right == Type::Null => {
+                Some(Type::Boolean)
+            }
+            // allow date to string comparisons (validated in #visit_binary_expression_node)
             Self::Greater
             | Self::GreaterEqual
             | Self::Less
@@ -112,6 +130,12 @@ impl Operator {
                 if type_is_date_or_string(left) && type_is_date_or_string(right) =>
             {
                 Some(Type::Boolean)
+            }
+            // allow date interval additions and subtractions (validated in #visit_binary_expression_node)
+            Self::Minus | Self::Plus
+                if (left == Type::Date || left == Type::DateTime) && right == Type::String =>
+            {
+                Some(left)
             }
             _ => None,
         }
@@ -128,7 +152,19 @@ impl Operator {
 
 #[inline]
 fn type_is_date_or_string(t: Type) -> bool {
-    t == Type::String || t == Type::Date || t == Type::DateTime
+    is_type_or_null(t, Type::String)
+        || is_type_or_null(t, Type::Date)
+        || is_type_or_null(t, Type::DateTime)
+}
+
+#[inline]
+fn is_type_or_null(s: Type, t: Type) -> bool {
+    s == t || s == Type::Null
+}
+
+#[inline]
+fn both_of_type_or_null(l: Type, r: Type, t: Type) -> bool {
+    is_type_or_null(l, t) && is_type_or_null(r, t)
 }
 
 pub trait Visitor {
@@ -165,6 +201,20 @@ pub trait Visitor {
     fn visit_string_literal_node(
         &mut self,
         string_literal_node: &StringLiteralNode,
+        log: &mut Log,
+        location: Location,
+    );
+
+    fn visit_boolean_literal_node(
+        &mut self,
+        boolean_literal_node: &BooleanLiteralNode,
+        log: &mut Log,
+        location: Location,
+    );
+
+    fn visit_null_literal_node(
+        &mut self,
+        null_literal_node: &NullLiteralNode,
         log: &mut Log,
         location: Location,
     );
@@ -225,7 +275,7 @@ impl Visitor for SemanticAnalysisVisitor {
             .expression_node
             .node_type
             .get_return_type();
-        if return_type != Type::Boolean {
+        if return_type != Type::Boolean && return_type != Type::Null {
             log.errors.push(Error {
                 location,
                 msg: format!("Expressions used as statement must evaluate to a boolean value but got type {:?}", return_type)
@@ -300,8 +350,28 @@ impl Visitor for SemanticAnalysisVisitor {
             }
         }
 
-        // TODO allow intervals
-        if left_type == Type::String && (right_type == Type::Date || right_type == Type::DateTime) {
+        // handle date comparisons and interval additions or subtractions
+        if (op == Operator::Plus || op == Operator::Minus)
+            && (left_type == Type::Date || left_type == Type::DateTime)
+            && right_type == Type::String
+        {
+            let string_literal = right.node_type.downcast_ref::<StringLiteralNode>();
+            if let Some(string_literal) = string_literal {
+                if pg_interval::Interval::from_postgres(&string_literal.val).is_err() {
+                    log.errors.push(Error {
+                        location: right.location,
+                        msg: format!("'{}' is not a valid postgres interval", &string_literal.val),
+                    });
+                }
+            } else {
+                log.errors.push(Error {
+                    location: right.location,
+                    msg: String::from("Strings added to dates must be interval string literals"),
+                });
+            }
+        } else if left_type == Type::String
+            && (right_type == Type::Date || right_type == Type::DateTime)
+        {
             validate_date_string(left, right_type, log);
         } else if right_type == Type::String
             && (left_type == Type::Date || left_type == Type::DateTime)
@@ -321,6 +391,22 @@ impl Visitor for SemanticAnalysisVisitor {
     fn visit_string_literal_node(
         &mut self,
         _string_literal_node: &StringLiteralNode,
+        _log: &mut Log,
+        _location: Location,
+    ) {
+    }
+
+    fn visit_boolean_literal_node(
+        &mut self,
+        _boolean_literal_node: &BooleanLiteralNode,
+        _log: &mut Log,
+        _location: Location,
+    ) {
+    }
+
+    fn visit_null_literal_node(
+        &mut self,
+        _null_literal_node: &NullLiteralNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -542,14 +628,34 @@ impl Visitor for QueryBuilderVisitor<'_> {
     ) {
         let op = binary_expression_node.op;
         let left = &binary_expression_node.left;
+        let left_type = left.node_type.get_return_type();
         let right = &binary_expression_node.right;
+        let right_type = right.node_type.get_return_type();
+        let binary_types = (
+            left.node_type.get_return_type(),
+            right.node_type.get_return_type(),
+        );
 
         self.write_buff("(");
-        left.accept(self, log);
-        self.write_buff(" ");
-        self.write_buff(op.get_sql_string());
-        self.write_buff(" ");
-        right.accept(self, log);
+
+        if (op == Operator::Plus || op == Operator::Minus)
+            && (left_type == Type::Date || left_type == Type::DateTime)
+            && right_type == Type::String
+        {
+            // add explicit types for date interval addition / subtraction
+            left.accept(self, log);
+            self.write_buff("::date ");
+            self.write_buff(op.get_sql_string(Some(binary_types)));
+            self.write_buff(" interval ");
+            right.accept(self, log);
+        } else {
+            left.accept(self, log);
+            self.write_buff(" ");
+            self.write_buff(op.get_sql_string(Some(binary_types)));
+            self.write_buff(" ");
+            right.accept(self, log);
+        }
+
         self.write_buff(")");
     }
 
@@ -574,13 +680,31 @@ impl Visitor for QueryBuilderVisitor<'_> {
         ));
     }
 
+    fn visit_boolean_literal_node(
+        &mut self,
+        boolean_literal_node: &BooleanLiteralNode,
+        _log: &mut Log,
+        _location: Location,
+    ) {
+        self.write_buff(&boolean_literal_node.val.to_string());
+    }
+
+    fn visit_null_literal_node(
+        &mut self,
+        _null_literal_node: &NullLiteralNode,
+        _log: &mut Log,
+        _location: Location,
+    ) {
+        self.write_buff("NULL");
+    }
+
     fn visit_unary_expression_node(
         &mut self,
         unary_expression_node: &UnaryExpressionNode,
         log: &mut Log,
         _location: Location,
     ) {
-        self.write_buff(unary_expression_node.op.get_sql_string());
+        self.write_buff(unary_expression_node.op.get_sql_string(None));
         self.write_buff(" (");
         unary_expression_node.operand.accept(self, log);
         self.write_buff(")");
@@ -832,6 +956,38 @@ impl NodeType for StringLiteralNode {
 impl ExpressionNode for StringLiteralNode {
     fn get_return_type(&self) -> Type {
         Type::String
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct BooleanLiteralNode {
+    pub val: bool,
+}
+
+impl NodeType for BooleanLiteralNode {
+    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
+        visitor.visit_boolean_literal_node(self, log, location);
+    }
+}
+
+impl ExpressionNode for BooleanLiteralNode {
+    fn get_return_type(&self) -> Type {
+        Type::Boolean
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct NullLiteralNode {}
+
+impl NodeType for NullLiteralNode {
+    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
+        visitor.visit_null_literal_node(self, log, location);
+    }
+}
+
+impl ExpressionNode for NullLiteralNode {
+    fn get_return_type(&self) -> Type {
+        Type::Null
     }
 }
 

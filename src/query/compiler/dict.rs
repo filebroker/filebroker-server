@@ -13,6 +13,7 @@ pub enum Type {
     Boolean,
     Date,
     DateTime,
+    Null,
     Number,
     String,
     Void,

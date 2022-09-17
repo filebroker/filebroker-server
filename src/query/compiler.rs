@@ -55,6 +55,12 @@ pub fn compile_sql(
     mut query_parameters: QueryParameters,
     user: &Option<User>,
 ) -> Result<String, crate::Error> {
+    let (source_query, instant) = if log::log_enabled!(log::Level::Debug) {
+        (query.clone(), Some(std::time::Instant::now()))
+    } else {
+        (None, None)
+    };
+
     let (ctes, mut where_expressions) = if let Some(query) = query {
         let len = query.len();
         let mut log = Log { errors: Vec::new() };
@@ -217,7 +223,14 @@ pub fn compile_sql(
     sql_query.push_str(") * ");
     sql_query.push_str(&page.to_string());
 
-    log::debug!("Compiled query to sql {}", &sql_query);
+    log::debug!(
+        "Compiled query [{}] (in {} microseconds) to sql {}",
+        &source_query.as_deref().unwrap_or(""),
+        instant
+            .map(|instant| instant.elapsed().as_micros())
+            .unwrap_or(0),
+        &sql_query
+    );
 
     Ok(sql_query)
 }

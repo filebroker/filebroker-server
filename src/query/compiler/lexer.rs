@@ -33,6 +33,10 @@ pub enum Tag {
     OpenParenthesis,
     Period,
     QuestionMark,
+    // keywords
+    False,
+    Null,
+    True,
 }
 
 impl TryFrom<char> for Tag {
@@ -68,6 +72,12 @@ impl TryFrom<&str> for Tag {
             Ok(Tag::And)
         } else if value.eq_ignore_ascii_case("OR") {
             Ok(Tag::Or)
+        } else if value.eq_ignore_ascii_case("false") {
+            Ok(Tag::False)
+        } else if value.eq_ignore_ascii_case("null") {
+            Ok(Tag::Null)
+        } else if value.eq_ignore_ascii_case("true") {
+            Ok(Tag::True)
         } else {
             Err(())
         }
@@ -887,6 +897,54 @@ mod tests {
             85,
             85,
             StaticToken(Tag::CloseParenthesis),
+        );
+
+        assert_eq!(token_stream.next(), None);
+    }
+
+    #[test]
+    fn test_boolean_literal() {
+        let mut log = Log { errors: Vec::new() };
+
+        let lexer = Lexer::new_for_string(String::from("Liara = true"), &mut log);
+        let mut token_stream = lexer.read_token_stream().into_iter();
+        assert!(log.errors.is_empty());
+
+        assert_token(
+            token_stream.next(),
+            0,
+            4,
+            IdentifierToken(String::from("liara")),
+        );
+
+        assert_token(token_stream.next(), 6, 6, StaticToken(Tag::Equal));
+        assert_token(token_stream.next(), 8, 11, StaticToken(Tag::True));
+
+        assert_eq!(token_stream.next(), None);
+    }
+
+    #[test]
+    fn test_boolean_literal_escaped() {
+        let mut log = Log { errors: Vec::new() };
+
+        let lexer = Lexer::new_for_string(String::from("Liara = `true`"), &mut log);
+        let mut token_stream = lexer.read_token_stream().into_iter();
+        assert!(log.errors.is_empty());
+
+        assert_token(
+            token_stream.next(),
+            0,
+            4,
+            IdentifierToken(String::from("liara")),
+        );
+
+        assert_token(token_stream.next(), 6, 6, StaticToken(Tag::Equal));
+
+        assert_token(
+            token_stream.next(),
+            8,
+            13,
+            IdentifierToken(String::from("true")),
         );
 
         assert_eq!(token_stream.next(), None);
