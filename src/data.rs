@@ -1,11 +1,15 @@
 use std::{ffi::OsStr, path::Path};
 
+use chrono::Utc;
 use diesel::QueryDsl;
 use futures::{Stream, TryStreamExt};
 use mime::Mime;
 use mpart_async::server::MultipartStream;
 use ring::digest;
 use s3::{creds::Credentials, Bucket, Region};
+use serde::Deserialize;
+use uuid::Uuid;
+use validator::Validate;
 use warp::{
     hyper::{self, Response},
     Buf, Rejection, Reply,
@@ -15,7 +19,7 @@ use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension, RunQueryDsl},
     error::Error,
-    model::{Broker, S3Object, User},
+    model::{Broker, NewBroker, S3Object, User},
     perms,
     schema::{broker, s3_object},
     DbConnection,
@@ -202,6 +206,82 @@ pub async fn get_object_head_handler(
         .status(response_status)
         .body(hyper::Body::empty())
         .map_err(|_| Error::SerialisationError)?)
+}
+
+#[derive(Deserialize, Validate)]
+pub struct CreateBrokerRequest {
+    #[validate(length(min = 1, max = 255))]
+    pub name: String,
+    #[validate(length(min = 1, max = 255))]
+    pub bucket: String,
+    #[validate(length(min = 1, max = 2048))]
+    pub endpoint: String,
+    #[validate(length(min = 1, max = 255))]
+    pub access_key: String,
+    #[validate(length(min = 1, max = 255))]
+    pub secret_key: String,
+    pub is_aws_region: bool,
+    pub remove_duplicate_files: bool,
+}
+
+pub async fn create_broker_handler(
+    create_broker_request: CreateBrokerRequest,
+    user: User,
+) -> Result<impl Reply, Rejection> {
+    create_broker_request.validate().map_err(|e| {
+        warp::reject::custom(Error::InvalidRequestInputError(format!(
+            "Validation failed for CreateBrokerRequest: {}",
+            e
+        )))
+    })?;
+
+    let bucket = create_bucket(
+        &create_broker_request.bucket,
+        &create_broker_request.endpoint,
+        &create_broker_request.access_key,
+        &create_broker_request.secret_key,
+        create_broker_request.is_aws_region,
+    )?;
+
+    // test connection
+    let mut test_path = Uuid::new_v4().to_string();
+    test_path.insert_str(0, ".filebroker-test-");
+    if let Err(e) = bucket.put_object(&test_path, &[]).await {
+        return Err(warp::reject::custom(Error::InvalidBucketError(
+            e.to_string(),
+        )));
+    }
+    if let Err(e) = bucket.delete_object(&test_path).await {
+        return Err(warp::reject::custom(Error::InvalidBucketError(
+            e.to_string(),
+        )));
+    }
+
+    let connection = acquire_db_connection()?;
+    let created_broker = diesel::insert_into(broker::table)
+        .values(&NewBroker {
+            name: create_broker_request.name,
+            bucket: create_broker_request.bucket,
+            endpoint: create_broker_request.endpoint,
+            access_key: create_broker_request.access_key,
+            secret_key: create_broker_request.secret_key,
+            is_aws_region: create_broker_request.is_aws_region,
+            remove_duplicate_files: create_broker_request.remove_duplicate_files,
+            fk_owner: user.pk,
+            creation_timestamp: Utc::now(),
+        })
+        .get_result::<Broker>(&connection)
+        .map_err(Error::from)?;
+
+    Ok(warp::reply::json(&created_broker))
+}
+
+pub async fn get_brokers_handler(user: Option<User>) -> Result<impl Reply, Rejection> {
+    let connection = acquire_db_connection()?;
+    Ok(warp::reply::json(&perms::get_brokers_secured(
+        &connection,
+        user.as_ref(),
+    )?))
 }
 
 pub fn load_object(

@@ -101,3 +101,20 @@ pub fn load_broker_secured(
         .optional()?
         .ok_or(Error::InaccessibleObjectError(broker_pk))
 }
+
+pub fn get_brokers_secured(
+    connection: &DbConnection,
+    user: Option<&User>,
+) -> Result<Vec<Broker>, Error> {
+    let user_pk = user.map(|u| u.pk);
+    broker::table
+        .filter(broker::fk_owner.nullable().eq(&user_pk).or(exists(
+            permission_target::table.filter(get_permission_target_read_condition!(
+                permission_target::fk_broker,
+                broker::pk.nullable(),
+                &user_pk
+            )),
+        )))
+        .load::<Broker>(connection)
+        .map_err(|e| Error::QueryError(e.to_string()))
+}

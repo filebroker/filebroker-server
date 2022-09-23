@@ -201,6 +201,17 @@ async fn setup_tokio_runtime() {
         .and(warp::header::optional::<String>("Range"))
         .and_then(data::get_object_head_handler);
 
+    let create_broker_route = warp::path("create-broker")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(data::create_broker_handler);
+
+    let get_brokers_route = warp::path("get-brokers")
+        .and(warp::get())
+        .and(auth::with_user_optional())
+        .and_then(data::get_brokers_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(try_refresh_login_route)
@@ -214,7 +225,9 @@ async fn setup_tokio_runtime() {
         .or(get_post_route)
         .or(upload_route)
         .or(get_object_route)
-        .or(get_object_head_route);
+        .or(get_object_head_route)
+        .or(create_broker_route)
+        .or(get_brokers_route);
 
     let filter = routes
         .recover(error::handle_rejection)
