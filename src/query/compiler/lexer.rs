@@ -8,7 +8,7 @@ use super::Location;
 use super::Log;
 use super::INTEGER_LIMIT;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tag {
     // operators
     And,
@@ -84,7 +84,7 @@ impl TryFrom<&str> for Tag {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
     pub location: Location,
     pub parsed_token: ParsedToken,
@@ -96,7 +96,7 @@ impl fmt::Display for Token {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub enum ParsedToken {
     IdentifierToken(String),

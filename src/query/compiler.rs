@@ -23,7 +23,7 @@ pub mod parser;
 
 pub const INTEGER_LIMIT: u32 = 1 << 31;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Location {
     pub start: usize,
     pub end: usize,
@@ -39,7 +39,7 @@ pub struct Log {
     pub errors: Vec<Error>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Error {
     pub location: Location,
     pub msg: String,

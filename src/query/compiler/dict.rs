@@ -7,7 +7,7 @@ use super::{
     Error, Location, Log,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Type {
     Any,
     Boolean,

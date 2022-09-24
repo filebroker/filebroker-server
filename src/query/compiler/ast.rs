@@ -6,7 +6,7 @@ use crate::query::{Direction, Ordering, QueryParameters};
 
 use super::{dict, dict::Type, lexer::Tag, Cte, Error, Location, Log};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operator {
     And,
     Divide,
@@ -839,7 +839,7 @@ pub trait ExpressionNode: NodeType + Downcast {
 
 impl_downcast!(ExpressionNode);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PostTagNode {
     pub identifier: String,
 }
@@ -856,7 +856,7 @@ impl ExpressionNode for PostTagNode {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct AttributeNode {
     pub identifier: String,
 }
@@ -925,7 +925,7 @@ impl ExpressionNode for BinaryExpressionNode {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct IntegerLiteralNode {
     pub val: i32,
 }
@@ -942,7 +942,7 @@ impl ExpressionNode for IntegerLiteralNode {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct StringLiteralNode {
     pub val: String,
 }
@@ -959,7 +959,7 @@ impl ExpressionNode for StringLiteralNode {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct BooleanLiteralNode {
     pub val: bool,
 }
@@ -976,7 +976,7 @@ impl ExpressionNode for BooleanLiteralNode {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct NullLiteralNode {}
 
 impl NodeType for NullLiteralNode {
@@ -1011,7 +1011,7 @@ impl ExpressionNode for UnaryExpressionNode {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct VariableNode {
     pub identifier: String,
 }
