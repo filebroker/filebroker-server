@@ -14,27 +14,6 @@ table! {
 }
 
 table! {
-    object_upload (object_key) {
-        object_key -> Varchar,
-        status -> Varchar,
-        bytes_written -> Int8,
-        total_bytes -> Int8,
-        current_rate -> Nullable<Int8>,
-        estimated_millis_remaining -> Nullable<Int8>,
-        completed_object -> Nullable<Varchar>,
-        mime_type -> Varchar,
-        fk_broker -> Int4,
-        fk_uploader -> Int4,
-    }
-}
-
-table! {
-    object_upload_status (unique_id) {
-        unique_id -> Varchar,
-    }
-}
-
-table! {
     permission_target (pk) {
         pk -> Int4,
         public -> Bool,
@@ -176,10 +155,6 @@ table! {
 }
 
 joinable!(broker -> registered_user (fk_owner));
-joinable!(object_upload -> broker (fk_broker));
-joinable!(object_upload -> object_upload_status (status));
-joinable!(object_upload -> registered_user (fk_uploader));
-joinable!(object_upload -> s3_object (completed_object));
 joinable!(permission_target -> broker (fk_broker));
 joinable!(permission_target -> post (fk_post));
 joinable!(permission_target -> post_collection (fk_post_collection));
@@ -201,8 +176,6 @@ joinable!(user_group_membership -> user_group (fk_group));
 
 allow_tables_to_appear_in_same_query!(
     broker,
-    object_upload,
-    object_upload_status,
     permission_target,
     post,
     post_collection,
