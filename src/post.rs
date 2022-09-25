@@ -79,11 +79,6 @@ fn sanitize_tag(tag: String) -> String {
     WHITESPACE_REGEX.replace_all(tag.trim(), " ").into_owned()
 }
 
-#[derive(Serialize)]
-pub struct CreatePostResponse {
-    pub post_id: i32,
-}
-
 fn sanitize_request_tags(request_tags: Vec<String>) -> Vec<String> {
     request_tags
         .into_iter()
@@ -147,7 +142,7 @@ pub async fn create_post_handler(
                 .execute(&connection)?;
         }
 
-        Ok(warp::reply::json(&CreatePostResponse { post_id: post.pk }))
+        Ok(warp::reply::json(&post))
     })
     .map_err(warp::reject::custom)
 }
