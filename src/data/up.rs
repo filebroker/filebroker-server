@@ -117,6 +117,7 @@ fn content_type_is_video(content_type: &str) -> bool {
         || content_type.eq_ignore_ascii_case("video/quicktime")
         || content_type.eq_ignore_ascii_case("video/x-msvideo")
         || content_type.eq_ignore_ascii_case("video/x-ms-wmv")
+        || content_type.eq_ignore_ascii_case("video/x-matroska")
 }
 
 #[inline]
