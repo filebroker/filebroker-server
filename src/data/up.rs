@@ -47,7 +47,7 @@ where
                     .and(s3_object::fk_broker.eq(broker.pk)),
             )
             .limit(1)
-            .get_result::<S3Object>(&connection)
+            .get_result::<S3Object>(&mut connection)
             .optional()
             .map_err(|e| Error::QueryError(e.to_string()))?;
 
@@ -104,7 +104,7 @@ where
             thumbnail_object_key: thumbnail.map(|t| t.object_key),
             creation_timestamp: Utc::now(),
         })
-        .get_result::<S3Object>(&connection)
+        .get_result::<S3Object>(&mut connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
     Ok(s3_object)
@@ -232,7 +232,7 @@ async fn generate_thumbnail(
         log::info!("Storing thumbnail {} for object {}", &thumb_path, path);
         bucket.put_object(&thumb_path, &thumb_bytes).await?;
 
-        let connection = acquire_db_connection()?;
+        let mut connection = acquire_db_connection()?;
         let s3_object = diesel::insert_into(s3_object::table)
             .values(&S3Object {
                 object_key: thumb_path,
@@ -244,7 +244,7 @@ async fn generate_thumbnail(
                 thumbnail_object_key: None,
                 creation_timestamp: Utc::now(),
             })
-            .get_result::<S3Object>(&connection)
+            .get_result::<S3Object>(&mut connection)
             .map_err(|e| Error::QueryError(e.to_string()))?;
 
         Ok(Some(s3_object))

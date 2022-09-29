@@ -180,7 +180,7 @@ fn parse_range(range: &str, size: u64) -> Result<Vec<(u64, u64)>, Error> {
         .collect::<Result<Vec<_>, Error>>()
 }
 
-fn check_range_overlap(ranges: &Vec<(u64, u64)>) -> Result<(), Error> {
+fn check_range_overlap(ranges: &[(u64, u64)]) -> Result<(), Error> {
     for i in 0..ranges.len() {
         for j in 0..ranges.len() {
             if i == j {

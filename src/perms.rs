@@ -1,5 +1,5 @@
 use diesel::{
-    dsl::{any, exists, not},
+    dsl::{exists, not},
     NullableExpressionMethods, QueryDsl,
 };
 
@@ -40,7 +40,7 @@ pub fn append_secure_query_condition(where_expressions: &mut Vec<String>, user: 
 macro_rules! get_permission_target_read_condition {
     ($fk:expr, $target:expr, $user_pk:expr) => {
         $fk.eq($target).and(
-            permission_target::public.or(permission_target::fk_granted_group.eq(any(
+            permission_target::public.or(permission_target::fk_granted_group.eq_any(
                 user_group::table.select(user_group::pk).nullable().filter(
                     user_group::fk_owner.nullable().eq($user_pk).or(exists(
                         user_group_membership::table.filter(
@@ -50,14 +50,14 @@ macro_rules! get_permission_target_read_condition {
                         ),
                     )),
                 ),
-            ))),
+            )),
         )
     };
 }
 
 pub fn load_post_secured(
     post_pk: i32,
-    connection: &DbConnection,
+    connection: &mut DbConnection,
     user: Option<&User>,
 ) -> Result<(Post, Option<S3Object>), Error> {
     let user_pk = user.map(|u| u.pk);
@@ -81,7 +81,7 @@ pub fn load_post_secured(
 
 pub fn load_broker_secured(
     broker_pk: i32,
-    connection: &DbConnection,
+    connection: &mut DbConnection,
     user: Option<&User>,
 ) -> Result<Broker, Error> {
     let user_pk = user.map(|u| u.pk);
@@ -103,7 +103,7 @@ pub fn load_broker_secured(
 }
 
 pub fn get_brokers_secured(
-    connection: &DbConnection,
+    connection: &mut DbConnection,
     user: Option<&User>,
 ) -> Result<Vec<Broker>, Error> {
     let user_pk = user.map(|u| u.pk);

@@ -1,4 +1,6 @@
-table! {
+// @generated automatically by Diesel CLI.
+
+diesel::table! {
     broker (pk) {
         pk -> Int4,
         name -> Varchar,
@@ -13,7 +15,7 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     permission_target (pk) {
         pk -> Int4,
         public -> Bool,
@@ -28,7 +30,7 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     post (pk) {
         pk -> Int4,
         data_url -> Nullable<Varchar>,
@@ -42,7 +44,7 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     post_collection (pk) {
         pk -> Int4,
         name -> Varchar,
@@ -51,7 +53,7 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     post_collection_item (fk_post, fk_post_collection) {
         fk_post -> Int4,
         fk_post_collection -> Int4,
@@ -60,14 +62,14 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     post_tag (fk_post, fk_tag) {
         fk_post -> Int4,
         fk_tag -> Int4,
     }
 }
 
-table! {
+diesel::table! {
     refresh_token (pk) {
         pk -> Int4,
         uuid -> Uuid,
@@ -77,7 +79,7 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     registered_user (pk) {
         pk -> Int4,
         user_name -> Varchar,
@@ -88,7 +90,7 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     s3_object (object_key) {
         object_key -> Varchar,
         sha256_hash -> Nullable<Bpchar>,
@@ -101,7 +103,7 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     tag (pk) {
         pk -> Int4,
         tag_name -> Varchar,
@@ -109,14 +111,14 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     tag_alias (fk_source, fk_target) {
         fk_source -> Int4,
         fk_target -> Int4,
     }
 }
 
-table! {
+diesel::table! {
     tag_closure_table (pk) {
         pk -> Int4,
         fk_parent -> Int4,
@@ -125,14 +127,14 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     tag_edge (fk_parent, fk_child) {
         fk_parent -> Int4,
         fk_child -> Int4,
     }
 }
 
-table! {
+diesel::table! {
     user_group (pk) {
         pk -> Int4,
         name -> Varchar,
@@ -143,7 +145,7 @@ table! {
     }
 }
 
-table! {
+diesel::table! {
     user_group_membership (fk_group, fk_user) {
         fk_group -> Int4,
         fk_user -> Int4,
@@ -154,27 +156,27 @@ table! {
     }
 }
 
-joinable!(broker -> registered_user (fk_owner));
-joinable!(permission_target -> broker (fk_broker));
-joinable!(permission_target -> post (fk_post));
-joinable!(permission_target -> post_collection (fk_post_collection));
-joinable!(permission_target -> registered_user (fk_granted_by));
-joinable!(permission_target -> user_group (fk_granted_group));
-joinable!(post -> registered_user (fk_create_user));
-joinable!(post -> s3_object (s3_object));
-joinable!(post_collection -> registered_user (fk_owner));
-joinable!(post_collection_item -> post (fk_post));
-joinable!(post_collection_item -> post_collection (fk_post_collection));
-joinable!(post_collection_item -> registered_user (fk_added_by));
-joinable!(post_tag -> post (fk_post));
-joinable!(post_tag -> tag (fk_tag));
-joinable!(refresh_token -> registered_user (fk_registered_user));
-joinable!(s3_object -> broker (fk_broker));
-joinable!(s3_object -> registered_user (fk_uploader));
-joinable!(user_group -> registered_user (fk_owner));
-joinable!(user_group_membership -> user_group (fk_group));
+diesel::joinable!(broker -> registered_user (fk_owner));
+diesel::joinable!(permission_target -> broker (fk_broker));
+diesel::joinable!(permission_target -> post (fk_post));
+diesel::joinable!(permission_target -> post_collection (fk_post_collection));
+diesel::joinable!(permission_target -> registered_user (fk_granted_by));
+diesel::joinable!(permission_target -> user_group (fk_granted_group));
+diesel::joinable!(post -> registered_user (fk_create_user));
+diesel::joinable!(post -> s3_object (s3_object));
+diesel::joinable!(post_collection -> registered_user (fk_owner));
+diesel::joinable!(post_collection_item -> post (fk_post));
+diesel::joinable!(post_collection_item -> post_collection (fk_post_collection));
+diesel::joinable!(post_collection_item -> registered_user (fk_added_by));
+diesel::joinable!(post_tag -> post (fk_post));
+diesel::joinable!(post_tag -> tag (fk_tag));
+diesel::joinable!(refresh_token -> registered_user (fk_registered_user));
+diesel::joinable!(s3_object -> broker (fk_broker));
+diesel::joinable!(s3_object -> registered_user (fk_uploader));
+diesel::joinable!(user_group -> registered_user (fk_owner));
+diesel::joinable!(user_group_membership -> user_group (fk_group));
 
-allow_tables_to_appear_in_same_query!(
+diesel::allow_tables_to_appear_in_same_query!(
     broker,
     permission_target,
     post,

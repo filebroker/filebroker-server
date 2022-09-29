@@ -2,9 +2,11 @@ use std::{collections::HashMap, fmt::Write};
 
 use chrono::Utc;
 use diesel::{
-    dsl::{any, exists},
+    connection::LoadConnection,
+    dsl::exists,
+    pg::Pg,
     sql_types::{Array, Integer},
-    BoolExpressionMethods, OptionalExtension,
+    BoolExpressionMethods, Connection, OptionalExtension,
 };
 use exec_rs::sync::MutexSync;
 use itertools::Itertools;
@@ -22,7 +24,6 @@ use crate::{
     query::functions::*,
     retry_on_constraint_violation, run_retryable_transaction,
     schema::{post, post_tag, tag, tag_alias, tag_closure_table, tag_edge},
-    DbConnection,
 };
 
 lazy_static! {
@@ -43,7 +44,7 @@ pub struct CreatePostRequest {
     pub thumbnail_url: Option<String>,
 }
 
-fn validate_tags(tags: &Vec<String>) -> Result<(), ValidationError> {
+fn validate_tags(tags: &[String]) -> Result<(), ValidationError> {
     for tag in tags {
         if !tag_is_valid(tag) {
             return Err(ValidationError::new(
@@ -101,15 +102,15 @@ pub async fn create_post_handler(
     // cannot use hashset because it is not supported as diesel expression
     let tags = create_post_request.tags.map(sanitize_request_tags);
 
-    let connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection()?;
     // run as repeatable read transaction and retry serialisation errors when a concurrent transaction
     // deletes or creates relevant tags
-    run_retryable_transaction(&connection, || {
+    run_retryable_transaction(&mut connection, |connection| {
         let set_tags = if let Some(ref tags) = tags {
-            let (mut set_tags, created_tags) = get_or_create_tags(&connection, tags)?;
+            let (mut set_tags, created_tags) = get_or_create_tags(connection, tags)?;
             set_tags.extend(created_tags);
 
-            filter_redundant_tags(&mut set_tags, &connection)?;
+            filter_redundant_tags(&mut set_tags, connection)?;
             Some(set_tags)
         } else {
             None
@@ -126,7 +127,7 @@ pub async fn create_post_handler(
                 s3_object: create_post_request.s3_object.clone(),
                 thumbnail_url: create_post_request.thumbnail_url.clone(),
             })
-            .get_result::<Post>(&connection)?;
+            .get_result::<Post>(connection)?;
 
         if let Some(set_tags) = set_tags {
             let post_tags = set_tags
@@ -139,7 +140,7 @@ pub async fn create_post_handler(
 
             diesel::insert_into(post_tag::table)
                 .values(&post_tags)
-                .execute(&connection)?;
+                .execute(connection)?;
         }
 
         Ok(warp::reply::json(&post))
@@ -171,9 +172,9 @@ pub async fn create_tags_handler(
     })?;
 
     let tag_names = sanitize_request_tags(create_tags_request.tag_names);
-    let connection = acquire_db_connection()?;
-    run_retryable_transaction(&connection, || {
-        let (existing_tags, inserted_tags) = get_or_create_tags(&connection, &tag_names)?;
+    let mut connection = acquire_db_connection()?;
+    run_retryable_transaction(&mut connection, |connection| {
+        let (existing_tags, inserted_tags) = get_or_create_tags(connection, &tag_names)?;
         Ok(warp::reply::json(&CreateTagsResponse {
             existing_tags,
             inserted_tags,
@@ -183,13 +184,13 @@ pub async fn create_tags_handler(
 }
 
 /// Get and create all tags for the supplied tag names, returning a tuple of all existing and all created tags.
-pub fn get_or_create_tags(
-    connection: &DbConnection,
+pub fn get_or_create_tags<C: Connection<Backend = Pg> + LoadConnection>(
+    connection: &mut C,
     tags: &[String],
 ) -> Result<(Vec<Tag>, Vec<Tag>), TransactionRuntimeError> {
     let lower_tags = tags.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>();
     let existing_tags = tag::table
-        .filter(lower(tag::tag_name).eq(any(&lower_tags)))
+        .filter(lower(tag::tag_name).eq_any(&lower_tags))
         .load::<Tag>(connection)?;
 
     let mut existing_tag_map = HashMap::new();
@@ -219,7 +220,10 @@ pub fn get_or_create_tags(
 
 /// Filter redundant tags by removing tags that are a parent of another included tag or a shorter alias
 /// for another included tag.
-pub fn filter_redundant_tags(tags: &mut Vec<Tag>, connection: &DbConnection) -> Result<(), Error> {
+pub fn filter_redundant_tags<C: Connection<Backend = Pg> + LoadConnection>(
+    tags: &mut Vec<Tag>,
+    connection: &mut C,
+) -> Result<(), Error> {
     let mut selected_tags = Vec::new();
     for tag in tags.iter() {
         selected_tags.push(get_tag_hierarchy_information(tag, connection)?);
@@ -253,9 +257,9 @@ pub struct TagHierarchyInformation {
     pub tag_aliases: Vec<Tag>,
 }
 
-pub fn get_tag_hierarchy_information(
+pub fn get_tag_hierarchy_information<C: Connection<Backend = Pg> + LoadConnection>(
     tag: &Tag,
-    connection: &DbConnection,
+    connection: &mut C,
 ) -> Result<TagHierarchyInformation, Error> {
     let tag_closure_table = tag_closure_table::table
         .filter(
@@ -299,7 +303,7 @@ macro_rules! report_missing_pks {
     ($tab:ident, $pks:expr, $connection:expr) => {
         $tab::table
             .select($tab::pk)
-            .filter($tab::pk.eq(any($pks)))
+            .filter($tab::pk.eq_any($pks))
             .load::<i32>($connection)
             .map(|found_pks| {
                 let missing_pks = $pks
@@ -337,18 +341,18 @@ pub async fn upsert_tag_handler(
 
     let tag_name = sanitize_tag(upsert_tag_request.tag_name);
 
-    let connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection()?;
 
     if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
-        report_missing_pks!(tag, parent_pks, &connection)??;
+        report_missing_pks!(tag, parent_pks, &mut connection)??;
     }
 
     if let Some(ref alias_pks) = upsert_tag_request.alias_pks {
-        report_missing_pks!(tag, alias_pks, &connection)??;
+        report_missing_pks!(tag, alias_pks, &mut connection)??;
     }
 
-    run_retryable_transaction(&connection, || {
-        let (inserted, tag) = get_or_create_tag(&tag_name, &connection)?;
+    run_retryable_transaction(&mut connection, |connection| {
+        let (inserted, tag) = get_or_create_tag(&tag_name, connection)?;
 
         let parents_to_set = if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
             if parent_pks.iter().any(|parent_pk| *parent_pk == tag.pk) {
@@ -360,7 +364,7 @@ pub async fn upsert_tag_handler(
                 ));
             }
 
-            let curr_parents = get_tag_parents_pks(tag.pk, &connection)?;
+            let curr_parents = get_tag_parents_pks(tag.pk, connection)?;
             let parents_to_set = parent_pks
                 .iter()
                 .cloned()
@@ -373,7 +377,7 @@ pub async fn upsert_tag_handler(
                 )));
             }
 
-            add_tag_parents(tag.pk, &parents_to_set, &connection)?;
+            add_tag_parents(tag.pk, &parents_to_set, connection)?;
             Some(parents_to_set)
         } else {
             None
@@ -390,7 +394,7 @@ pub async fn upsert_tag_handler(
                     ));
                 }
 
-                let curr_aliases = get_tag_aliases_pks(tag.pk, &connection)?;
+                let curr_aliases = get_tag_aliases_pks(tag.pk, connection)?;
                 let aliases_to_set = alias_pks
                     .iter()
                     .cloned()
@@ -404,8 +408,8 @@ pub async fn upsert_tag_handler(
                 }
 
                 // remove added tags from existing hierarchy to sync this this tag's hierarchy
-                remove_tags_from_hierarchy(&aliases_to_set, &connection)?;
-                add_tag_aliases(&tag, &aliases_to_set, &connection)?;
+                remove_tags_from_hierarchy(&aliases_to_set, connection)?;
+                add_tag_aliases(&tag, &aliases_to_set, connection)?;
                 Some(aliases_to_set)
             }
             _ => None,
@@ -415,9 +419,9 @@ pub async fn upsert_tag_handler(
             || parents_to_set.as_ref().map_or(false, |pks| !pks.is_empty())
         {
             log::debug!("syncing parents with aliases");
-            let curr_aliases = get_tag_aliases(tag.pk, &connection)?;
+            let curr_aliases = get_tag_aliases(tag.pk, connection)?;
             // add current parents of tag as parents for all current aliases if either changed
-            let curr_parents = get_tag_parents_pks(tag.pk, &connection)?;
+            let curr_parents = get_tag_parents_pks(tag.pk, connection)?;
             log::debug!("curr parents: {:?}", &curr_parents);
             if !curr_parents.is_empty() {
                 for alias in curr_aliases.iter() {
@@ -426,11 +430,11 @@ pub async fn upsert_tag_handler(
                         &curr_parents,
                         alias.pk
                     );
-                    add_tag_parents(alias.pk, &curr_parents, &connection)?;
+                    add_tag_parents(alias.pk, &curr_parents, connection)?;
                 }
             }
 
-            let curr_children = get_tag_children_pks(tag.pk, &connection)?;
+            let curr_children = get_tag_children_pks(tag.pk, connection)?;
             if !curr_children.is_empty() {
                 let curr_alias_pks = curr_aliases
                     .iter()
@@ -442,7 +446,7 @@ pub async fn upsert_tag_handler(
                         &curr_alias_pks,
                         child
                     );
-                    add_tag_parents(child, &curr_alias_pks, &connection)?;
+                    add_tag_parents(child, &curr_alias_pks, connection)?;
                 }
             }
         }
@@ -455,9 +459,9 @@ pub async fn upsert_tag_handler(
     .map_err(warp::reject::custom)
 }
 
-pub fn get_or_create_tag(
+pub fn get_or_create_tag<C: Connection<Backend = Pg> + LoadConnection>(
     tag_name: &str,
-    connection: &DbConnection,
+    connection: &mut C,
 ) -> Result<(bool, Tag), TransactionRuntimeError> {
     let existing_tag = tag::table
         .filter(lower(tag::tag_name).eq(tag_name.to_lowercase()))
@@ -479,9 +483,9 @@ pub fn get_or_create_tag(
     Ok((inserted, tag))
 }
 
-pub fn get_tag_parents_pks(
+pub fn get_tag_parents_pks<C: Connection<Backend = Pg> + LoadConnection>(
     tag_pk: i32,
-    connection: &DbConnection,
+    connection: &mut C,
 ) -> Result<Vec<i32>, diesel::result::Error> {
     tag_edge::table
         .select(tag_edge::fk_parent)
@@ -489,9 +493,9 @@ pub fn get_tag_parents_pks(
         .load::<i32>(connection)
 }
 
-pub fn get_tag_children_pks(
+pub fn get_tag_children_pks<C: Connection<Backend = Pg> + LoadConnection>(
     tag_pk: i32,
-    connection: &DbConnection,
+    connection: &mut C,
 ) -> Result<Vec<i32>, diesel::result::Error> {
     tag_edge::table
         .select(tag_edge::fk_child)
@@ -499,9 +503,9 @@ pub fn get_tag_children_pks(
         .load::<i32>(connection)
 }
 
-pub fn get_tag_aliases_pks(
+pub fn get_tag_aliases_pks<C: Connection<Backend = Pg> + LoadConnection>(
     tag_pk: i32,
-    connection: &DbConnection,
+    connection: &mut C,
 ) -> Result<Vec<i32>, diesel::result::Error> {
     tag::table
         .select(tag::pk)
@@ -518,9 +522,9 @@ pub fn get_tag_aliases_pks(
         .load::<i32>(connection)
 }
 
-pub fn get_tag_aliases(
+pub fn get_tag_aliases<C: Connection<Backend = Pg> + LoadConnection>(
     tag_pk: i32,
-    connection: &DbConnection,
+    connection: &mut C,
 ) -> Result<Vec<Tag>, diesel::result::Error> {
     tag::table
         .filter(exists(
@@ -536,10 +540,10 @@ pub fn get_tag_aliases(
         .load::<Tag>(connection)
 }
 
-pub fn add_tag_aliases(
+pub fn add_tag_aliases<C: Connection<Backend = Pg>>(
     tag: &Tag,
-    alias_pks: &Vec<i32>,
-    connection: &DbConnection,
+    alias_pks: &[i32],
+    connection: &mut C,
 ) -> Result<(), TransactionRuntimeError> {
     diesel::sql_query(
         r#"
@@ -560,10 +564,10 @@ pub fn add_tag_aliases(
     Ok(())
 }
 
-pub fn add_tag_parents(
+pub fn add_tag_parents<C: Connection<Backend = Pg>>(
     tag_pk: i32,
-    parent_pks: &Vec<i32>,
-    connection: &DbConnection,
+    parent_pks: &[i32],
+    connection: &mut C,
 ) -> Result<(), TransactionRuntimeError> {
     // avoiding cycles:
     // for `tag`, remove all edges to parents that are children of any of the added parents (or an added parent itself, in case an added parent already is a direct parent)
@@ -605,9 +609,9 @@ pub fn add_tag_parents(
     Ok(())
 }
 
-pub fn remove_tags_from_hierarchy(
-    tags: &Vec<i32>,
-    connection: &DbConnection,
+pub fn remove_tags_from_hierarchy<C: Connection<Backend = Pg>>(
+    tags: &[i32],
+    connection: &mut C,
 ) -> Result<usize, diesel::result::Error> {
     diesel::sql_query(
         r#"

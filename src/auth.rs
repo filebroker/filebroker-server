@@ -105,10 +105,10 @@ async fn get_user_from_auth_header(header_map: HeaderMap) -> Result<Option<User>
     .map_err(|_| warp::reject::custom(Error::InvalidJwtError))?;
     let claims = &token_data.claims;
 
-    let connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection()?;
     match registered_user::table
         .filter(registered_user::user_name.eq(&claims.sub))
-        .first::<User>(&connection)
+        .first::<User>(&mut connection)
     {
         Ok(registered_user) => Ok(Some(registered_user)),
         Err(e) => Err(warp::reject::custom(Error::QueryError(e.to_string()))),
@@ -119,12 +119,12 @@ async fn get_user_from_auth_header(header_map: HeaderMap) -> Result<Option<User>
 /// and returns a [`LoginResponse`] if the credentials are correct or a InvalidCredentialsError, which
 /// results in a 403, if the credentials are not correct.
 pub async fn login_handler(request: LoginRequest) -> Result<impl Reply, Rejection> {
-    let connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection()?;
     connection
-        .transaction(|| {
+        .transaction(|connection| {
             let found_registered_user = registered_user::table
                 .filter(registered_user::user_name.eq(&request.user_name))
-                .first::<User>(&connection);
+                .first::<User>(connection);
             let registered_user = match found_registered_user {
                 Ok(registered_user) => {
                     let hashed_password = &registered_user.password;
@@ -143,7 +143,7 @@ pub async fn login_handler(request: LoginRequest) -> Result<impl Reply, Rejectio
                 Err(e) => return Err(Error::QueryError(e.to_string())),
             };
 
-            let refresh_token_cookie = create_refresh_token_cookie(&registered_user, &connection)?;
+            let refresh_token_cookie = create_refresh_token_cookie(&registered_user, connection)?;
             create_login_response(registered_user, refresh_token_cookie)
         })
         .map_err(warp::reject::custom)
@@ -153,7 +153,7 @@ pub async fn login_handler(request: LoginRequest) -> Result<impl Reply, Rejectio
 /// to the database as a RefreshToken entity which links the UUID to the User.
 fn create_refresh_token_cookie(
     registered_user: &User,
-    connection: &DbConnection,
+    connection: &mut DbConnection,
 ) -> Result<String, Error> {
     let uuid = Uuid::new_v4();
     let current_utc = Utc::now();
@@ -288,9 +288,9 @@ pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply,
     if let Some(refresh_token) = refresh_token {
         let curr_token_uuid = Uuid::parse_str(&refresh_token)
             .map_err(|_| Error::BadRequestError(String::from("Invalid refresh token")))?;
-        let connection = acquire_db_connection()?;
+        let mut connection = acquire_db_connection()?;
         diesel::delete(refresh_token::table.filter(refresh_token::uuid.eq(&curr_token_uuid)))
-            .execute(&connection)
+            .execute(&mut connection)
             .map_err(Error::from)?;
 
         let refresh_token_cookie = format_refresh_token_cookie("", &Utc::now().to_rfc2822());
@@ -301,8 +301,8 @@ pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply,
 }
 
 fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Error> {
-    let connection = acquire_db_connection()?;
-    connection.transaction(|| {
+    let mut connection = acquire_db_connection()?;
+    connection.transaction(|connection| {
         let curr_token_uuid = Uuid::parse_str(&refresh_token)
             .map_err(|_| Error::BadRequestError(String::from("Invalid refresh token")))?;
         let current_utc = Utc::now();
@@ -314,14 +314,14 @@ fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Erro
                     .and(refresh_token::expiry.ge(&current_utc))
                     .and(refresh_token::invalidated.eq(false)),
             )
-            .first::<RefreshToken>(&connection)
+            .first::<RefreshToken>(connection)
             .optional()
             .map_err(|e| Error::QueryError(e.to_string()))?
             .ok_or(Error::InvalidRefreshTokenError)?;
 
         let user = registered_user::table
             .filter(registered_user::pk.eq(refresh_token.fk_registered_user))
-            .first::<User>(&connection)
+            .first::<User>(connection)
             .map_err(|e| Error::QueryError(e.to_string()))?;
 
         let expiry = current_utc + Duration::hours(24);
@@ -333,7 +333,7 @@ fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Erro
                 refresh_token::uuid.eq(new_token),
                 refresh_token::expiry.eq(expiry),
             ))
-            .get_result::<RefreshToken>(&connection)
+            .get_result::<RefreshToken>(connection)
             .map_err(|e| Error::QueryError(e.to_string()))?;
 
         let uuid = updated_token.uuid.to_string();
@@ -372,13 +372,13 @@ pub async fn register_handler(
 
     // synchronise user creation based on user_name
     USER_NAME_SYNC.evaluate(user_registration.user_name.clone(), || {
-        let connection = acquire_db_connection()?;
+        let mut connection = acquire_db_connection()?;
         connection
-            .transaction(|| {
+            .transaction(|connection| {
                 let existing_count: Result<i64, _> = registered_user::table
                     .select(count(registered_user::pk))
                     .filter(registered_user::user_name.eq(&user_registration.user_name))
-                    .first(&connection);
+                    .first(connection);
 
                 match existing_count {
                     Ok(count) => {
@@ -404,11 +404,11 @@ pub async fn register_handler(
 
                 match diesel::insert_into(registered_user::table)
                     .values(&new_user)
-                    .get_result::<User>(&connection)
+                    .get_result::<User>(connection)
                 {
                     Ok(registered_user) => {
                         let refresh_token_cookie =
-                            create_refresh_token_cookie(&registered_user, &connection)?;
+                            create_refresh_token_cookie(&registered_user, connection)?;
                         create_login_response(registered_user, refresh_token_cookie)
                     }
                     Err(e) => Err(Error::QueryError(e.to_string())),

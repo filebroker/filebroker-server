@@ -82,9 +82,9 @@ pub async fn search_handler(
     };
 
     let sql_query = compiler::compile_sql(query_parameters_filter.query, query_parameters, &user)?;
-    let connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection()?;
     let posts = diesel::sql_query(&sql_query)
-        .load::<PostQueryObject>(&connection)
+        .load::<PostQueryObject>(&mut connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
     let full_count = if posts.is_empty() {
@@ -126,9 +126,9 @@ pub struct PostDetailed {
 }
 
 pub async fn get_post_handler(user: Option<User>, post_pk: i32) -> Result<impl Reply, Rejection> {
-    let connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection()?;
 
-    let (post, s3_object) = perms::load_post_secured(post_pk, &connection, user.as_ref())?;
+    let (post, s3_object) = perms::load_post_secured(post_pk, &mut connection, user.as_ref())?;
 
     Ok(warp::reply::json(&PostDetailed {
         pk: post.pk,

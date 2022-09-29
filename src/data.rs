@@ -40,8 +40,8 @@ pub async fn upload_handler(
         .map(|v| v.to_string())
         .ok_or_else(|| Error::InvalidFileError(String::from("No mime boundary")))?;
 
-    let connection = acquire_db_connection()?;
-    let broker = perms::load_broker_secured(broker_pk, &connection, Some(&user))?;
+    let mut connection = acquire_db_connection()?;
+    let broker = perms::load_broker_secured(broker_pk, &mut connection, Some(&user))?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -115,8 +115,8 @@ pub async fn get_object_handler(
     object_key: String,
     range: Option<String>,
 ) -> Result<impl Reply, Rejection> {
-    let connection = acquire_db_connection()?;
-    let (object, broker) = load_object(&object_key, &connection)?;
+    let mut connection = acquire_db_connection()?;
+    let (object, broker) = load_object(&object_key, &mut connection)?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -164,8 +164,8 @@ pub async fn get_object_head_handler(
     object_key: String,
     range: Option<String>,
 ) -> Result<impl Reply, Rejection> {
-    let connection = acquire_db_connection()?;
-    let (object, broker) = load_object(&object_key, &connection)?;
+    let mut connection = acquire_db_connection()?;
+    let (object, broker) = load_object(&object_key, &mut connection)?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -257,7 +257,7 @@ pub async fn create_broker_handler(
         )));
     }
 
-    let connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection()?;
     let created_broker = diesel::insert_into(broker::table)
         .values(&NewBroker {
             name: create_broker_request.name,
@@ -270,23 +270,23 @@ pub async fn create_broker_handler(
             fk_owner: user.pk,
             creation_timestamp: Utc::now(),
         })
-        .get_result::<Broker>(&connection)
+        .get_result::<Broker>(&mut connection)
         .map_err(Error::from)?;
 
     Ok(warp::reply::json(&created_broker))
 }
 
 pub async fn get_brokers_handler(user: Option<User>) -> Result<impl Reply, Rejection> {
-    let connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection()?;
     Ok(warp::reply::json(&perms::get_brokers_secured(
-        &connection,
+        &mut connection,
         user.as_ref(),
     )?))
 }
 
 pub fn load_object(
     object_key: &str,
-    connection: &DbConnection,
+    connection: &mut DbConnection,
 ) -> Result<(S3Object, Broker), Error> {
     s3_object::table
         .inner_join(broker::table)

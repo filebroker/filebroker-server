@@ -83,8 +83,11 @@ pub fn acquire_db_connection() -> Result<DbConnection, Error> {
         .map_err(|_| Error::DatabaseConnectionError)
 }
 
-pub fn run_retryable_transaction<T, F: Fn() -> Result<T, TransactionRuntimeError>>(
-    connection: &DbConnection,
+pub fn run_retryable_transaction<
+    T,
+    F: Fn(&mut PgConnection) -> Result<T, TransactionRuntimeError>,
+>(
+    connection: &mut DbConnection,
     function: F,
 ) -> Result<T, Error> {
     let mut retry_count: usize = 0;

@@ -7,9 +7,9 @@ use serde::Serialize;
 
 use crate::schema::*;
 
-#[derive(Associations, Identifiable, Queryable, Serialize)]
-#[table_name = "registered_user"]
-#[primary_key(pk)]
+#[derive(Identifiable, Queryable, Serialize)]
+#[diesel(table_name = registered_user)]
+#[diesel(primary_key(pk))]
 pub struct User {
     pub pk: i32,
     pub user_name: String,
@@ -20,7 +20,7 @@ pub struct User {
 }
 
 #[derive(Insertable)]
-#[table_name = "registered_user"]
+#[diesel(table_name = registered_user)]
 pub struct NewUser {
     pub user_name: String,
     pub password: String,
@@ -30,9 +30,9 @@ pub struct NewUser {
 }
 
 #[derive(Associations, Identifiable, Queryable)]
-#[belongs_to(User, foreign_key = "fk_registered_user")]
-#[table_name = "refresh_token"]
-#[primary_key(pk)]
+#[diesel(belongs_to(User, foreign_key = fk_registered_user))]
+#[diesel(table_name = refresh_token)]
+#[diesel(primary_key(pk))]
 pub struct RefreshToken {
     pub pk: i32,
     pub uuid: uuid::Uuid,
@@ -42,7 +42,7 @@ pub struct RefreshToken {
 }
 
 #[derive(Insertable)]
-#[table_name = "refresh_token"]
+#[diesel(table_name = refresh_token)]
 pub struct NewRefreshToken {
     pub uuid: uuid::Uuid,
     pub expiry: DateTime<Utc>,
@@ -51,9 +51,9 @@ pub struct NewRefreshToken {
 }
 
 #[derive(Associations, Identifiable, Queryable, QueryableByName, Serialize)]
-#[table_name = "post"]
-#[primary_key(pk)]
-#[belongs_to(User, foreign_key = "fk_create_user")]
+#[diesel(table_name = post)]
+#[diesel(primary_key(pk))]
+#[diesel(belongs_to(User, foreign_key = fk_create_user))]
 pub struct Post {
     pub pk: i32,
     pub data_url: Option<String>,
@@ -67,7 +67,7 @@ pub struct Post {
 }
 
 #[derive(Insertable)]
-#[table_name = "post"]
+#[diesel(table_name = post)]
 pub struct NewPost {
     pub data_url: Option<String>,
     pub source_url: Option<String>,
@@ -81,47 +81,47 @@ pub struct NewPost {
 
 #[derive(Queryable, QueryableByName, Serialize)]
 pub struct PostQueryObject {
-    #[sql_type = "Int4"]
+    #[diesel(sql_type = Int4)]
     pub pk: i32,
-    #[sql_type = "Nullable<Varchar>"]
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub data_url: Option<String>,
-    #[sql_type = "Nullable<Varchar>"]
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub source_url: Option<String>,
-    #[sql_type = "Nullable<Varchar>"]
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub title: Option<String>,
-    #[sql_type = "Timestamptz"]
+    #[diesel(sql_type = Timestamptz)]
     pub creation_timestamp: DateTime<Utc>,
-    #[sql_type = "Int4"]
+    #[diesel(sql_type = Int4)]
     pub fk_create_user: i32,
-    #[sql_type = "Int4"]
+    #[diesel(sql_type = Int4)]
     pub score: i32,
-    #[sql_type = "Nullable<Varchar>"]
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub s3_object: Option<String>,
-    #[sql_type = "Nullable<Varchar>"]
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub thumbnail_url: Option<String>,
-    #[sql_type = "Nullable<Varchar>"]
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub thumbnail_object_key: Option<String>,
     #[serde(skip_serializing)]
-    #[sql_type = "Int8"]
+    #[diesel(sql_type = Int8)]
     pub full_count: i64,
     #[serde(skip_serializing)]
-    #[sql_type = "Int4"]
+    #[diesel(sql_type = Int4)]
     pub evaluated_limit: i32,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
-#[table_name = "post_tag"]
-#[primary_key(fk_post, fk_tag)]
-#[belongs_to(Post, foreign_key = "fk_post")]
-#[belongs_to(Tag, foreign_key = "fk_tag")]
+#[diesel(table_name = post_tag)]
+#[diesel(primary_key(fk_post, fk_tag))]
+#[diesel(belongs_to(Post, foreign_key = fk_post))]
+#[diesel(belongs_to(Tag, foreign_key = fk_tag))]
 pub struct PostTag {
     pub fk_post: i32,
     pub fk_tag: i32,
 }
 
-#[derive(Associations, Clone, Identifiable, Queryable, Serialize)]
-#[table_name = "tag"]
-#[primary_key(pk)]
+#[derive(Clone, Identifiable, Queryable, Serialize)]
+#[diesel(table_name = tag)]
+#[diesel(primary_key(pk))]
 pub struct Tag {
     pub pk: i32,
     pub tag_name: String,
@@ -129,24 +129,24 @@ pub struct Tag {
 }
 
 #[derive(Insertable)]
-#[table_name = "tag"]
+#[diesel(table_name = tag)]
 pub struct NewTag {
     pub tag_name: String,
     pub creation_timestamp: DateTime<Utc>,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
-#[table_name = "tag_alias"]
-#[primary_key(fk_source, fk_target)]
-#[belongs_to(Tag, foreign_key = "fk_source")]
+#[diesel(table_name = tag_alias)]
+#[diesel(primary_key(fk_source, fk_target))]
+#[diesel(belongs_to(Tag, foreign_key = fk_source))]
 pub struct TagAlias {
     pub fk_source: i32,
     pub fk_target: i32,
 }
 
-#[derive(Associations, Clone, Identifiable, Queryable, Serialize)]
-#[table_name = "tag_closure_table"]
-#[primary_key(pk)]
+#[derive(Clone, Identifiable, Queryable, Serialize)]
+#[diesel(table_name = tag_closure_table)]
+#[diesel(primary_key(pk))]
 pub struct TagClosureTable {
     pub pk: i32,
     pub fk_parent: i32,
@@ -154,18 +154,18 @@ pub struct TagClosureTable {
     pub depth: i32,
 }
 
-#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[table_name = "tag_edge"]
-#[primary_key(fk_parent, fk_child)]
+#[derive(Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(table_name = tag_edge)]
+#[diesel(primary_key(fk_parent, fk_child))]
 pub struct TagEdge {
     pub fk_parent: i32,
     pub fk_child: i32,
 }
 
 #[derive(Associations, Identifiable, Queryable, Serialize)]
-#[belongs_to(User, foreign_key = "fk_owner")]
-#[table_name = "broker"]
-#[primary_key(pk)]
+#[diesel(belongs_to(User, foreign_key = fk_owner))]
+#[diesel(table_name = broker)]
+#[diesel(primary_key(pk))]
 pub struct Broker {
     pub pk: i32,
     pub name: String,
@@ -180,7 +180,7 @@ pub struct Broker {
 }
 
 #[derive(Insertable)]
-#[table_name = "broker"]
+#[diesel(table_name = broker)]
 pub struct NewBroker {
     pub name: String,
     pub bucket: String,
@@ -194,11 +194,11 @@ pub struct NewBroker {
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[belongs_to(Broker, foreign_key = "fk_broker")]
-#[belongs_to(User, foreign_key = "fk_uploader")]
-#[belongs_to(S3Object, foreign_key = "thumbnail_object_key")]
-#[table_name = "s3_object"]
-#[primary_key(object_key)]
+#[diesel(belongs_to(Broker, foreign_key = fk_broker))]
+#[diesel(belongs_to(User, foreign_key = fk_uploader))]
+#[diesel(belongs_to(S3Object, foreign_key = thumbnail_object_key))]
+#[diesel(table_name = s3_object)]
+#[diesel(primary_key(object_key))]
 pub struct S3Object {
     pub object_key: String,
     pub sha256_hash: Option<String>,
@@ -211,9 +211,9 @@ pub struct S3Object {
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[belongs_to(User, foreign_key = "fk_owner")]
-#[table_name = "user_group"]
-#[primary_key(pk)]
+#[diesel(belongs_to(User, foreign_key = fk_owner))]
+#[diesel(table_name = user_group)]
+#[diesel(primary_key(pk))]
 pub struct UserGroup {
     pub pk: i32,
     pub name: String,
@@ -224,10 +224,10 @@ pub struct UserGroup {
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[belongs_to(UserGroup, foreign_key = "fk_group")]
-#[belongs_to(User, foreign_key = "fk_user")]
-#[table_name = "user_group_membership"]
-#[primary_key(fk_group, fk_user)]
+#[diesel(belongs_to(UserGroup, foreign_key = fk_group))]
+#[diesel(belongs_to(User, foreign_key = fk_user))]
+#[diesel(table_name = user_group_membership)]
+#[diesel(primary_key(fk_group, fk_user))]
 pub struct UserGroupMembership {
     pub fk_group: i32,
     pub fk_user: i32,
@@ -238,9 +238,9 @@ pub struct UserGroupMembership {
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[belongs_to(User, foreign_key = "fk_owner")]
-#[table_name = "post_collection"]
-#[primary_key(pk)]
+#[diesel(belongs_to(User, foreign_key = fk_owner))]
+#[diesel(table_name = post_collection)]
+#[diesel(primary_key(pk))]
 pub struct PostCollection {
     pub pk: i32,
     pub name: String,
@@ -249,9 +249,9 @@ pub struct PostCollection {
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[belongs_to(User, foreign_key = "fk_added_by")]
-#[table_name = "post_collection_item"]
-#[primary_key(fk_post, fk_post_collection)]
+#[diesel(belongs_to(User, foreign_key = fk_added_by))]
+#[diesel(table_name = post_collection_item)]
+#[diesel(primary_key(fk_post, fk_post_collection))]
 pub struct PostCollectionItem {
     pub fk_post: i32,
     pub fk_post_collection: i32,
@@ -260,9 +260,9 @@ pub struct PostCollectionItem {
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[belongs_to(UserGroup, foreign_key = "fk_granted_group")]
-#[table_name = "permission_target"]
-#[primary_key(pk)]
+#[diesel(belongs_to(UserGroup, foreign_key = fk_granted_group))]
+#[diesel(table_name = permission_target)]
+#[diesel(primary_key(pk))]
 pub struct PermissionTarget {
     pub pk: i32,
     pub public: bool,
