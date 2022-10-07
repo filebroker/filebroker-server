@@ -64,6 +64,7 @@ pub struct Post {
     pub score: i32,
     pub s3_object: Option<String>,
     pub thumbnail_url: Option<String>,
+    pub public: bool,
 }
 
 #[derive(Insertable)]
@@ -77,6 +78,7 @@ pub struct NewPost {
     pub score: i32,
     pub s3_object: Option<String>,
     pub thumbnail_url: Option<String>,
+    pub public: bool,
 }
 
 #[derive(Queryable, QueryableByName, Serialize)]
@@ -102,11 +104,21 @@ pub struct PostQueryObject {
     #[diesel(sql_type = Nullable<Varchar>)]
     pub thumbnail_object_key: Option<String>,
     #[serde(skip_serializing)]
-    #[diesel(sql_type = Int8)]
-    pub full_count: i64,
+    #[diesel(sql_type = Nullable<Int8>)]
+    pub full_count: Option<i64>,
     #[serde(skip_serializing)]
     #[diesel(sql_type = Int4)]
     pub evaluated_limit: i32,
+}
+
+#[derive(Queryable, QueryableByName)]
+pub struct PostWindowQueryObject {
+    #[diesel(sql_type = Nullable<Int4>)]
+    pub prev: Option<i32>,
+    #[diesel(sql_type = Int4)]
+    pub pk: i32,
+    #[diesel(sql_type = Nullable<Int4>)]
+    pub next: Option<i32>,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
@@ -246,6 +258,7 @@ pub struct PostCollection {
     pub name: String,
     pub fk_owner: i32,
     pub creation_timestamp: DateTime<Utc>,
+    pub public: bool,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -260,18 +273,43 @@ pub struct PostCollectionItem {
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(Post, foreign_key = fk_post))]
 #[diesel(belongs_to(UserGroup, foreign_key = fk_granted_group))]
-#[diesel(table_name = permission_target)]
+#[diesel(table_name = post_group_access)]
+#[diesel(primary_key(fk_post, fk_granted_group))]
+pub struct PostGroupAccess {
+    pub fk_post: i32,
+    pub fk_granted_group: i32,
+    pub write: bool,
+    pub fk_granted_by: i32,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(PostCollection, foreign_key = fk_post_collection))]
+#[diesel(belongs_to(UserGroup, foreign_key = fk_granted_group))]
+#[diesel(table_name = post_collection_group_access)]
+#[diesel(primary_key(fk_post_collection, fk_granted_group))]
+pub struct PostCollectionGroupAccess {
+    pub fk_post_collection: i32,
+    pub fk_granted_group: i32,
+    pub write: bool,
+    pub fk_granted_by: i32,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(Broker, foreign_key = fk_broker))]
+#[diesel(belongs_to(UserGroup, foreign_key = fk_granted_group))]
+#[diesel(table_name = broker_access)]
 #[diesel(primary_key(pk))]
-pub struct PermissionTarget {
+pub struct BrokerAccess {
     pub pk: i32,
-    pub public: bool,
-    pub administrator: bool,
+    pub fk_broker: i32,
     pub fk_granted_group: Option<i32>,
+    pub write: bool,
+    pub public: bool,
     pub quota: Option<i64>,
-    pub fk_post: Option<i32>,
-    pub fk_broker: Option<i32>,
-    pub fk_post_collection: Option<i32>,
-    pub fk_granted_by: Option<i32>,
+    pub fk_granted_by: i32,
     pub creation_timestamp: DateTime<Utc>,
 }

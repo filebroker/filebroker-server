@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use diesel::RunQueryDsl;
+use diesel::{OptionalExtension, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 use warp::{Rejection, Reply};
@@ -9,7 +9,7 @@ use warp::{Rejection, Reply};
 use crate::{
     acquire_db_connection,
     error::Error,
-    model::{PostQueryObject, S3Object, User},
+    model::{PostQueryObject, PostWindowQueryObject, S3Object, User},
     perms,
 };
 
@@ -46,8 +46,8 @@ pub enum Direction {
 
 #[derive(Serialize)]
 pub struct SearchResult {
-    pub full_count: i64,
-    pub pages: i64,
+    pub full_count: Option<i64>,
+    pub pages: Option<i64>,
     pub posts: Vec<PostQueryObject>,
 }
 
@@ -62,24 +62,7 @@ pub async fn search_handler(
         ))
     })?;
 
-    let mut variables = HashMap::new();
-
-    variables.insert(
-        String::from("current_utc_timestamp"),
-        Utc::now().to_string(),
-    );
-    variables.insert(String::from("current_utc_date"), Utc::today().to_string());
-
-    if let Some(ref user) = user {
-        variables.insert(String::from("current_user_key"), user.pk.to_string());
-    }
-
-    let query_parameters = QueryParameters {
-        limit: query_parameters_filter.limit.map(|l| l.to_string()),
-        page: query_parameters_filter.page,
-        ordering: Vec::new(),
-        variables,
-    };
+    let query_parameters = prepare_query_parameters(&query_parameters_filter, &user);
 
     let sql_query = compiler::compile_sql(query_parameters_filter.query, query_parameters, &user)?;
     let mut connection = acquire_db_connection()?;
@@ -88,21 +71,23 @@ pub async fn search_handler(
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
     let full_count = if posts.is_empty() {
-        0
+        Some(0)
     } else {
         posts[0].full_count
     };
 
     let pages = if posts.is_empty() {
-        0
-    } else {
+        Some(0)
+    } else if let Some(full_count) = full_count {
         let limit = posts[0].evaluated_limit;
         if limit > MAX_LIMIT as i32 {
             return Err(warp::reject::custom(Error::IllegalQueryInputError(
                 format!("Limit '{}' exceeds maximum limit of {}.", limit, MAX_LIMIT),
             )));
         }
-        ((full_count as f64) / (limit as f64)).ceil() as i64
+        Some(((full_count as f64) / (limit as f64)).ceil() as i64)
+    } else {
+        None
     };
 
     Ok(warp::reply::json(&SearchResult {
@@ -123,12 +108,38 @@ pub struct PostDetailed {
     pub score: i32,
     pub s3_object: Option<S3Object>,
     pub thumbnail_url: Option<String>,
+    pub prev_post_pk: Option<i32>,
+    pub next_post_pk: Option<i32>,
 }
 
-pub async fn get_post_handler(user: Option<User>, post_pk: i32) -> Result<impl Reply, Rejection> {
+pub async fn get_post_handler(
+    user: Option<User>,
+    post_pk: i32,
+    query_parameters_filter: QueryParametersFilter,
+) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection()?;
 
     let (post, s3_object) = perms::load_post_secured(post_pk, &mut connection, user.as_ref())?;
+
+    let query_parameters = prepare_query_parameters(&query_parameters_filter, &user);
+    let (prev_post_pk, next_post_pk) = match query_parameters_filter.query {
+        Some(query) => {
+            let sql_query =
+                compiler::compile_window_query(post.pk, query, query_parameters, &user)?;
+            let mut connection = acquire_db_connection()?;
+            let result = diesel::sql_query(&sql_query)
+                .get_result::<PostWindowQueryObject>(&mut connection)
+                .optional()
+                .map_err(|e| Error::QueryError(e.to_string()))?;
+
+            if let Some(result) = result {
+                (result.prev, result.next)
+            } else {
+                (None, None)
+            }
+        }
+        None => (None, None),
+    };
 
     Ok(warp::reply::json(&PostDetailed {
         pk: post.pk,
@@ -140,7 +151,32 @@ pub async fn get_post_handler(user: Option<User>, post_pk: i32) -> Result<impl R
         score: post.score,
         s3_object,
         thumbnail_url: post.thumbnail_url,
+        prev_post_pk,
+        next_post_pk,
     }))
+}
+
+fn prepare_query_parameters(
+    query_parameters_filter: &QueryParametersFilter,
+    user: &Option<User>,
+) -> QueryParameters {
+    let mut variables = HashMap::new();
+    variables.insert(
+        String::from("current_utc_timestamp"),
+        Utc::now().to_string(),
+    );
+    variables.insert(String::from("current_utc_date"), Utc::today().to_string());
+
+    if let Some(ref user) = user {
+        variables.insert(String::from("current_user_key"), user.pk.to_string());
+    }
+
+    QueryParameters {
+        limit: query_parameters_filter.limit.map(|l| l.to_string()),
+        page: query_parameters_filter.page,
+        ordering: Vec::new(),
+        variables,
+    }
 }
 
 pub mod functions {

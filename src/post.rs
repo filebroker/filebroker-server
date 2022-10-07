@@ -126,6 +126,7 @@ pub async fn create_post_handler(
                 score: 0,
                 s3_object: create_post_request.s3_object.clone(),
                 thumbnail_url: create_post_request.thumbnail_url.clone(),
+                public: false,
             })
             .get_result::<Post>(connection)?;
 

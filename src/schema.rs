@@ -16,16 +16,14 @@ diesel::table! {
 }
 
 diesel::table! {
-    permission_target (pk) {
+    broker_access (pk) {
         pk -> Int4,
-        public -> Bool,
-        administrator -> Bool,
+        fk_broker -> Int4,
         fk_granted_group -> Nullable<Int4>,
+        write -> Bool,
+        public -> Bool,
         quota -> Nullable<Int8>,
-        fk_post -> Nullable<Int4>,
-        fk_broker -> Nullable<Int4>,
-        fk_post_collection -> Nullable<Int4>,
-        fk_granted_by -> Nullable<Int4>,
+        fk_granted_by -> Int4,
         creation_timestamp -> Timestamptz,
     }
 }
@@ -41,6 +39,7 @@ diesel::table! {
         score -> Int4,
         s3_object -> Nullable<Varchar>,
         thumbnail_url -> Nullable<Varchar>,
+        public -> Bool,
     }
 }
 
@@ -50,6 +49,17 @@ diesel::table! {
         name -> Varchar,
         fk_owner -> Int4,
         creation_timestamp -> Timestamptz,
+        public -> Bool,
+    }
+}
+
+diesel::table! {
+    post_collection_group_access (fk_post_collection, fk_granted_group) {
+        fk_post_collection -> Int4,
+        fk_granted_group -> Int4,
+        write -> Bool,
+        fk_granted_by -> Int4,
+        creation_timestamp -> Timestamptz,
     }
 }
 
@@ -58,6 +68,16 @@ diesel::table! {
         fk_post -> Int4,
         fk_post_collection -> Int4,
         fk_added_by -> Int4,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    post_group_access (fk_post, fk_granted_group) {
+        fk_post -> Int4,
+        fk_granted_group -> Int4,
+        write -> Bool,
+        fk_granted_by -> Int4,
         creation_timestamp -> Timestamptz,
     }
 }
@@ -157,17 +177,21 @@ diesel::table! {
 }
 
 diesel::joinable!(broker -> registered_user (fk_owner));
-diesel::joinable!(permission_target -> broker (fk_broker));
-diesel::joinable!(permission_target -> post (fk_post));
-diesel::joinable!(permission_target -> post_collection (fk_post_collection));
-diesel::joinable!(permission_target -> registered_user (fk_granted_by));
-diesel::joinable!(permission_target -> user_group (fk_granted_group));
+diesel::joinable!(broker_access -> broker (fk_broker));
+diesel::joinable!(broker_access -> registered_user (fk_granted_by));
+diesel::joinable!(broker_access -> user_group (fk_granted_group));
 diesel::joinable!(post -> registered_user (fk_create_user));
 diesel::joinable!(post -> s3_object (s3_object));
 diesel::joinable!(post_collection -> registered_user (fk_owner));
+diesel::joinable!(post_collection_group_access -> post_collection (fk_post_collection));
+diesel::joinable!(post_collection_group_access -> registered_user (fk_granted_by));
+diesel::joinable!(post_collection_group_access -> user_group (fk_granted_group));
 diesel::joinable!(post_collection_item -> post (fk_post));
 diesel::joinable!(post_collection_item -> post_collection (fk_post_collection));
 diesel::joinable!(post_collection_item -> registered_user (fk_added_by));
+diesel::joinable!(post_group_access -> post (fk_post));
+diesel::joinable!(post_group_access -> registered_user (fk_granted_by));
+diesel::joinable!(post_group_access -> user_group (fk_granted_group));
 diesel::joinable!(post_tag -> post (fk_post));
 diesel::joinable!(post_tag -> tag (fk_tag));
 diesel::joinable!(refresh_token -> registered_user (fk_registered_user));
@@ -178,10 +202,12 @@ diesel::joinable!(user_group_membership -> user_group (fk_group));
 
 diesel::allow_tables_to_appear_in_same_query!(
     broker,
-    permission_target,
+    broker_access,
     post,
     post_collection,
+    post_collection_group_access,
     post_collection_item,
+    post_group_access,
     post_tag,
     refresh_token,
     registered_user,

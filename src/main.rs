@@ -182,6 +182,7 @@ async fn setup_tokio_runtime() {
         .and(warp::get())
         .and(auth::with_user_optional())
         .and(warp::path::param())
+        .and(warp::query::<QueryParametersFilter>())
         .and_then(query::get_post_handler);
 
     let upload_route = warp::path("upload")

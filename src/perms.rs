@@ -7,7 +7,10 @@ use crate::{
     diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension, RunQueryDsl},
     error::Error,
     model::{Broker, Post, S3Object, User},
-    schema::{broker, permission_target, post, s3_object, user_group, user_group_membership},
+    schema::{
+        broker, broker_access, post, post_group_access, s3_object, user_group,
+        user_group_membership,
+    },
     DbConnection,
 };
 
@@ -16,15 +19,16 @@ pub fn append_secure_query_condition(where_expressions: &mut Vec<String>, user: 
         .as_ref()
         .map(|u| u.pk.to_string())
         .unwrap_or_else(|| String::from("NULL"));
-    where_expressions.push(format!(
-        r#"
-        (post.fk_create_user = {user_key}
-        OR EXISTS(
-            SELECT pk FROM permission_target
-            WHERE fk_post = post.pk 
-            AND (
-                permission_target.public
-                OR permission_target.fk_granted_group IN(
+
+    if user.is_some() {
+        where_expressions.push(format!(
+            r#"
+            (post.fk_create_user = {user_key}
+            OR post.public
+            OR EXISTS(
+                SELECT * FROM post_group_access
+                WHERE post_group_access.fk_post = post.pk 
+                AND post_group_access.fk_granted_group IN(
                     SELECT pk FROM user_group
                     WHERE fk_owner = {user_key}
                     OR EXISTS(
@@ -32,15 +36,39 @@ pub fn append_secure_query_condition(where_expressions: &mut Vec<String>, user: 
                         WHERE NOT revoked AND fk_user = {user_key} AND fk_group = user_group.pk
                     )
                 )
-            )
-        ))"#
-    ));
+            ))"#
+        ));
+    } else {
+        where_expressions.push(format!(
+            r#"
+            (post.fk_create_user = {user_key}
+            OR post.public)"#
+        ));
+    }
 }
 
-macro_rules! get_permission_target_read_condition {
-    ($fk:expr, $target:expr, $user_pk:expr) => {
+macro_rules! get_group_access_read_condition {
+    ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
         $fk.eq($target).and(
-            permission_target::public.or(permission_target::fk_granted_group.eq_any(
+            $table::fk_granted_group.eq_any(
+                user_group::table.select(user_group::pk).filter(
+                    user_group::fk_owner.nullable().eq($user_pk).or(exists(
+                        user_group_membership::table.filter(
+                            not(user_group_membership::revoked)
+                                .and(user_group_membership::fk_user.nullable().eq($user_pk))
+                                .and(user_group_membership::fk_group.eq(user_group::pk)),
+                        ),
+                    )),
+                ),
+            ),
+        )
+    };
+}
+
+macro_rules! get_group_access_or_public_read_condition {
+    ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
+        $fk.eq($target).and(
+            $table::public.or($table::fk_granted_group.eq_any(
                 user_group::table.select(user_group::pk).nullable().filter(
                     user_group::fk_owner.nullable().eq($user_pk).or(exists(
                         user_group_membership::table.filter(
@@ -64,15 +92,20 @@ pub fn load_post_secured(
     post::table
         .left_join(s3_object::table)
         .filter(
-            post::pk
-                .eq(post_pk)
-                .and(post::fk_create_user.nullable().eq(&user_pk).or(exists(
-                    permission_target::table.filter(get_permission_target_read_condition!(
-                        permission_target::fk_post,
-                        post::pk.nullable(),
-                        &user_pk
-                    )),
-                ))),
+            post::pk.eq(post_pk).and(
+                post::fk_create_user
+                    .nullable()
+                    .eq(&user_pk)
+                    .or(post::public)
+                    .or(exists(post_group_access::table.filter(
+                        get_group_access_read_condition!(
+                            post_group_access::fk_post,
+                            post::pk,
+                            &user_pk,
+                            post_group_access
+                        ),
+                    ))),
+            ),
         )
         .get_result::<(Post, Option<S3Object>)>(connection)
         .optional()?
@@ -90,10 +123,11 @@ pub fn load_broker_secured(
             broker::pk
                 .eq(broker_pk)
                 .and(broker::fk_owner.nullable().eq(&user_pk).or(exists(
-                    permission_target::table.filter(get_permission_target_read_condition!(
-                        permission_target::fk_broker,
-                        broker::pk.nullable(),
-                        &user_pk
+                    broker_access::table.filter(get_group_access_or_public_read_condition!(
+                        broker_access::fk_broker,
+                        broker::pk,
+                        &user_pk,
+                        broker_access
                     )),
                 ))),
         )
@@ -108,13 +142,19 @@ pub fn get_brokers_secured(
 ) -> Result<Vec<Broker>, Error> {
     let user_pk = user.map(|u| u.pk);
     broker::table
-        .filter(broker::fk_owner.nullable().eq(&user_pk).or(exists(
-            permission_target::table.filter(get_permission_target_read_condition!(
-                permission_target::fk_broker,
-                broker::pk.nullable(),
-                &user_pk
-            )),
-        )))
+        .filter(
+            broker::fk_owner
+                .nullable()
+                .eq(&user_pk)
+                .or(exists(broker_access::table.filter(
+                    get_group_access_or_public_read_condition!(
+                        broker_access::fk_broker,
+                        broker::pk,
+                        &user_pk,
+                        broker_access
+                    ),
+                ))),
+        )
         .load::<Broker>(connection)
         .map_err(|e| Error::QueryError(e.to_string()))
 }
