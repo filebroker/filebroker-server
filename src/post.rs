@@ -18,7 +18,7 @@ use warp::{Rejection, Reply};
 
 use crate::{
     acquire_db_connection,
-    diesel::{ExpressionMethods, QueryDsl, RunQueryDsl},
+    diesel::{ExpressionMethods, QueryDsl, RunQueryDsl, TextExpressionMethods},
     error::{Error, TransactionRuntimeError},
     model::{NewPost, NewTag, Post, PostTag, Tag, TagClosureTable, TagEdge, User},
     query::functions::*,
@@ -328,7 +328,9 @@ macro_rules! report_missing_pks {
 }
 
 /// Creates a tag with the given tag_name, parent and aliases. If the tag already exists, the existing tag is updated
-/// with the giving parent and the provided aliases are added.
+/// and the given parents and aliases are added. Note that added aliases are removed from their pre-existing parent-child
+/// hierarchy and added to the hierarchy of the given tag instead, setting all parents of the tag as the parents of all aliases
+/// and setting all children of the tag as children of all aliases.
 pub async fn upsert_tag_handler(
     upsert_tag_request: UpsertTagRequest,
     _user: User,
@@ -458,6 +460,52 @@ pub async fn upsert_tag_handler(
         }))
     })
     .map_err(warp::reject::custom)
+}
+
+#[derive(Serialize)]
+pub struct FindTagResponse {
+    exact_match: Option<Tag>,
+    suggestions: Vec<Tag>,
+}
+
+/// Find tags that match or start with the provided prefix tag_name. Returns the exact match and / or up to ten
+/// suggestions starting with the provided prefix, ordered by length of tag_name.
+pub async fn find_tag_handler(tag_name: String) -> Result<impl Reply, Rejection> {
+    if tag_name.is_empty() {
+        return Ok(warp::reply::json(&FindTagResponse {
+            exact_match: None,
+            suggestions: Vec::new(),
+        }));
+    }
+
+    let tag_name = percent_encoding::percent_decode(tag_name.as_bytes())
+        .decode_utf8()
+        .map_err(|_| Error::UtfEncodingError)?;
+
+    let mut connection = acquire_db_connection()?;
+    let mut found_tags = tag::table
+        .filter(lower(tag::tag_name).like(format!("{}%", tag_name.to_lowercase())))
+        .order_by((char_length(tag::tag_name).asc(), tag::tag_name.asc()))
+        .limit(10)
+        .load::<Tag>(&mut connection)
+        .map_err(Error::from)?;
+
+    if found_tags.is_empty() {
+        Ok(warp::reply::json(&FindTagResponse {
+            exact_match: None,
+            suggestions: found_tags,
+        }))
+    } else if found_tags[0].tag_name.len() == tag_name.len() {
+        Ok(warp::reply::json(&FindTagResponse {
+            exact_match: Some(found_tags.remove(0)),
+            suggestions: found_tags,
+        }))
+    } else {
+        Ok(warp::reply::json(&FindTagResponse {
+            exact_match: None,
+            suggestions: found_tags,
+        }))
+    }
 }
 
 pub fn get_or_create_tag<C: Connection<Backend = Pg> + LoadConnection>(

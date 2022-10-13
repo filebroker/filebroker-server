@@ -216,6 +216,11 @@ async fn setup_tokio_runtime() {
         .and(auth::with_user_optional())
         .and_then(data::get_brokers_handler);
 
+    let find_tag_route = warp::path("find-tag")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and_then(post::find_tag_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(try_refresh_login_route)
@@ -231,7 +236,8 @@ async fn setup_tokio_runtime() {
         .or(get_object_route)
         .or(get_object_head_route)
         .or(create_broker_route)
-        .or(get_brokers_route);
+        .or(get_brokers_route)
+        .or(find_tag_route);
 
     let filter = routes
         .recover(error::handle_rejection)

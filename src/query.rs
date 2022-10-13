@@ -182,4 +182,5 @@ fn prepare_query_parameters(
 pub mod functions {
     use diesel::sql_types::Text;
     sql_function!(fn lower(x: Text) -> Text);
+    sql_function!(fn char_length(x: Text) -> Integer);
 }
