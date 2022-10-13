@@ -285,12 +285,10 @@ fn apply_where_conditions(sql_query: &mut String, where_expressions: &mut Vec<St
 }
 
 pub fn apply_ordering(sql_query: &mut String, ordering: &mut Vec<Ordering>) {
-    if ordering.is_empty() {
-        ordering.push(Ordering {
-            expression: String::from("pk"),
-            direction: Direction::Descending,
-        });
-    }
+    ordering.push(Ordering {
+        expression: String::from("pk"),
+        direction: Direction::Descending,
+    });
 
     let ordering_len = ordering.len();
     if ordering_len > 0 {
