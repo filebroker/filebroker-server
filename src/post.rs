@@ -30,6 +30,33 @@ lazy_static! {
     static ref TAG_SYNC: MutexSync<String> = MutexSync::new();
 }
 
+macro_rules! report_missing_pks {
+    ($tab:ident, $pks:expr, $connection:expr) => {
+        $tab::table
+            .select($tab::pk)
+            .filter($tab::pk.eq_any($pks))
+            .load::<i32>($connection)
+            .map(|found_pks| {
+                let missing_pks = $pks
+                    .iter()
+                    .filter(|pk| !found_pks.contains(pk))
+                    .collect::<Vec<_>>();
+                if missing_pks.is_empty() {
+                    Ok(())
+                } else {
+                    Err(crate::Error::InvalidEntityReferenceError(
+                        itertools::Itertools::intersperse(
+                            missing_pks.into_iter().map(i32::to_string),
+                            String::from(", "),
+                        )
+                        .collect::<String>(),
+                    ))
+                }
+            })
+            .map_err(crate::Error::from)
+    };
+}
+
 #[derive(Deserialize, Validate)]
 pub struct CreatePostRequest {
     #[validate(url)]
@@ -38,7 +65,9 @@ pub struct CreatePostRequest {
     pub source_url: Option<String>,
     pub title: Option<String>,
     #[validate(length(max = 100), custom = "validate_tags")]
-    pub tags: Option<Vec<String>>,
+    pub entered_tags: Option<Vec<String>>,
+    #[validate(length(max = 100))]
+    pub selected_tags: Option<Vec<i32>>,
     pub s3_object: Option<String>,
     #[validate(url)]
     pub thumbnail_url: Option<String>,
@@ -99,21 +128,42 @@ pub async fn create_post_handler(
         )))
     })?;
 
+    let total_tags = create_post_request
+        .entered_tags
+        .as_ref()
+        .map(|t| t.len())
+        .unwrap_or(0)
+        + create_post_request
+            .selected_tags
+            .as_ref()
+            .map(|t| t.len())
+            .unwrap_or(0);
+
+    if total_tags > 100 {
+        return Err(warp::reject::custom(Error::InvalidRequestInputError(
+            format!("Cannot supply more than 100 tags, supplied: {}", total_tags),
+        )));
+    }
+
     // cannot use hashset because it is not supported as diesel expression
-    let tags = create_post_request.tags.map(sanitize_request_tags);
+    let tags = create_post_request.entered_tags.map(sanitize_request_tags);
 
     let mut connection = acquire_db_connection()?;
     // run as repeatable read transaction and retry serialisation errors when a concurrent transaction
     // deletes or creates relevant tags
     run_retryable_transaction(&mut connection, |connection| {
+        if let Some(ref selected_tags) = create_post_request.selected_tags {
+            report_missing_pks!(tag, selected_tags, connection)??;
+        }
+
         let set_tags = if let Some(ref tags) = tags {
             let (mut set_tags, created_tags) = get_or_create_tags(connection, tags)?;
             set_tags.extend(created_tags);
 
             filter_redundant_tags(&mut set_tags, connection)?;
-            Some(set_tags)
+            set_tags
         } else {
-            None
+            Vec::new()
         };
 
         let post = diesel::insert_into(post::table)
@@ -130,15 +180,28 @@ pub async fn create_post_handler(
             })
             .get_result::<Post>(connection)?;
 
-        if let Some(set_tags) = set_tags {
-            let post_tags = set_tags
-                .iter()
-                .map(|tag| PostTag {
-                    fk_post: post.pk,
-                    fk_tag: tag.pk,
-                })
-                .collect::<Vec<_>>();
+        let mut post_tags = Vec::with_capacity(total_tags);
 
+        create_post_request
+            .selected_tags
+            .as_ref()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .for_each(|selected_tag| {
+                post_tags.push(PostTag {
+                    fk_post: post.pk,
+                    fk_tag: *selected_tag,
+                })
+            });
+
+        set_tags.iter().for_each(|tag| {
+            post_tags.push(PostTag {
+                fk_post: post.pk,
+                fk_tag: tag.pk,
+            })
+        });
+
+        if !post_tags.is_empty() {
             diesel::insert_into(post_tag::table)
                 .values(&post_tags)
                 .execute(connection)?;
@@ -298,33 +361,6 @@ pub struct UpsertTagRequest {
 pub struct UpsertTagResponse {
     pub inserted: bool,
     pub tag_pk: i32,
-}
-
-macro_rules! report_missing_pks {
-    ($tab:ident, $pks:expr, $connection:expr) => {
-        $tab::table
-            .select($tab::pk)
-            .filter($tab::pk.eq_any($pks))
-            .load::<i32>($connection)
-            .map(|found_pks| {
-                let missing_pks = $pks
-                    .iter()
-                    .filter(|pk| !found_pks.contains(pk))
-                    .collect::<Vec<_>>();
-                if missing_pks.is_empty() {
-                    Ok(())
-                } else {
-                    Err(crate::Error::InvalidEntityReferenceError(
-                        itertools::Itertools::intersperse(
-                            missing_pks.into_iter().map(i32::to_string),
-                            String::from(", "),
-                        )
-                        .collect::<String>(),
-                    ))
-                }
-            })
-            .map_err(crate::Error::from)
-    };
 }
 
 /// Creates a tag with the given tag_name, parent and aliases. If the tag already exists, the existing tag is updated
