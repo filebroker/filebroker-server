@@ -235,6 +235,16 @@ pub struct UserGroup {
     pub creation_timestamp: DateTime<Utc>,
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = user_group)]
+pub struct NewUserGroup {
+    pub name: String,
+    pub public: bool,
+    pub hidden: bool,
+    pub fk_owner: i32,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
 #[diesel(belongs_to(UserGroup, foreign_key = fk_group))]
 #[diesel(belongs_to(User, foreign_key = fk_user))]

@@ -1,17 +1,22 @@
+use chrono::Utc;
 use diesel::{
+    connection::LoadConnection,
     dsl::{exists, not},
-    NullableExpressionMethods, QueryDsl,
+    pg::Pg,
+    Connection, NullableExpressionMethods, QueryDsl,
 };
+use serde::Deserialize;
+use warp::{Rejection, Reply};
 
 use crate::{
+    acquire_db_connection,
     diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension, RunQueryDsl},
     error::Error,
-    model::{Broker, Post, S3Object, User},
+    model::{Broker, NewUserGroup, Post, S3Object, User, UserGroup},
     schema::{
         broker, broker_access, post, post_group_access, s3_object, user_group,
         user_group_membership,
     },
-    DbConnection,
 };
 
 pub fn append_secure_query_condition(where_expressions: &mut Vec<String>, user: &Option<User>) {
@@ -83,9 +88,9 @@ macro_rules! get_group_access_or_public_read_condition {
     };
 }
 
-pub fn load_post_secured(
+pub fn load_post_secured<C: Connection<Backend = Pg> + LoadConnection>(
     post_pk: i32,
-    connection: &mut DbConnection,
+    connection: &mut C,
     user: Option<&User>,
 ) -> Result<(Post, Option<S3Object>), Error> {
     let user_pk = user.map(|u| u.pk);
@@ -112,9 +117,9 @@ pub fn load_post_secured(
         .ok_or(Error::InaccessibleObjectError(post_pk))
 }
 
-pub fn load_broker_secured(
+pub fn load_broker_secured<C: Connection<Backend = Pg> + LoadConnection>(
     broker_pk: i32,
-    connection: &mut DbConnection,
+    connection: &mut C,
     user: Option<&User>,
 ) -> Result<Broker, Error> {
     let user_pk = user.map(|u| u.pk);
@@ -136,8 +141,8 @@ pub fn load_broker_secured(
         .ok_or(Error::InaccessibleObjectError(broker_pk))
 }
 
-pub fn get_brokers_secured(
-    connection: &mut DbConnection,
+pub fn get_brokers_secured<C: Connection<Backend = Pg> + LoadConnection>(
+    connection: &mut C,
     user: Option<&User>,
 ) -> Result<Vec<Broker>, Error> {
     let user_pk = user.map(|u| u.pk);
@@ -157,4 +162,95 @@ pub fn get_brokers_secured(
         )
         .load::<Broker>(connection)
         .map_err(|e| Error::QueryError(e.to_string()))
+}
+
+pub fn get_user_groups_secured<C: Connection<Backend = Pg> + LoadConnection>(
+    connection: &mut C,
+    user: Option<&User>,
+) -> Result<Vec<UserGroup>, Error> {
+    let user_pk = user.map(|u| u.pk);
+    user_group::table
+        .filter(
+            not(user_group::hidden).or(user_group::fk_owner.nullable().eq(user_pk).or(exists(
+                user_group_membership::table.filter(
+                    user_group_membership::fk_group
+                        .eq(user_group::pk)
+                        .and(user_group_membership::fk_user.nullable().eq(user_pk)),
+                ),
+            ))),
+        )
+        .load::<UserGroup>(connection)
+        .map_err(|e| Error::QueryError(e.to_string()))
+}
+
+pub fn get_current_user_groups<C: Connection<Backend = Pg> + LoadConnection>(
+    connection: &mut C,
+    user: &User,
+) -> Result<Vec<UserGroup>, Error> {
+    user_group::table
+        .filter(
+            user_group::fk_owner.nullable().eq(user.pk).or(exists(
+                user_group_membership::table.filter(
+                    user_group_membership::fk_group
+                        .eq(user_group::pk)
+                        .and(user_group_membership::fk_user.nullable().eq(user.pk)),
+                ),
+            )),
+        )
+        .load::<UserGroup>(connection)
+        .map_err(|e| Error::QueryError(e.to_string()))
+}
+
+#[derive(Deserialize)]
+pub struct CreateUserGroupRequest {
+    pub name: String,
+    pub public: bool,
+    pub hidden: bool,
+}
+
+pub async fn create_user_group_handler(
+    request: CreateUserGroupRequest,
+    user: User,
+) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection()?;
+
+    let user_group = connection
+        .build_transaction()
+        .run(|connection| {
+            let current_groups = get_current_user_groups(connection, &user)?;
+            if current_groups.len() >= 250 {
+                return Err(Error::BadRequestError(String::from(
+                    "Cannot be a member of more than 250 groups",
+                )));
+            }
+
+            Ok(diesel::insert_into(user_group::table)
+                .values(&NewUserGroup {
+                    name: request.name,
+                    public: request.public,
+                    hidden: request.hidden,
+                    fk_owner: user.pk,
+                    creation_timestamp: Utc::now(),
+                })
+                .get_result::<UserGroup>(connection)?)
+        })
+        .map_err(Error::from)?;
+
+    Ok(warp::reply::json(&user_group))
+}
+
+pub async fn get_user_groups_handler(user: Option<User>) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection()?;
+    Ok(warp::reply::json(&get_user_groups_secured(
+        &mut connection,
+        user.as_ref(),
+    )?))
+}
+
+pub async fn get_current_user_groups_handler(user: User) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection()?;
+    Ok(warp::reply::json(&get_current_user_groups(
+        &mut connection,
+        &user,
+    )?))
 }

@@ -221,6 +221,22 @@ async fn setup_tokio_runtime() {
         .and(warp::path::param())
         .and_then(post::find_tag_handler);
 
+    let create_user_group_route = warp::path("create-user-group")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(perms::create_user_group_handler);
+
+    let get_user_groups_route = warp::path("get-user-groups")
+        .and(warp::get())
+        .and(auth::with_user_optional())
+        .and_then(perms::get_user_groups_handler);
+
+    let get_current_user_groups_route = warp::path("get-current-user-groups")
+        .and(warp::get())
+        .and(auth::with_user())
+        .and_then(perms::get_current_user_groups_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(try_refresh_login_route)
@@ -237,7 +253,10 @@ async fn setup_tokio_runtime() {
         .or(get_object_head_route)
         .or(create_broker_route)
         .or(get_brokers_route)
-        .or(find_tag_route);
+        .or(find_tag_route)
+        .or(create_user_group_route)
+        .or(get_user_groups_route)
+        .or(get_current_user_groups_route);
 
     let filter = routes
         .recover(error::handle_rejection)
