@@ -20,10 +20,10 @@ use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, QueryDsl, RunQueryDsl, TextExpressionMethods},
     error::{Error, TransactionRuntimeError},
-    model::{NewPost, NewTag, Post, PostTag, Tag, TagClosureTable, TagEdge, User},
+    model::{NewPost, NewTag, Post, PostGroupAccess, PostTag, Tag, TagClosureTable, TagEdge, User},
     query::functions::*,
     retry_on_constraint_violation, run_retryable_transaction,
-    schema::{post, post_tag, tag, tag_alias, tag_closure_table, tag_edge},
+    schema::{post, post_group_access, post_tag, tag, tag_alias, tag_closure_table, tag_edge},
 };
 
 lazy_static! {
@@ -55,22 +55,6 @@ macro_rules! report_missing_pks {
             })
             .map_err(crate::Error::from)
     };
-}
-
-#[derive(Deserialize, Validate)]
-pub struct CreatePostRequest {
-    #[validate(url)]
-    pub data_url: Option<String>,
-    #[validate(url)]
-    pub source_url: Option<String>,
-    pub title: Option<String>,
-    #[validate(length(max = 100), custom = "validate_tags")]
-    pub entered_tags: Option<Vec<String>>,
-    #[validate(length(max = 100))]
-    pub selected_tags: Option<Vec<i32>>,
-    pub s3_object: Option<String>,
-    #[validate(url)]
-    pub thumbnail_url: Option<String>,
 }
 
 fn validate_tags(tags: &[String]) -> Result<(), ValidationError> {
@@ -115,6 +99,32 @@ fn sanitize_request_tags(request_tags: Vec<String>) -> Vec<String> {
         .unique()
         .map(sanitize_tag)
         .collect::<Vec<_>>()
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct GrantedPostGroupAccess {
+    pub group_pk: i32,
+    pub write: bool,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct CreatePostRequest {
+    #[validate(url)]
+    pub data_url: Option<String>,
+    #[validate(url)]
+    pub source_url: Option<String>,
+    pub title: Option<String>,
+    #[validate(length(max = 100), custom = "validate_tags")]
+    pub entered_tags: Option<Vec<String>>,
+    #[validate(length(max = 100))]
+    pub selected_tags: Option<Vec<i32>>,
+    pub s3_object: Option<String>,
+    #[validate(url)]
+    pub thumbnail_url: Option<String>,
+    pub is_public: bool,
+    pub public_edit: bool,
+    #[validate(length(max = 50))]
+    pub group_access: Option<Vec<GrantedPostGroupAccess>>,
 }
 
 pub async fn create_post_handler(
@@ -166,18 +176,19 @@ pub async fn create_post_handler(
             Vec::new()
         };
 
+        let now = Utc::now();
         let post = diesel::insert_into(post::table)
             .values(NewPost {
                 data_url: create_post_request.data_url.clone(),
                 source_url: create_post_request.source_url.clone(),
                 title: create_post_request.title.clone(),
-                creation_timestamp: Utc::now(),
+                creation_timestamp: now,
                 fk_create_user: user.pk,
                 score: 0,
                 s3_object: create_post_request.s3_object.clone(),
                 thumbnail_url: create_post_request.thumbnail_url.clone(),
-                public: false,
-                public_edit: false,
+                public: create_post_request.is_public,
+                public_edit: create_post_request.public_edit,
             })
             .get_result::<Post>(connection)?;
 
@@ -206,6 +217,25 @@ pub async fn create_post_handler(
             diesel::insert_into(post_tag::table)
                 .values(&post_tags)
                 .execute(connection)?;
+        }
+
+        if let Some(ref group_access) = create_post_request.group_access {
+            if !group_access.is_empty() {
+                let post_group_access = group_access
+                    .iter()
+                    .map(|g| PostGroupAccess {
+                        fk_post: post.pk,
+                        fk_granted_group: g.group_pk,
+                        write: g.write,
+                        fk_granted_by: user.pk,
+                        creation_timestamp: now,
+                    })
+                    .collect::<Vec<_>>();
+
+                diesel::insert_into(post_group_access::table)
+                    .values(&post_group_access)
+                    .execute(connection)?;
+            }
         }
 
         Ok(warp::reply::json(&post))
