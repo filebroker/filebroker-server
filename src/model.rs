@@ -64,6 +64,7 @@ pub struct Post {
     pub score: i32,
     pub s3_object: Option<String>,
     pub thumbnail_url: Option<String>,
+    #[serde(rename = "is_public")]
     pub public: bool,
     pub public_edit: bool,
 }
@@ -112,6 +113,7 @@ pub struct PostQueryObject {
     #[diesel(sql_type = Int4)]
     pub evaluated_limit: i32,
     #[diesel(sql_type = Bool)]
+    #[serde(rename = "is_public")]
     pub public: bool,
     #[diesel(sql_type = Bool)]
     pub public_edit: bool,
@@ -235,6 +237,7 @@ pub struct S3Object {
 pub struct UserGroup {
     pub pk: i32,
     pub name: String,
+    #[serde(rename = "is_public")]
     pub public: bool,
     pub hidden: bool,
     pub fk_owner: i32,
@@ -324,6 +327,7 @@ pub struct BrokerAccess {
     pub fk_broker: i32,
     pub fk_granted_group: Option<i32>,
     pub write: bool,
+    #[serde(rename = "is_public")]
     pub public: bool,
     pub quota: Option<i64>,
     pub fk_granted_by: i32,
