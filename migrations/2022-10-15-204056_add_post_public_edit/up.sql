@@ -1,0 +1,1 @@
+ALTER TABLE post ADD COLUMN public_edit BOOLEAN NOT NULL DEFAULT false;

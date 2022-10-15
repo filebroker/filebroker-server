@@ -40,6 +40,7 @@ diesel::table! {
         s3_object -> Nullable<Varchar>,
         thumbnail_url -> Nullable<Varchar>,
         public -> Bool,
+        public_edit -> Bool,
     }
 }
 

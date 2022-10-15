@@ -1,7 +1,7 @@
 #![allow(clippy::extra_unused_lifetimes)]
 
 use chrono::{offset::Utc, DateTime};
-use diesel::sql_types::{Int4, Int8, Nullable, Timestamptz, Varchar};
+use diesel::sql_types::{Bool, Int4, Int8, Nullable, Timestamptz, Varchar};
 use diesel::{Associations, Identifiable, Insertable, Queryable};
 use serde::Serialize;
 
@@ -65,6 +65,7 @@ pub struct Post {
     pub s3_object: Option<String>,
     pub thumbnail_url: Option<String>,
     pub public: bool,
+    pub public_edit: bool,
 }
 
 #[derive(Insertable)]
@@ -79,6 +80,7 @@ pub struct NewPost {
     pub s3_object: Option<String>,
     pub thumbnail_url: Option<String>,
     pub public: bool,
+    pub public_edit: bool,
 }
 
 #[derive(Queryable, QueryableByName, Serialize)]
@@ -109,6 +111,10 @@ pub struct PostQueryObject {
     #[serde(skip_serializing)]
     #[diesel(sql_type = Int4)]
     pub evaluated_limit: i32,
+    #[diesel(sql_type = Bool)]
+    pub public: bool,
+    #[diesel(sql_type = Bool)]
+    pub public_edit: bool,
 }
 
 #[derive(Queryable, QueryableByName)]
