@@ -1,8 +1,7 @@
 #[macro_use]
 extern crate diesel;
 #[cfg(feature = "auto_migration")]
-#[macro_use]
-extern crate diesel_migrations;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 use diesel::{
     r2d2::{self, ConnectionManager, Pool, PooledConnection},
@@ -52,7 +51,7 @@ lazy_static! {
 }
 
 #[cfg(feature = "auto_migration")]
-diesel_migrations::embed_migrations!();
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 fn main() {
     dotenv().ok();
@@ -67,8 +66,8 @@ fn main() {
     #[cfg(feature = "auto_migration")]
     {
         log::info!("Running diesel migrations");
-        let connection = acquire_db_connection().expect("Failed to acquire database connection");
-        if let Err(e) = embedded_migrations::run_with_output(&connection, &mut std::io::stdout()) {
+        let mut connection = acquire_db_connection().expect("Failed to acquire database connection");
+        if let Err(e) = connection.run_pending_migrations(MIGRATIONS) {
             panic!("Failed running db migrations: {}", e);
         }
         log::info!("Done running diesel migrations");
