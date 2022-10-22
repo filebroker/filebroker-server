@@ -66,7 +66,8 @@ fn main() {
     #[cfg(feature = "auto_migration")]
     {
         log::info!("Running diesel migrations");
-        let mut connection = acquire_db_connection().expect("Failed to acquire database connection");
+        let mut connection =
+            acquire_db_connection().expect("Failed to acquire database connection");
         if let Err(e) = connection.run_pending_migrations(MIGRATIONS) {
             panic!("Failed running db migrations: {}", e);
         }
@@ -236,6 +237,13 @@ async fn setup_tokio_runtime() {
         .and(auth::with_user())
         .and_then(perms::get_current_user_groups_handler);
 
+    let edit_post_route = warp::path("edit-post")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(post::edit_post_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(try_refresh_login_route)
@@ -255,7 +263,8 @@ async fn setup_tokio_runtime() {
         .or(find_tag_route)
         .or(create_user_group_route)
         .or(get_user_groups_route)
-        .or(get_current_user_groups_route);
+        .or(get_current_user_groups_route)
+        .or(edit_post_route);
 
     let filter = routes
         .recover(error::handle_rejection)

@@ -52,38 +52,52 @@ pub fn append_secure_query_condition(where_expressions: &mut Vec<String>, user: 
     }
 }
 
-macro_rules! get_group_access_read_condition {
+macro_rules! get_group_membership_condition {
+    ($user_pk:expr) => {
+        user_group::fk_owner.nullable().eq($user_pk).or(exists(
+            user_group_membership::table.filter(
+                user_group_membership::fk_group
+                    .eq(user_group::pk)
+                    .and(user_group_membership::fk_user.nullable().eq($user_pk))
+                    .and(not(user_group_membership::revoked)),
+            ),
+        ))
+    };
+}
+
+macro_rules! get_group_access_condition {
     ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
         $fk.eq($target).and(
             $table::fk_granted_group.eq_any(
-                user_group::table.select(user_group::pk).filter(
-                    user_group::fk_owner.nullable().eq($user_pk).or(exists(
-                        user_group_membership::table.filter(
-                            not(user_group_membership::revoked)
-                                .and(user_group_membership::fk_user.nullable().eq($user_pk))
-                                .and(user_group_membership::fk_group.eq(user_group::pk)),
-                        ),
-                    )),
-                ),
+                user_group::table
+                    .select(user_group::pk)
+                    .filter(get_group_membership_condition!($user_pk)),
             ),
         )
     };
 }
 
-macro_rules! get_group_access_or_public_read_condition {
+macro_rules! get_group_access_or_public_condition {
     ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
         $fk.eq($target).and(
             $table::public.or($table::fk_granted_group.eq_any(
-                user_group::table.select(user_group::pk).nullable().filter(
-                    user_group::fk_owner.nullable().eq($user_pk).or(exists(
-                        user_group_membership::table.filter(
-                            not(user_group_membership::revoked)
-                                .and(user_group_membership::fk_user.nullable().eq($user_pk))
-                                .and(user_group_membership::fk_group.eq(user_group::pk)),
-                        ),
-                    )),
-                ),
+                user_group::table
+                    .select(user_group::pk)
+                    .nullable()
+                    .filter(get_group_membership_condition!($user_pk)),
             )),
+        )
+    };
+}
+
+macro_rules! get_group_access_write_condition {
+    ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
+        $fk.eq($target).and($table::write).and(
+            $table::fk_granted_group.eq_any(
+                user_group::table
+                    .select(user_group::pk)
+                    .filter(get_group_membership_condition!($user_pk)),
+            ),
         )
     };
 }
@@ -103,7 +117,7 @@ pub fn load_post_secured<C: Connection<Backend = Pg> + LoadConnection>(
                     .eq(&user_pk)
                     .or(post::public)
                     .or(exists(post_group_access::table.filter(
-                        get_group_access_read_condition!(
+                        get_group_access_condition!(
                             post_group_access::fk_post,
                             post::pk,
                             &user_pk,
@@ -128,7 +142,7 @@ pub fn load_broker_secured<C: Connection<Backend = Pg> + LoadConnection>(
             broker::pk
                 .eq(broker_pk)
                 .and(broker::fk_owner.nullable().eq(&user_pk).or(exists(
-                    broker_access::table.filter(get_group_access_or_public_read_condition!(
+                    broker_access::table.filter(get_group_access_or_public_condition!(
                         broker_access::fk_broker,
                         broker::pk,
                         &user_pk,
@@ -152,7 +166,7 @@ pub fn get_brokers_secured<C: Connection<Backend = Pg> + LoadConnection>(
                 .nullable()
                 .eq(&user_pk)
                 .or(exists(broker_access::table.filter(
-                    get_group_access_or_public_read_condition!(
+                    get_group_access_or_public_condition!(
                         broker_access::fk_broker,
                         broker::pk,
                         &user_pk,
@@ -199,6 +213,33 @@ pub fn get_current_user_groups<C: Connection<Backend = Pg> + LoadConnection>(
         )
         .load::<UserGroup>(connection)
         .map_err(|e| Error::QueryError(e.to_string()))
+}
+
+pub fn is_post_editable<C: Connection<Backend = Pg> + LoadConnection>(
+    connection: &mut C,
+    user: Option<&User>,
+    post_pk: i32,
+) -> Result<bool, Error> {
+    let user_pk = user.map(|user| user.pk);
+    post::table
+        .filter(
+            post::pk.eq(post_pk).and(
+                post::public_edit
+                    .or(post::fk_create_user.nullable().eq(user_pk))
+                    .or(exists(post_group_access::table.filter(
+                        get_group_access_write_condition!(
+                            post_group_access::fk_post,
+                            post::pk,
+                            &user_pk,
+                            post_group_access
+                        ),
+                    ))),
+            ),
+        )
+        .get_result::<Post>(connection)
+        .optional()
+        .map_err(|e| Error::QueryError(e.to_string()))
+        .map(|result| result.is_some())
 }
 
 #[derive(Deserialize)]

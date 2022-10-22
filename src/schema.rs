@@ -41,6 +41,7 @@ diesel::table! {
         thumbnail_url -> Nullable<Varchar>,
         public -> Bool,
         public_edit -> Bool,
+        description -> Nullable<Text>,
     }
 }
 

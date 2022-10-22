@@ -9,8 +9,9 @@ use warp::{Rejection, Reply};
 use crate::{
     acquire_db_connection,
     error::Error,
-    model::{PostQueryObject, PostWindowQueryObject, S3Object, User},
+    model::{PostQueryObject, PostWindowQueryObject, S3Object, Tag, User},
     perms,
+    post::{self, PostGroupAccessDetailed},
 };
 
 pub mod compiler;
@@ -110,6 +111,13 @@ pub struct PostDetailed {
     pub thumbnail_url: Option<String>,
     pub prev_post_pk: Option<i32>,
     pub next_post_pk: Option<i32>,
+    #[serde(rename = "is_public")]
+    pub public: bool,
+    pub public_edit: bool,
+    pub description: Option<String>,
+    pub is_editable: bool,
+    pub tags: Vec<Tag>,
+    pub group_access: Vec<PostGroupAccessDetailed>,
 }
 
 pub async fn get_post_handler(
@@ -141,6 +149,11 @@ pub async fn get_post_handler(
         None => (None, None),
     };
 
+    let is_editable = perms::is_post_editable(&mut connection, user.as_ref(), post_pk)?;
+    let tags = post::get_post_tags(post_pk, &mut connection).map_err(Error::from)?;
+    let group_access =
+        post::get_post_group_access(post_pk, &mut connection).map_err(Error::from)?;
+
     Ok(warp::reply::json(&PostDetailed {
         pk: post.pk,
         data_url: post.data_url,
@@ -153,6 +166,12 @@ pub async fn get_post_handler(
         thumbnail_url: post.thumbnail_url,
         prev_post_pk,
         next_post_pk,
+        public: post.public,
+        public_edit: post.public_edit,
+        description: post.description,
+        is_editable,
+        tags,
+        group_access,
     }))
 }
 

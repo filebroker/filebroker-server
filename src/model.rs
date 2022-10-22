@@ -67,6 +67,7 @@ pub struct Post {
     #[serde(rename = "is_public")]
     pub public: bool,
     pub public_edit: bool,
+    pub description: Option<String>,
 }
 
 #[derive(Insertable)]
@@ -82,6 +83,7 @@ pub struct NewPost {
     pub thumbnail_url: Option<String>,
     pub public: bool,
     pub public_edit: bool,
+    pub description: Option<String>,
 }
 
 #[derive(Queryable, QueryableByName, Serialize)]
@@ -117,6 +119,8 @@ pub struct PostQueryObject {
     pub public: bool,
     #[diesel(sql_type = Bool)]
     pub public_edit: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    pub description: Option<String>,
 }
 
 #[derive(Queryable, QueryableByName)]
@@ -127,6 +131,28 @@ pub struct PostWindowQueryObject {
     pub pk: i32,
     #[diesel(sql_type = Nullable<Int4>)]
     pub next: Option<i32>,
+}
+
+#[derive(AsChangeset)]
+#[diesel(table_name = post)]
+pub struct PostUpdateOptional {
+    pub data_url: Option<String>,
+    pub source_url: Option<String>,
+    pub title: Option<String>,
+    pub public: Option<bool>,
+    pub public_edit: Option<bool>,
+    pub description: Option<String>,
+}
+
+impl PostUpdateOptional {
+    pub fn has_changes(&self) -> bool {
+        self.data_url.is_some()
+            || self.source_url.is_some()
+            || self.title.is_some()
+            || self.public.is_some()
+            || self.public_edit.is_some()
+            || self.description.is_some()
+    }
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
