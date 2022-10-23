@@ -48,6 +48,8 @@ lazy_static! {
             std::env::var("API_PORT").expect("Missing environment variable API_PORT must be set.");
         u16::from_str(&port_str).expect("API_PORT var is not a valid u16 value")
     };
+    pub static ref CERT_PATH: Option<String> = std::env::var("CERT_PATH").ok();
+    pub static ref KEY_PATH: Option<String> = std::env::var("KEY_PATH").ok();
 }
 
 #[cfg(feature = "auto_migration")]
@@ -285,7 +287,16 @@ async fn setup_tokio_runtime() {
             .allow_method(warp::http::Method::PATCH),
     );
 
-    warp::serve(filter).run(([0, 0, 0, 0], *PORT)).await;
+    if CERT_PATH.is_some() && KEY_PATH.is_some() {
+        warp::serve(filter)
+            .tls()
+            .cert_path(CERT_PATH.as_ref().unwrap())
+            .key_path(KEY_PATH.as_ref().unwrap())
+            .run(([0, 0, 0, 0], *PORT))
+            .await;
+    } else {
+        warp::serve(filter).run(([0, 0, 0, 0], *PORT)).await;
+    }
 }
 
 fn setup_logger() {
