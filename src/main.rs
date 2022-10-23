@@ -275,7 +275,7 @@ async fn setup_tokio_runtime() {
     #[cfg(debug_assertions)]
     let filter = filter.with(
         warp::cors()
-            .allow_origin("http://localhost:3000")
+            .allow_any_origin()
             .allow_header("content-type")
             .allow_header("Authorization")
             .allow_credentials(true)
