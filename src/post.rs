@@ -124,7 +124,7 @@ fn report_inaccessible_group_pks<C: Connection<Backend = Pg> + LoadConnection>(
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
     let missing_pks = group_pks
-        .into_iter()
+        .iter()
         .filter(|pk| !accessible_group_pks.contains(pk))
         .collect::<Vec<_>>();
 

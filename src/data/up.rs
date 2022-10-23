@@ -22,7 +22,7 @@ pub async fn upload_file<S>(
     object_key: String,
     content_type: String,
     file_id: &Uuid,
-) -> Result<S3Object, Error>
+) -> Result<(S3Object, bool), Error>
 where
     S: TryStream<Error = std::io::Error> + Unpin,
     S::Ok: AsRef<[u8]>,
@@ -60,7 +60,7 @@ where
                     let status_code = delete_response.status_code();
                     if status_code < 300 {
                         // existing object found and deletion of new object succeeded -> return existing object
-                        return Ok(existing_object);
+                        return Ok((existing_object, true));
                     } else {
                         log::error!(
                             "Deleting object {} for existing hash {} failed with status code {}. Going to use new object.",
@@ -107,7 +107,7 @@ where
         .get_result::<S3Object>(&mut connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
-    Ok(s3_object)
+    Ok((s3_object, false))
 }
 
 #[inline]

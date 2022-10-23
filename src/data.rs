@@ -7,7 +7,7 @@ use mime::Mime;
 use mpart_async::server::MultipartStream;
 use ring::digest;
 use s3::{creds::Credentials, Bucket, Region};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
 use warp::{
@@ -20,7 +20,8 @@ use crate::{
     diesel::{ExpressionMethods, OptionalExtension, RunQueryDsl},
     error::Error,
     model::{Broker, NewBroker, S3Object, User},
-    perms,
+    perms, post,
+    query::PostDetailed,
     schema::{broker, s3_object},
     DbConnection,
 };
@@ -28,6 +29,12 @@ use crate::{
 pub mod down;
 pub mod s3utils;
 pub mod up;
+
+#[derive(Serialize)]
+pub struct UploadResponse {
+    pub s3_object: S3Object,
+    pub posts: Vec<PostDetailed>,
+}
 
 pub async fn upload_handler(
     broker_pk: i32,
@@ -91,7 +98,7 @@ pub async fn upload_handler(
                 file_size: 0,
             };
 
-            let s3_object = up::upload_file(
+            let (s3_object, is_existing) = up::upload_file(
                 &broker,
                 &user,
                 &bucket,
@@ -102,7 +109,46 @@ pub async fn upload_handler(
             )
             .await?;
 
-            return Ok(warp::reply::json(&s3_object));
+            let mut posts_detailed = Vec::new();
+            if is_existing {
+                let mut connection = acquire_db_connection()?;
+                let posts =
+                    perms::load_s3_object_posts(&s3_object.object_key, user.pk, &mut connection)?;
+
+                for (post, s3_object) in posts {
+                    let is_editable =
+                        perms::is_post_editable(&mut connection, Some(&user), post.pk)?;
+                    let tags =
+                        post::get_post_tags(post.pk, &mut connection).map_err(Error::from)?;
+                    let group_access = post::get_post_group_access(post.pk, &mut connection)
+                        .map_err(Error::from)?;
+
+                    posts_detailed.push(PostDetailed {
+                        pk: post.pk,
+                        data_url: post.data_url,
+                        source_url: post.source_url,
+                        title: post.title,
+                        creation_timestamp: post.creation_timestamp,
+                        fk_create_user: post.fk_create_user,
+                        score: post.score,
+                        s3_object: Some(s3_object),
+                        thumbnail_url: post.thumbnail_url,
+                        prev_post_pk: None,
+                        next_post_pk: None,
+                        public: post.public,
+                        public_edit: post.public_edit,
+                        description: post.description,
+                        is_editable,
+                        tags,
+                        group_access,
+                    });
+                }
+            }
+
+            return Ok(warp::reply::json(&UploadResponse {
+                s3_object,
+                posts: posts_detailed,
+            }));
         }
     }
 

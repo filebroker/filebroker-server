@@ -131,6 +131,33 @@ pub fn load_post_secured<C: Connection<Backend = Pg> + LoadConnection>(
         .ok_or(Error::InaccessibleObjectError(post_pk))
 }
 
+pub fn load_s3_object_posts<C: Connection<Backend = Pg> + LoadConnection>(
+    s3_object_key: &str,
+    user_pk: i32,
+    connection: &mut C,
+) -> Result<Vec<(Post, S3Object)>, Error> {
+    post::table
+        .inner_join(s3_object::table)
+        .filter(
+            post::s3_object.eq(s3_object_key).and(
+                post::fk_create_user
+                    .nullable()
+                    .eq(user_pk)
+                    .or(post::public)
+                    .or(exists(post_group_access::table.filter(
+                        get_group_access_condition!(
+                            post_group_access::fk_post,
+                            post::pk,
+                            user_pk,
+                            post_group_access
+                        ),
+                    ))),
+            ),
+        )
+        .load::<(Post, S3Object)>(connection)
+        .map_err(|e| Error::QueryError(e.to_string()))
+}
+
 pub fn load_broker_secured<C: Connection<Backend = Pg> + LoadConnection>(
     broker_pk: i32,
     connection: &mut C,
