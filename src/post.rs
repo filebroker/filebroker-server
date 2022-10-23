@@ -876,7 +876,7 @@ pub struct UpsertTagResponse {
 /// hierarchy and added to the hierarchy of the given tag instead, setting all parents of the tag as the parents of all aliases
 /// and setting all children of the tag as children of all aliases.
 pub async fn upsert_tag_handler(
-    upsert_tag_request: UpsertTagRequest,
+    mut upsert_tag_request: UpsertTagRequest,
     _user: User,
 ) -> Result<impl Reply, Rejection> {
     upsert_tag_request.validate().map_err(|e| {
@@ -887,6 +887,16 @@ pub async fn upsert_tag_handler(
     })?;
 
     let tag_name = sanitize_tag(upsert_tag_request.tag_name);
+
+    if let Some(ref mut parent_pks) = upsert_tag_request.parent_pks {
+        parent_pks.sort_unstable();
+        parent_pks.dedup();
+    }
+
+    if let Some(ref mut alias_pks) = upsert_tag_request.alias_pks {
+        alias_pks.sort_unstable();
+        alias_pks.dedup();
+    }
 
     let mut connection = acquire_db_connection()?;
 
@@ -912,7 +922,7 @@ pub async fn upsert_tag_handler(
             }
 
             let curr_parents = get_tag_parents_pks(tag.pk, connection)?;
-            let parents_to_set = parent_pks
+            let mut parents_to_set = parent_pks
                 .iter()
                 .cloned()
                 .filter(|parent_pk| !curr_parents.contains(parent_pk))
@@ -924,8 +934,21 @@ pub async fn upsert_tag_handler(
                 )));
             }
 
-            add_tag_parents(tag.pk, &parents_to_set, connection)?;
-            Some(parents_to_set)
+            if parents_to_set.is_empty() {
+                Some(parents_to_set)
+            } else {
+                // setting aliases of parents as parents
+                let added_parents = parents_to_set.clone();
+                for parent in added_parents {
+                    let parent_aliases = get_tag_aliases(parent, connection)?;
+                    parents_to_set.extend(parent_aliases.into_iter().map(|tag| tag.pk));
+                }
+
+                parents_to_set.sort_unstable();
+                parents_to_set.dedup();
+                add_tag_parents(tag.pk, &parents_to_set, connection)?;
+                Some(parents_to_set)
+            }
         } else {
             None
         };
