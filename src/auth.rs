@@ -25,6 +25,11 @@ use crate::{
     DbConnection,
 };
 
+lazy_static! {
+    pub static ref ACCESS_TOKEN_EXPIRATION: Duration = Duration::hours(3);
+    pub static ref REFRESH_TOKEN_EXPIRATION: Duration = Duration::weeks(1);
+}
+
 /// Struct received by the /login request.
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -157,7 +162,7 @@ fn create_refresh_token_cookie(
 ) -> Result<String, Error> {
     let uuid = Uuid::new_v4();
     let current_utc = Utc::now();
-    let expiry = current_utc + Duration::hours(24);
+    let expiry = current_utc + *REFRESH_TOKEN_EXPIRATION;
 
     let new_refresh_token = NewRefreshToken {
         uuid,
@@ -214,10 +219,10 @@ fn create_login_response(
 }
 
 fn create_login_response_struct(registered_user: User) -> Result<LoginResponse, Error> {
-    let expiration_period = Duration::minutes(15);
+    let expiration_period = *ACCESS_TOKEN_EXPIRATION;
     let expiration_secs = expiration_period.num_seconds();
     let expiration = Utc::now()
-        .checked_add_signed(Duration::minutes(15))
+        .checked_add_signed(expiration_period)
         .expect("Invalid timestamp")
         .timestamp();
 
@@ -324,7 +329,7 @@ fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Erro
             .first::<User>(connection)
             .map_err(|e| Error::QueryError(e.to_string()))?;
 
-        let expiry = current_utc + Duration::hours(24);
+        let expiry = current_utc + *REFRESH_TOKEN_EXPIRATION;
         let new_token = Uuid::new_v4();
 
         let updated_token = diesel::update(refresh_token::table)
