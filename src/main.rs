@@ -32,9 +32,13 @@ lazy_static! {
             .expect("Missing environment variable DATABASE_URL must be set to connect to postgres");
         let database_connection_manager =
             r2d2::ConnectionManager::<PgConnection>::new(database_url);
+        let max_db_connections = std::env::var("MAX_DB_CONNECTIONS")
+            .unwrap_or(String::from("25"))
+            .parse::<u32>()
+            .expect("MAX_DB_CONNECTIONS is not a valid u32");
         r2d2::Builder::new()
-            .min_idle(Some(10))
-            .max_size(50)
+            .min_idle(Some(5))
+            .max_size(max_db_connections)
             .build(database_connection_manager)
             .expect("Failed to initialise connection pool")
     };
