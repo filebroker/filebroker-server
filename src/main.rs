@@ -33,7 +33,7 @@ lazy_static! {
         let database_connection_manager =
             r2d2::ConnectionManager::<PgConnection>::new(database_url);
         let max_db_connections = std::env::var("MAX_DB_CONNECTIONS")
-            .unwrap_or(String::from("25"))
+            .unwrap_or_else(|_| String::from("25"))
             .parse::<u32>()
             .expect("MAX_DB_CONNECTIONS is not a valid u32");
         r2d2::Builder::new()
