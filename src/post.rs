@@ -1163,12 +1163,17 @@ pub fn add_tag_aliases<C: Connection<Backend = Pg>>(
 ) -> Result<(), TransactionRuntimeError> {
     diesel::sql_query(
         r#"
-        INSERT INTO tag_alias
-        SELECT $1, pk
-        FROM tag WHERE pk = ANY($2) OR EXISTS(
-            SELECT * FROM tag_alias AS inner_alias
-            WHERE fk_source = ANY($2) OR fk_target = ANY($2)
+        WITH related_tags AS(
+            SELECT pk FROM tag WHERE pk = $1 OR pk = ANY($2) OR EXISTS(
+                SELECT * FROM tag_alias AS inner_alias
+                WHERE ((fk_source = $1 OR fk_source = ANY($2)) AND fk_target = tag.pk) OR ((fk_target = $1 OR fk_target = ANY($2)) AND fk_source = tag.pk)
+            )
         )
+        INSERT INTO tag_alias
+        SELECT pk1, pk2
+        FROM (
+            SELECT r1.pk AS pk1, r2.pk AS pk2 FROM related_tags r1 CROSS JOIN related_tags r2 WHERE r1.pk < r2.pk
+        ) AS related_tags_joined
         ON CONFLICT DO NOTHING
         "#,
     )
