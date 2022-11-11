@@ -351,9 +351,18 @@ pub fn create_bucket(
     is_aws_region: bool,
 ) -> Result<Bucket, Error> {
     let region = if is_aws_region {
-        endpoint
+        let parsed_endpoint = endpoint
             .parse::<Region>()
-            .map_err(|e| Error::InvalidBucketError(e.to_string()))
+            .map_err(|e| Error::InvalidBucketError(e.to_string()));
+
+        match parsed_endpoint {
+            // handle new AWS region eu-central-2 in Zurich manually until rust-s3 adds support for that region
+            Ok(Region::Custom { .. }) if endpoint == "eu-central-2" => Ok(Region::Custom {
+                region: String::from("eu-central-2"),
+                endpoint: String::from("s3.eu-central-2.amazonaws.com"),
+            }),
+            res => res,
+        }
     } else {
         Ok(Region::Custom {
             region: String::from(""),
