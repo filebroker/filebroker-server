@@ -41,6 +41,7 @@ pub struct LoginRequest {
 #[derive(Serialize)]
 pub struct LoginResponse {
     pub token: String,
+    pub refresh_token: String,
     pub expiration_secs: i64,
     pub user: UserInfo,
 }
@@ -154,12 +155,17 @@ pub async fn login_handler(request: LoginRequest) -> Result<impl Reply, Rejectio
         .map_err(warp::reject::custom)
 }
 
+struct RefreshTokenCookie {
+    token: String,
+    cookie: String,
+}
+
 /// Create a HttpOnly Cookie that may be used to refresh logins by generating a UUID which is persisted
 /// to the database as a RefreshToken entity which links the UUID to the User.
 fn create_refresh_token_cookie(
     registered_user: &User,
     connection: &mut DbConnection,
-) -> Result<String, Error> {
+) -> Result<RefreshTokenCookie, Error> {
     let uuid = Uuid::new_v4();
     let current_utc = Utc::now();
     let expiry = current_utc + *REFRESH_TOKEN_EXPIRATION;
@@ -181,8 +187,12 @@ fn create_refresh_token_cookie(
 
     let uuid = refresh_token.uuid.to_string();
     let expiry = refresh_token.expiry.to_rfc2822();
+    let cookie = format_refresh_token_cookie(&uuid, &expiry);
 
-    Ok(format_refresh_token_cookie(&uuid, &expiry))
+    Ok(RefreshTokenCookie {
+        token: uuid,
+        cookie,
+    })
 }
 
 #[inline]
@@ -202,23 +212,26 @@ fn format_refresh_token_cookie(uuid: &str, expiry: &str) -> String {
 /// Used when a /login or /refresh-login succeeds.
 fn create_login_response(
     registered_user: User,
-    refresh_token_cookie: String,
+    refresh_token_cookie: RefreshTokenCookie,
 ) -> Result<impl Reply, Error> {
-    let login_response = create_login_response_struct(registered_user)?;
+    let login_response = create_login_response_struct(registered_user, refresh_token_cookie.token)?;
 
     let json_response =
         serde_json::to_vec(&login_response).map_err(|_| Error::SerialisationError)?;
 
     let response_body = Response::builder()
         .status(StatusCode::OK)
-        .header(header::SET_COOKIE, refresh_token_cookie)
+        .header(header::SET_COOKIE, refresh_token_cookie.cookie)
         .body(json_response)
         .map_err(|_| Error::SerialisationError)?;
 
     Ok(response_body)
 }
 
-fn create_login_response_struct(registered_user: User) -> Result<LoginResponse, Error> {
+fn create_login_response_struct(
+    registered_user: User,
+    refresh_token: String,
+) -> Result<LoginResponse, Error> {
     let expiration_period = *ACCESS_TOKEN_EXPIRATION;
     let expiration_secs = expiration_period.num_seconds();
     let expiration = Utc::now()
@@ -243,6 +256,7 @@ fn create_login_response_struct(registered_user: User) -> Result<LoginResponse, 
 
     Ok(LoginResponse {
         token,
+        refresh_token,
         expiration_secs,
         user: registered_user.into(),
     })
@@ -263,11 +277,22 @@ pub async fn try_refresh_login_handler(
 ) -> Result<impl Reply, Rejection> {
     let (login_response, refresh_token_cookie) = match refresh_token {
         Some(refresh_token) if !refresh_token.is_empty() => {
-            let (user, refresh_token_cookie) = refresh_user_login_data(refresh_token)?;
-            (
-                Some(create_login_response_struct(user)?),
-                Some(refresh_token_cookie),
-            )
+            if let Some((user, refresh_token_cookie)) = match refresh_user_login_data(refresh_token)
+            {
+                Ok(res) => Some(res),
+                Err(Error::InvalidRefreshTokenError) => None,
+                Err(e) => return Err(warp::reject::custom(e)),
+            } {
+                (
+                    Some(create_login_response_struct(
+                        user,
+                        refresh_token_cookie.token,
+                    )?),
+                    Some(refresh_token_cookie.cookie),
+                )
+            } else {
+                (None, None)
+            }
         }
         _ => (None, None),
     };
@@ -305,7 +330,7 @@ pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply,
     Ok(response_builder.body(hyper::Body::empty()))
 }
 
-fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Error> {
+fn refresh_user_login_data(refresh_token: String) -> Result<(User, RefreshTokenCookie), Error> {
     let mut connection = acquire_db_connection()?;
     connection.transaction(|connection| {
         let curr_token_uuid = Uuid::parse_str(&refresh_token)
@@ -344,8 +369,14 @@ fn refresh_user_login_data(refresh_token: String) -> Result<(User, String), Erro
         let uuid = updated_token.uuid.to_string();
         let expiry = updated_token.expiry.to_rfc2822();
 
-        let refresh_token_cookie = format_refresh_token_cookie(&uuid, &expiry);
-        Ok((user, refresh_token_cookie))
+        let cookie = format_refresh_token_cookie(&uuid, &expiry);
+        Ok((
+            user,
+            RefreshTokenCookie {
+                token: uuid,
+                cookie,
+            },
+        ))
     })
 }
 
