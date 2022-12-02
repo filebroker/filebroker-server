@@ -222,6 +222,7 @@ fn create_login_response(
     let response_body = Response::builder()
         .status(StatusCode::OK)
         .header(header::SET_COOKIE, refresh_token_cookie.cookie)
+        .header(header::CONTENT_TYPE, "application/json")
         .body(json_response)
         .map_err(|_| Error::SerialisationError)?;
 
@@ -307,6 +308,7 @@ pub async fn try_refresh_login_handler(
     }
 
     let response_body = response_builder
+        .header(header::CONTENT_TYPE, "application/json")
         .body(json_response)
         .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
 
