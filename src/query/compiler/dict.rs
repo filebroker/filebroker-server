@@ -227,7 +227,7 @@ lazy_static! {
             Modifier {
                 params: vec![
                     Parameter {
-                        parameter_type: ParameterType::Attribute(Type::Any)
+                        parameter_type: ParameterType::Object(Type::Any)
                     },
                     Parameter {
                         parameter_type: ParameterType::Object(Type::String)
@@ -314,11 +314,13 @@ fn accept_sort_modifier_arguments(
 
     let attr_arg = &arguments[0];
     let attr_arg_location = attr_arg.location;
-    if attr_arg.node_type.downcast_ref::<AttributeNode>().is_none() {
+    if attr_arg.node_type.downcast_ref::<AttributeNode>().is_none()
+        && attr_arg.node_type.get_return_type() != Type::Number
+    {
         log.errors.push(Error {
             location: attr_arg_location,
             msg: format!(
-                "Expected argument to be an attribute but got expression {:?}",
+                "Expected argument to be an attribute or number but got expression {:?}",
                 attr_arg
             ),
         });
@@ -376,6 +378,13 @@ lazy_static! {
                     .get("current_utc_date")
                     .map(|s| format!("'{}'", s))
                     .unwrap_or_else(|| String::from("NULL"))
+            }
+        ),
+        (
+            "random",
+            Variable {
+                return_type: Type::Number,
+                get_expression_fn: |_vars| String::from("RANDOM()")
             }
         )
     ]);
