@@ -11,6 +11,7 @@ pub enum Operator {
     And,
     Divide,
     Equal,
+    FuzzyEqual,
     Greater,
     GreaterEqual,
     Less,
@@ -54,6 +55,7 @@ impl Operator {
     pub fn for_compare_operator_tag(tag: Tag) -> Option<Self> {
         match tag {
             Tag::Equal => Some(Operator::Equal),
+            Tag::FuzzyEqual => Some(Operator::FuzzyEqual),
             Tag::Unequal => Some(Operator::Unequal),
             Tag::Less => Some(Operator::Less),
             Tag::LessEqual => Some(Operator::LessEqual),
@@ -74,6 +76,7 @@ impl Operator {
                     "="
                 }
             }
+            Self::FuzzyEqual => "LIKE",
             Self::Greater => ">",
             Self::GreaterEqual => ">=",
             Self::Less => "<",
@@ -99,6 +102,9 @@ impl Operator {
             Self::And if both_of_type_or_null(left, right, Type::Boolean) => Some(Type::Boolean),
             Self::Divide if both_of_type_or_null(left, right, Type::Number) => Some(Type::Number),
             Self::Equal if left == right || left == Type::Null || right == Type::Null => {
+                Some(Type::Boolean)
+            }
+            Self::FuzzyEqual if left == Type::String && right == Type::String => {
                 Some(Type::Boolean)
             }
             Self::Greater if both_of_type_or_null(left, right, Type::Number) => Some(Type::Boolean),
@@ -648,6 +654,15 @@ impl Visitor for QueryBuilderVisitor<'_> {
             self.write_buff(op.get_sql_string(Some(binary_types)));
             self.write_buff(" interval ");
             right.accept(self, log);
+        } else if op == Operator::FuzzyEqual {
+            // case insensitive matching for fuzzy equals
+            self.write_buff("LOWER(");
+            left.accept(self, log);
+            self.write_buff(") ");
+            self.write_buff(op.get_sql_string(Some(binary_types)));
+            self.write_buff(" LOWER(");
+            right.accept(self, log);
+            self.write_buff(")");
         } else {
             left.accept(self, log);
             self.write_buff(" ");

@@ -15,6 +15,7 @@ pub enum Tag {
     At,
     Divide,
     Equal,
+    FuzzyEqual,
     Greater,
     GreaterEqual,
     Minus,
@@ -250,7 +251,7 @@ enum StateType {
         // tag if paired with equality operator
         equality_tag: Tag,
         // tag if single operator
-        single_tag: Tag,
+        single_tag: Option<Tag>,
     },
 }
 
@@ -479,13 +480,25 @@ impl State {
                 },
                 msg: String::from("Unclosed String literal"),
             }),
-            StateType::EqualityState { single_tag, .. } => token_stream.push(Token {
-                location: Location {
-                    start: self.conception_idx,
-                    end: pos,
-                },
-                parsed_token: ParsedToken::StaticToken(single_tag),
-            }),
+            StateType::EqualityState { single_tag, .. } => {
+                if let Some(single_tag) = single_tag {
+                    token_stream.push(Token {
+                        location: Location {
+                            start: self.conception_idx,
+                            end: pos,
+                        },
+                        parsed_token: ParsedToken::StaticToken(single_tag),
+                    })
+                } else {
+                    log.errors.push(Error {
+                        location: Location {
+                            start: self.conception_idx,
+                            end: pos,
+                        },
+                        msg: format!("Expected token: {:?}", Tag::Equal),
+                    })
+                }
+            }
         }
     }
 
@@ -508,15 +521,19 @@ impl StateType {
         match c {
             '!' => Some(StateType::EqualityState {
                 equality_tag: Tag::Unequal,
-                single_tag: Tag::Not,
+                single_tag: Some(Tag::Not),
             }),
             '<' => Some(StateType::EqualityState {
                 equality_tag: Tag::LessEqual,
-                single_tag: Tag::Less,
+                single_tag: Some(Tag::Less),
             }),
             '>' => Some(StateType::EqualityState {
                 equality_tag: Tag::GreaterEqual,
-                single_tag: Tag::Greater,
+                single_tag: Some(Tag::Greater),
+            }),
+            '~' => Some(StateType::EqualityState {
+                equality_tag: Tag::FuzzyEqual,
+                single_tag: None,
             }),
             _ => None,
         }
