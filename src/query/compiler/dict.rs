@@ -48,6 +48,13 @@ lazy_static! {
                 selection_expression: String::from("post.fk_create_user"),
                 return_type: Type::Number
             }
+        ),
+        (
+            "description",
+            Attribute {
+                selection_expression: String::from("post.description"),
+                return_type: Type::String
+            }
         )
     ]);
 }
