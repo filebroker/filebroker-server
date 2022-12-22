@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Write};
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use diesel::{
@@ -911,7 +911,7 @@ pub async fn upsert_tag_handler(
     run_retryable_transaction(&mut connection, |connection| {
         let (inserted, tag) = get_or_create_tag(&tag_name, connection)?;
 
-        let parents_to_set = if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
+        if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
             if parent_pks.iter().any(|parent_pk| *parent_pk == tag.pk) {
                 return Err(TransactionRuntimeError::Rollback(
                     Error::InvalidRequestInputError(format!(
@@ -928,33 +928,22 @@ pub async fn upsert_tag_handler(
                 .filter(|parent_pk| !curr_parents.contains(parent_pk))
                 .collect::<Vec<_>>();
 
-            if curr_parents.len() + parents_to_set.len() > 25 {
-                return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                    String::from("Cannot set more than 25 parents"),
-                )));
-            }
+            parents_to_set.sort_unstable();
+            parents_to_set.dedup();
 
-            if parents_to_set.is_empty() {
-                Some(parents_to_set)
-            } else {
-                // setting aliases of parents as parents
-                let added_parents = parents_to_set.clone();
-                for parent in added_parents {
-                    let parent_aliases = get_tag_aliases(parent, connection)?;
-                    parents_to_set.extend(parent_aliases.into_iter().map(|tag| tag.pk));
+            if !parents_to_set.is_empty() {
+                let curr_parents = get_tag_parents_pks(tag.pk, connection)?;
+                if curr_parents.len() + parents_to_set.len() > 25 {
+                    return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                        String::from("Cannot set more than 25 parents"),
+                    )));
                 }
-
-                parents_to_set.sort_unstable();
-                parents_to_set.dedup();
                 add_tag_parents(tag.pk, &parents_to_set, connection)?;
-                Some(parents_to_set)
             }
-        } else {
-            None
-        };
+        }
 
-        let aliases_to_set = match upsert_tag_request.alias_pks {
-            Some(ref alias_pks) if !alias_pks.is_empty() => {
+        if let Some(ref alias_pks) = upsert_tag_request.alias_pks {
+            if !alias_pks.is_empty() {
                 if alias_pks.iter().any(|alias_pk| *alias_pk == tag.pk) {
                     return Err(TransactionRuntimeError::Rollback(
                         Error::InvalidRequestInputError(format!(
@@ -971,52 +960,14 @@ pub async fn upsert_tag_handler(
                     .filter(|alias_pk| !curr_aliases.contains(alias_pk))
                     .collect::<Vec<_>>();
 
-                if curr_aliases.len() + aliases_to_set.len() > 25 {
-                    return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                        String::from("Cannot set more than 25 aliases"),
-                    )));
-                }
+                if !aliases_to_set.is_empty() {
+                    if curr_aliases.len() + aliases_to_set.len() > 25 {
+                        return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                            String::from("Cannot set more than 25 aliases"),
+                        )));
+                    }
 
-                // remove added tags from existing hierarchy to sync this this tag's hierarchy
-                remove_tags_from_hierarchy(&aliases_to_set, connection)?;
-                add_tag_aliases(&tag, &aliases_to_set, connection)?;
-                Some(aliases_to_set)
-            }
-            _ => None,
-        };
-
-        if aliases_to_set.as_ref().map_or(false, |pks| !pks.is_empty())
-            || parents_to_set.as_ref().map_or(false, |pks| !pks.is_empty())
-        {
-            log::debug!("syncing parents with aliases");
-            let curr_aliases = get_tag_aliases(tag.pk, connection)?;
-            // add current parents of tag as parents for all current aliases if either changed
-            let curr_parents = get_tag_parents_pks(tag.pk, connection)?;
-            log::debug!("curr parents: {:?}", &curr_parents);
-            if !curr_parents.is_empty() {
-                for alias in curr_aliases.iter() {
-                    log::debug!(
-                        "updating alias: setting {:?} as parents of alias {}",
-                        &curr_parents,
-                        alias.pk
-                    );
-                    add_tag_parents(alias.pk, &curr_parents, connection)?;
-                }
-            }
-
-            let curr_children = get_tag_children_pks(tag.pk, connection)?;
-            if !curr_children.is_empty() {
-                let curr_alias_pks = curr_aliases
-                    .iter()
-                    .map(|alias| alias.pk)
-                    .collect::<Vec<_>>();
-                for child in curr_children {
-                    log::debug!(
-                        "updating child: setting curr aliases {:?} as parents of child {}",
-                        &curr_alias_pks,
-                        child
-                    );
-                    add_tag_parents(child, &curr_alias_pks, connection)?;
+                    add_tag_aliases(&tag, &aliases_to_set, connection)?;
                 }
             }
         }
@@ -1109,16 +1060,6 @@ pub fn get_tag_parents_pks<C: Connection<Backend = Pg> + LoadConnection>(
         .load::<i32>(connection)
 }
 
-pub fn get_tag_children_pks<C: Connection<Backend = Pg> + LoadConnection>(
-    tag_pk: i32,
-    connection: &mut C,
-) -> Result<Vec<i32>, diesel::result::Error> {
-    tag_edge::table
-        .select(tag_edge::fk_child)
-        .filter(tag_edge::fk_parent.eq(tag_pk))
-        .load::<i32>(connection)
-}
-
 pub fn get_tag_aliases_pks<C: Connection<Backend = Pg> + LoadConnection>(
     tag_pk: i32,
     connection: &mut C,
@@ -1190,30 +1131,6 @@ pub fn add_tag_parents<C: Connection<Backend = Pg>>(
     parent_pks: &[i32],
     connection: &mut C,
 ) -> Result<(), TransactionRuntimeError> {
-    // avoiding cycles:
-    // for `tag`, remove all edges to parents that are children of any of the added parents (or an added parent itself, in case an added parent already is a direct parent)
-    // for all added parents, remove edges to parents that are children of `tag`
-    let mut delete_cyclic_edges_query = String::from(
-        r#"
-            DELETE FROM tag_edge
-            WHERE (
-                fk_child = $2
-                AND fk_parent IN(SELECT fk_child FROM tag_closure_table WHERE fk_parent = ANY($1))
-            )
-        "#,
-    );
-
-    for parent_pk in parent_pks.iter() {
-        // remove edges to parents that are a child of `tag_pk` (or `tag_pk` itself)
-        write!(delete_cyclic_edges_query, " OR (fk_child = {parent_pk} AND fk_parent IN(SELECT fk_child FROM tag_closure_table WHERE fk_parent = {tag_pk}))").map_err(|e| Error::StdError(e.to_string()))?;
-    }
-
-    diesel::sql_query(delete_cyclic_edges_query)
-        .bind::<Array<Integer>, _>(parent_pks)
-        .bind::<Integer, _>(tag_pk)
-        .execute(connection)
-        .map_err(retry_on_constraint_violation)?;
-
     let edges_to_insert = parent_pks
         .iter()
         .map(|parent_pk| TagEdge {
@@ -1228,21 +1145,6 @@ pub fn add_tag_parents<C: Connection<Backend = Pg>>(
         .map_err(retry_on_constraint_violation)?;
 
     Ok(())
-}
-
-pub fn remove_tags_from_hierarchy<C: Connection<Backend = Pg>>(
-    tags: &[i32],
-    connection: &mut C,
-) -> Result<usize, diesel::result::Error> {
-    diesel::sql_query(
-        r#"
-        DELETE FROM tag_edge
-        WHERE fk_parent = ANY($1)
-        OR fk_child = ANY($1)
-    "#,
-    )
-    .bind::<Array<Integer>, _>(tags)
-    .execute(connection)
 }
 
 pub fn get_post_tags<C: Connection<Backend = Pg> + LoadConnection>(
