@@ -654,8 +654,12 @@ impl Visitor for QueryBuilderVisitor<'_> {
             self.write_buff(op.get_sql_string(Some(binary_types)));
             self.write_buff(" interval ");
             right.accept(self, log);
-        } else if op == Operator::FuzzyEqual {
-            // case insensitive matching for fuzzy equals
+        } else if op == Operator::FuzzyEqual
+            || ((op == Operator::Equal || op == Operator::Unequal)
+                && left_type == Type::String
+                && right_type == Type::String)
+        {
+            // case insensitive matching for fuzzy equals and string equals
             self.write_buff("LOWER(");
             left.accept(self, log);
             self.write_buff(") ");
