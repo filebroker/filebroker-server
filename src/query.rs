@@ -125,6 +125,13 @@ pub async fn get_post_handler(
     post_pk: i32,
     query_parameters_filter: QueryParametersFilter,
 ) -> Result<impl Reply, Rejection> {
+    query_parameters_filter.validate().map_err(|e| {
+        Error::InvalidRequestInputError(format!(
+            "Validation failed for QueryParametersFilter: {}",
+            e
+        ))
+    })?;
+
     let mut connection = acquire_db_connection()?;
 
     let (post, s3_object) = perms::load_post_secured(post_pk, &mut connection, user.as_ref())?;
