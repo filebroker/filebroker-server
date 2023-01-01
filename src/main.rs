@@ -288,7 +288,8 @@ async fn setup_tokio_runtime() {
         .or(get_user_groups_route)
         .or(get_current_user_groups_route)
         .or(edit_post_route)
-        .or(analyze_query_route);
+        .or(analyze_query_route)
+        .boxed();
 
     let filter = routes
         .recover(error::handle_rejection)
