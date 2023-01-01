@@ -4,7 +4,7 @@ use lexer::Lexer;
 use std::{collections::HashMap, fmt};
 
 use self::{
-    ast::{QueryBuilderVisitor, SemanticAnalysisVisitor},
+    ast::{Node, QueryBuilderVisitor, QueryNode, SemanticAnalysisVisitor},
     parser::{Parser, ParserError},
 };
 
@@ -35,6 +35,7 @@ impl fmt::Display for Location {
     }
 }
 
+#[derive(Default)]
 pub struct Log {
     pub errors: Vec<Error>,
 }
@@ -178,21 +179,21 @@ pub fn compile_window_query(
     Ok(sql_query)
 }
 
-fn compile_expressions(
-    query: String,
-    query_parameters: &mut QueryParameters,
-) -> Result<(HashMap<String, Cte>, Vec<String>), crate::Error> {
+/// Compile the provided query string to a [`QueryNode`]. Reports errors observed up until (including) the parser step but does not perform semantic analysis.
+///
+/// The provided log reference is consumed (swapped for an empty log) when an error is logged and a QueryCompilationError is returned.
+pub fn compile_ast(query: String, log: &mut Log) -> Result<Node<QueryNode>, crate::Error> {
     let len = query.len();
-    let mut log = Log { errors: Vec::new() };
-    let token_stream = Lexer::new_for_string(query, &mut log).read_token_stream();
+    let token_stream = Lexer::new_for_string(query, log).read_token_stream();
     if !log.errors.is_empty() {
+        let log = std::mem::take(log);
         return Err(crate::Error::QueryCompilationError(
             String::from("lexer"),
             log.errors,
         ));
     }
 
-    let ast = match Parser::new(token_stream, &mut log).parse_query() {
+    let ast = match Parser::new(token_stream, log).parse_query() {
         Ok(query_node) => query_node,
         Err(ParserError::PrematureEof) => {
             return Err(crate::Error::QueryCompilationError(
@@ -218,12 +219,22 @@ fn compile_expressions(
     };
 
     if !log.errors.is_empty() {
+        let log = std::mem::take(log);
         return Err(crate::Error::QueryCompilationError(
             String::from("parser"),
             log.errors,
         ));
     }
 
+    Ok(ast)
+}
+
+fn compile_expressions(
+    query: String,
+    query_parameters: &mut QueryParameters,
+) -> Result<(HashMap<String, Cte>, Vec<String>), crate::Error> {
+    let mut log = Log { errors: Vec::new() };
+    let ast = compile_ast(query, &mut log)?;
     let mut semantic_analysis_visitor = SemanticAnalysisVisitor {};
     ast.accept(&mut semantic_analysis_visitor, &mut log);
     if !log.errors.is_empty() {

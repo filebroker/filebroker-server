@@ -260,6 +260,11 @@ async fn setup_tokio_runtime() {
         .and(auth::with_user())
         .and_then(post::edit_post_handler);
 
+    let analyze_query_route = warp::path("analyze-query")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and_then(query::analyze_query_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -282,7 +287,8 @@ async fn setup_tokio_runtime() {
         .or(create_user_group_route)
         .or(get_user_groups_route)
         .or(get_current_user_groups_route)
-        .or(edit_post_route);
+        .or(edit_post_route)
+        .or(analyze_query_route);
 
     let filter = routes
         .recover(error::handle_rejection)

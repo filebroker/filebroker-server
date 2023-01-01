@@ -821,7 +821,12 @@ impl NodeType for QueryNode {
     }
 }
 
-pub trait StatementNode: NodeType + Downcast {}
+pub trait StatementNode: NodeType + Downcast {
+    /// Return an iterator over the nested expressions inside this expression (e.g. left and right expression in binary expression).
+    fn unnest(&self) -> UnnestIter<'_> {
+        UnnestIter::Empty
+    }
+}
 
 impl_downcast!(StatementNode);
 
@@ -836,7 +841,14 @@ impl NodeType for ExpressionStatement {
     }
 }
 
-impl StatementNode for ExpressionStatement {}
+impl StatementNode for ExpressionStatement {
+    fn unnest(&self) -> UnnestIter<'_> {
+        UnnestIter::ExpressionStatement {
+            expression_statement: self,
+            yielded: false,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct ModifierNode {
@@ -850,13 +862,118 @@ impl NodeType for ModifierNode {
     }
 }
 
-impl StatementNode for ModifierNode {}
+impl StatementNode for ModifierNode {
+    fn unnest(&self) -> UnnestIter<'_> {
+        UnnestIter::ModifierNode {
+            modifier_node: self,
+            idx: 0,
+        }
+    }
+}
 
 pub trait ExpressionNode: NodeType + Downcast {
     fn get_return_type(&self) -> Type;
+
+    /// Return an iterator over the nested expressions inside this expression (e.g. left and right expression in binary expression).
+    fn unnest(&self) -> UnnestIter<'_> {
+        UnnestIter::Empty
+    }
 }
 
 impl_downcast!(ExpressionNode);
+
+pub enum UnnestIter<'a> {
+    BinaryExpression {
+        binary_expression_node: &'a BinaryExpressionNode,
+        yielded_left: bool,
+        yielded_right: bool,
+    },
+    Empty,
+    ExpressionStatement {
+        expression_statement: &'a ExpressionStatement,
+        yielded: bool,
+    },
+    FunctionCallNode {
+        function_call_node: &'a FunctionCallNode,
+        idx: usize,
+    },
+    ModifierNode {
+        modifier_node: &'a ModifierNode,
+        idx: usize,
+    },
+    UnaryExpression {
+        unary_expression_node: &'a UnaryExpressionNode,
+        yielded: bool,
+    },
+}
+
+impl<'a> Iterator for UnnestIter<'a> {
+    type Item = &'a Box<Node<dyn ExpressionNode>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::BinaryExpression {
+                binary_expression_node,
+                yielded_left,
+                yielded_right,
+            } => {
+                if !*yielded_left {
+                    *yielded_left = true;
+                    Some(&binary_expression_node.left)
+                } else if !*yielded_right {
+                    *yielded_right = true;
+                    Some(&binary_expression_node.right)
+                } else {
+                    None
+                }
+            }
+            Self::Empty => None,
+            Self::ExpressionStatement {
+                expression_statement,
+                yielded,
+            } => {
+                if !*yielded {
+                    *yielded = true;
+                    Some(&expression_statement.expression_node)
+                } else {
+                    None
+                }
+            }
+            Self::FunctionCallNode {
+                function_call_node,
+                idx,
+            } => {
+                if *idx < function_call_node.arguments.len() {
+                    let argument_expr = &function_call_node.arguments[*idx];
+                    *idx += 1;
+                    Some(argument_expr)
+                } else {
+                    None
+                }
+            }
+            Self::ModifierNode { modifier_node, idx } => {
+                if *idx < modifier_node.arguments.len() {
+                    let argument_expr = &modifier_node.arguments[*idx];
+                    *idx += 1;
+                    Some(argument_expr)
+                } else {
+                    None
+                }
+            }
+            Self::UnaryExpression {
+                unary_expression_node,
+                yielded,
+            } => {
+                if !*yielded {
+                    *yielded = true;
+                    Some(&unary_expression_node.operand)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PostTagNode {
@@ -918,6 +1035,13 @@ impl ExpressionNode for FunctionCallNode {
             Type::Void
         }
     }
+
+    fn unnest(&self) -> UnnestIter<'_> {
+        UnnestIter::FunctionCallNode {
+            function_call_node: self,
+            idx: 0,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -941,6 +1065,14 @@ impl ExpressionNode for BinaryExpressionNode {
                 self.right.node_type.get_return_type(),
             )
             .unwrap_or(Type::Void)
+    }
+
+    fn unnest(&self) -> UnnestIter<'_> {
+        UnnestIter::BinaryExpression {
+            binary_expression_node: self,
+            yielded_left: false,
+            yielded_right: false,
+        }
     }
 }
 
@@ -1027,6 +1159,13 @@ impl ExpressionNode for UnaryExpressionNode {
         self.op
             .accepts_unary_expression(self.operand.node_type.get_return_type())
             .unwrap_or(Type::Void)
+    }
+
+    fn unnest(&self) -> UnnestIter<'_> {
+        UnnestIter::UnaryExpression {
+            unary_expression_node: self,
+            yielded: false,
+        }
     }
 }
 

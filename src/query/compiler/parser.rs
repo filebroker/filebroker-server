@@ -86,7 +86,9 @@ impl Parser<'_> {
 
     fn parse_arguments(&mut self) -> Result<Vec<Box<Node<dyn ExpressionNode>>>, ParserError> {
         let mut arguments = Vec::new();
-        self.check_curr_tag(Tag::OpenParenthesis);
+        if !self.curr_is_tag(Tag::OpenParenthesis) || !self.advance() {
+            return Ok(arguments);
+        }
 
         if !self.curr_is_tag(Tag::CloseParenthesis) {
             arguments.push(self.parse_expression()?);
@@ -955,7 +957,7 @@ mod tests {
     }
 
     fn assert_post_tag_statement(
-        statement: &Box<Node<dyn StatementNode>>,
+        statement: &Node<dyn StatementNode>,
         start: usize,
         end: usize,
         identifier: &str,
@@ -968,7 +970,7 @@ mod tests {
     }
 
     fn assert_post_tag_expression(
-        expression: &Box<Node<dyn ExpressionNode>>,
+        expression: &Node<dyn ExpressionNode>,
         start: usize,
         end: usize,
         identifier: &str,
@@ -981,7 +983,7 @@ mod tests {
     }
 
     fn assert_attribute_expression(
-        expression_node: &Box<Node<dyn ExpressionNode>>,
+        expression_node: &Node<dyn ExpressionNode>,
         start: usize,
         end: usize,
         identifier: &str,
@@ -993,7 +995,7 @@ mod tests {
     }
 
     fn assert_string_expression(
-        expression_node: &Box<Node<dyn ExpressionNode>>,
+        expression_node: &Node<dyn ExpressionNode>,
         start: usize,
         end: usize,
         val: &str,
@@ -1007,7 +1009,7 @@ mod tests {
     }
 
     fn assert_integer_expression(
-        expression_node: &Box<Node<dyn ExpressionNode>>,
+        expression_node: &Node<dyn ExpressionNode>,
         start: usize,
         end: usize,
         val: i32,
@@ -1035,7 +1037,7 @@ mod tests {
     }
 
     fn assert_binary_expression_node<L, R>(
-        expression_node: &Box<Node<dyn ExpressionNode>>,
+        expression_node: &Node<dyn ExpressionNode>,
         start: usize,
         end: usize,
         op: Operator,
