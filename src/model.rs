@@ -254,6 +254,7 @@ pub struct S3Object {
     pub fk_uploader: i32,
     pub thumbnail_object_key: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
+    pub filename: Option<String>,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]

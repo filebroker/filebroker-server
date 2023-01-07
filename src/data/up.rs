@@ -1,3 +1,5 @@
+use std::{ffi::OsStr, path::Path};
+
 use chrono::Utc;
 use diesel::{OptionalExtension, QueryDsl};
 use futures::{io::BufReader, stream::IntoAsyncRead, AsyncReadExt, TryFutureExt, TryStream};
@@ -19,14 +21,21 @@ pub async fn upload_file<S>(
     user: &User,
     bucket: &Bucket,
     mut reader: s3utils::FileReader<IntoAsyncRead<S>>,
-    object_key: String,
     content_type: String,
-    file_id: &Uuid,
+    filename: String,
 ) -> Result<(S3Object, bool), Error>
 where
     S: TryStream<Error = std::io::Error> + Unpin,
     S::Ok: AsRef<[u8]>,
 {
+    let uuid = Uuid::new_v4();
+    let object_key =
+        if let Some(extension) = Path::new(&filename).extension().and_then(OsStr::to_str) {
+            format!("{}.{}", &uuid, extension)
+        } else {
+            uuid.to_string()
+        };
+
     log::info!("Starting S3 upload for {}", &object_key);
     let status = bucket.put_object_stream(&mut reader, &object_key).await?;
     if status >= 300 {
@@ -85,13 +94,19 @@ where
     }
 
     let thumbnail =
-        match generate_thumbnail(bucket, &object_key, file_id, &content_type, broker, user).await {
+        match generate_thumbnail(bucket, &object_key, &uuid, &content_type, broker, user).await {
             Ok(thumbnail) => thumbnail,
             Err(e) => {
                 log::error!("Failed to generate thumbnail: {}", e);
                 None
             }
         };
+
+    let source_filename = if filename.len() > 255 {
+        None
+    } else {
+        Some(filename)
+    };
 
     let s3_object = diesel::insert_into(s3_object::table)
         .values(&S3Object {
@@ -103,6 +118,7 @@ where
             fk_uploader: user.pk,
             thumbnail_object_key: thumbnail.map(|t| t.object_key),
             creation_timestamp: Utc::now(),
+            filename: source_filename,
         })
         .get_result::<S3Object>(&mut connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;
@@ -112,21 +128,12 @@ where
 
 #[inline]
 fn content_type_is_video(content_type: &str) -> bool {
-    content_type.eq_ignore_ascii_case("video/mp4")
-        || content_type.eq_ignore_ascii_case("video/webm")
-        || content_type.eq_ignore_ascii_case("video/quicktime")
-        || content_type.eq_ignore_ascii_case("video/x-msvideo")
-        || content_type.eq_ignore_ascii_case("video/x-ms-wmv")
-        || content_type.eq_ignore_ascii_case("video/x-matroska")
+    content_type.starts_with("video/")
 }
 
 #[inline]
 fn content_type_is_image(content_type: &str) -> bool {
-    content_type.eq_ignore_ascii_case("image/png")
-        || content_type.eq_ignore_ascii_case("image/jpeg")
-        || content_type.eq_ignore_ascii_case("image/gif")
-        || content_type.eq_ignore_ascii_case("image/webp")
-        || content_type.eq_ignore_ascii_case("image/bmp")
+    content_type.starts_with("image/")
 }
 
 async fn generate_thumbnail(
@@ -243,6 +250,7 @@ async fn generate_thumbnail(
                 fk_uploader: user.pk,
                 thumbnail_object_key: None,
                 creation_timestamp: Utc::now(),
+                filename: None,
             })
             .get_result::<S3Object>(&mut connection)
             .map_err(|e| Error::QueryError(e.to_string()))?;

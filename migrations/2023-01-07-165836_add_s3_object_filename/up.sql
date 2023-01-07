@@ -1,0 +1,1 @@
+ALTER TABLE s3_object ADD COLUMN filename VARCHAR(255);

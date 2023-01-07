@@ -122,6 +122,7 @@ diesel::table! {
         fk_uploader -> Int4,
         thumbnail_object_key -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
+        filename -> Nullable<Varchar>,
     }
 }
 

@@ -1,5 +1,3 @@
-use std::{ffi::OsStr, path::Path};
-
 use chrono::Utc;
 use diesel::QueryDsl;
 use futures::{Stream, TryStreamExt};
@@ -75,14 +73,6 @@ pub async fn upload_handler(
                 .map_err(|e| Error::InvalidFileError(e.to_string()))?
                 .to_string();
 
-            let uuid = uuid::Uuid::new_v4();
-            let object_key =
-                if let Some(extension) = Path::new(&filename).extension().and_then(OsStr::to_str) {
-                    format!("{}.{}", &uuid, extension)
-                } else {
-                    uuid.to_string()
-                };
-
             let content_type = field
                 .content_type()
                 .map_err(|e| Error::InvalidFileError(e.to_string()))?
@@ -98,16 +88,8 @@ pub async fn upload_handler(
                 file_size: 0,
             };
 
-            let (s3_object, is_existing) = up::upload_file(
-                &broker,
-                &user,
-                &bucket,
-                reader,
-                object_key.clone(),
-                content_type,
-                &uuid,
-            )
-            .await?;
+            let (s3_object, is_existing) =
+                up::upload_file(&broker, &user, &bucket, reader, content_type, filename).await?;
 
             let mut posts_detailed = Vec::new();
             if is_existing {
