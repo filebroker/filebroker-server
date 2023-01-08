@@ -38,8 +38,9 @@ where
         ))?;
         buf.advance(n);
         let filled = buf.filled();
+        let len = filled.len();
         *this.file_size += n;
-        this.hasher.update(filled);
+        this.hasher.update(&filled[len - n..len]);
         Poll::Ready(Ok(()))
     }
 }
