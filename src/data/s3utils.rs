@@ -1,4 +1,4 @@
-use std::task::Poll;
+use std::{task::Poll, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -6,6 +6,7 @@ use futures::{ready, stream::IntoAsyncRead, StreamExt, TryStream};
 use pin_project_lite::pin_project;
 use ring::digest;
 use s3::{command::Command, error::S3Error, request::Reqwest, request_trait::Request, Bucket};
+use tokio::time::timeout;
 use warp::hyper;
 
 use crate::{data::s3utils, error::Error, model::S3Object};
@@ -111,7 +112,7 @@ impl ObjectWriter for ObjectRangeWriter {
             &self.bucket,
             &self.object.object_key,
             start,
-            end,
+            Some(end),
             &mut sender,
         )
         .await
@@ -200,7 +201,7 @@ impl ObjectWriter for MultipartObjectWriter {
                 &self.bucket,
                 &self.object.object_key,
                 start,
-                end,
+                Some(end),
                 &mut sender,
             )
             .await
@@ -255,15 +256,31 @@ impl ObjectWriter for MultipartObjectWriter {
 pub async fn get_object_range_stream(
     bucket: &Bucket,
     path: &str,
-    start: u64,
-    end: u64,
+    mut start: u64,
+    end: Option<u64>,
     sender: &mut hyper::body::Sender,
 ) -> Result<u16, Error> {
-    let command = Command::GetObjectRange {
-        start,
-        end: Some(end),
-    };
-    get_command_stream(command, bucket, path, sender).await
+    loop {
+        let command = Command::GetObjectRange { start, end };
+
+        let res = get_command_stream(command, bucket, path, sender).await;
+
+        match res {
+            Ok(status) => return Ok(status),
+            Err(S3CommandError::S3Error(e)) => return Err(e.into()),
+            Err(S3CommandError::SendError(e)) => return Err(e.into()),
+            Err(S3CommandError::SendTimeout { bytes_sent }) => {
+                log::debug!(
+                    "Received timeout trying to send S3 response to reader for range {start}-{end_str} of object {path}, going to retry with range {new_start}-{end_str} after reader becomes available",
+                    new_start = start + bytes_sent as u64,
+                    end_str = end.as_ref().map(u64::to_string).unwrap_or_default()
+                );
+                start += bytes_sent as u64;
+                // wait for reader to be ready before requesting next range
+                futures::future::poll_fn(|ctx| sender.poll_ready(ctx)).await?;
+            }
+        }
+    }
 }
 
 pub async fn get_object_stream(
@@ -272,7 +289,18 @@ pub async fn get_object_stream(
     sender: &mut hyper::body::Sender,
 ) -> Result<u16, Error> {
     let command = Command::GetObject;
-    get_command_stream(command, bucket, path, sender).await
+    let res = get_command_stream(command, bucket, path, sender).await;
+
+    match res {
+        Ok(status) => Ok(status),
+        Err(S3CommandError::S3Error(e)) => Err(e.into()),
+        Err(S3CommandError::SendError(e)) => Err(e.into()),
+        Err(S3CommandError::SendTimeout { bytes_sent }) => {
+            log::debug!("Received timeout trying to send S3 response to reader for object {path}, going to retry with range {bytes_sent}- after reader becomes available");
+            futures::future::poll_fn(|ctx| sender.poll_ready(ctx)).await?;
+            get_object_range_stream(bucket, path, bytes_sent as u64, None, sender).await
+        }
+    }
 }
 
 pub async fn get_command_stream(
@@ -280,15 +308,43 @@ pub async fn get_command_stream(
     bucket: &Bucket,
     path: &str,
     sender: &mut hyper::body::Sender,
-) -> Result<u16, Error> {
+) -> Result<u16, S3CommandError> {
+    log::debug!("Executing S3 command streaming: {:?}", &command);
     let request = Reqwest::new(bucket, path, command);
     let response = request.response().await?;
     let status = response.status();
     let mut stream = response.bytes_stream();
+    let mut total_bytes = 0;
 
     while let Some(chunk) = stream.next().await {
-        sender.send_data(chunk.map_err(S3Error::from)?).await?;
+        let bytes = chunk.map_err(S3Error::from)?;
+        let byte_len = bytes.len();
+        log::trace!("Sending {} bytes to S3 response", byte_len);
+        let res = timeout(Duration::from_secs(300), sender.send_data(bytes)).await;
+        match res {
+            Ok(Err(e)) => return Err(S3CommandError::SendError(e)),
+            Err(_) => {
+                return Err(S3CommandError::SendTimeout {
+                    bytes_sent: total_bytes,
+                })
+            }
+            Ok(Ok(_)) => {}
+        }
+        total_bytes += byte_len;
+        log::trace!("Bytes sent");
     }
 
     Ok(status.as_u16())
+}
+
+pub enum S3CommandError {
+    S3Error(S3Error),
+    SendError(hyper::Error),
+    SendTimeout { bytes_sent: usize },
+}
+
+impl From<S3Error> for S3CommandError {
+    fn from(value: S3Error) -> Self {
+        Self::S3Error(value)
+    }
 }
