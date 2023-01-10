@@ -66,13 +66,12 @@ struct Claims {
 }
 
 /// Warp filter for requests that optionally receive the logged in user from the auth header.
-pub fn with_user_optional(
-) -> impl warp::Filter<Extract = (Option<User>,), Error = Rejection> + Clone {
+pub fn with_user_optional() -> impl Filter<Extract = (Option<User>,), Error = Rejection> + Clone {
     headers_cloned().and_then(get_user_from_auth_header)
 }
 
 /// Warp filter for requests that require a logged in user provided by the auth header.
-pub fn with_user() -> impl warp::Filter<Extract = (User,), Error = Rejection> + Clone {
+pub fn with_user() -> impl Filter<Extract = (User,), Error = Rejection> + Clone {
     headers_cloned().and_then(require_user_from_auth_header)
 }
 

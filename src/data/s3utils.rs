@@ -9,7 +9,7 @@ use s3::{command::Command, error::S3Error, request::Reqwest, request_trait::Requ
 use tokio::time::timeout;
 use warp::hyper;
 
-use crate::{data::s3utils, error::Error, model::S3Object};
+use crate::{error::Error, model::S3Object};
 
 pin_project! {
     pub struct FileReader<R> {
@@ -29,7 +29,7 @@ where
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
+    ) -> Poll<std::io::Result<()>> {
         let slice = buf.initialize_unfilled();
         let this = self.project();
         let n = ready!(futures::io::AsyncRead::poll_read(
@@ -59,8 +59,7 @@ pub struct FullObjectWriter {
 #[async_trait]
 impl ObjectWriter for FullObjectWriter {
     async fn write_bytes(&self, mut sender: hyper::body::Sender) {
-        let res =
-            s3utils::get_object_stream(&self.bucket, &self.object.object_key, &mut sender).await;
+        let res = get_object_stream(&self.bucket, &self.object.object_key, &mut sender).await;
 
         match res {
             Ok(response_code) if response_code < 300 => {}
@@ -108,7 +107,7 @@ impl ObjectWriter for ObjectRangeWriter {
         let start = self.start;
         let end = self.end;
 
-        match s3utils::get_object_range_stream(
+        match get_object_range_stream(
             &self.bucket,
             &self.object.object_key,
             start,
@@ -197,7 +196,7 @@ impl ObjectWriter for MultipartObjectWriter {
 
             let start = part.start;
             let end = part.end;
-            match s3utils::get_object_range_stream(
+            match get_object_range_stream(
                 &self.bucket,
                 &self.object.object_key,
                 start,
@@ -304,7 +303,7 @@ pub async fn get_object_stream(
 }
 
 pub async fn get_command_stream(
-    command: s3::command::Command<'_>,
+    command: Command<'_>,
     bucket: &Bucket,
     path: &str,
     sender: &mut hyper::body::Sender,

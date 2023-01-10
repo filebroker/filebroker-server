@@ -80,7 +80,7 @@ pub async fn search_handler(
 
     let sql_query = compiler::compile_sql(query_parameters_filter.query, query_parameters, &user)?;
     let mut connection = acquire_db_connection()?;
-    let posts = diesel::sql_query(&sql_query)
+    let posts = diesel::sql_query(sql_query)
         .load::<PostQueryObject>(&mut connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
@@ -155,7 +155,7 @@ pub async fn get_post_handler(
             let sql_query =
                 compiler::compile_window_query(post.pk, query, query_parameters, &user)?;
             let mut connection = acquire_db_connection()?;
-            let result = diesel::sql_query(&sql_query)
+            let result = diesel::sql_query(sql_query)
                 .get_result::<PostWindowQueryObject>(&mut connection)
                 .optional()
                 .map_err(|e| Error::QueryError(e.to_string()))?;
