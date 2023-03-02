@@ -25,6 +25,7 @@ use crate::{
 };
 
 pub mod down;
+pub mod encode;
 pub mod s3utils;
 pub mod up;
 

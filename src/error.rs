@@ -65,6 +65,8 @@ pub enum Error {
     InvalidEntityReferenceError(String),
     #[error("Internal error: {0}")]
     StdError(String),
+    #[error("Submitted task was aborted")]
+    CancellationError,
 }
 
 impl Reject for Error {}
@@ -157,7 +159,8 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             | Error::S3Error(_)
             | Error::HyperError(_)
             | Error::FfmpegProcessError(_)
-            | Error::StdError(_) => {
+            | Error::StdError(_)
+            | Error::CancellationError => {
                 log::error!("Encountered internal server error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None)
             }

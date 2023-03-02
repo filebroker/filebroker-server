@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::schema::*;
 
-#[derive(Identifiable, Queryable, Serialize)]
+#[derive(Identifiable, Queryable, Serialize, Clone)]
 #[diesel(table_name = registered_user)]
 #[diesel(primary_key(pk))]
 pub struct User {
@@ -208,7 +208,7 @@ pub struct TagEdge {
     pub fk_child: i32,
 }
 
-#[derive(Associations, Identifiable, Queryable, Serialize)]
+#[derive(Associations, Identifiable, Queryable, Serialize, Clone)]
 #[diesel(belongs_to(User, foreign_key = fk_owner))]
 #[diesel(table_name = broker)]
 #[diesel(primary_key(pk))]

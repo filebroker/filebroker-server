@@ -2,12 +2,13 @@ use std::{ffi::OsStr, path::Path};
 
 use chrono::Utc;
 use diesel::{OptionalExtension, QueryDsl};
-use futures::{io::BufReader, stream::IntoAsyncRead, AsyncReadExt, TryFutureExt, TryStream};
+use futures::{stream::IntoAsyncRead, TryStream};
 use s3::Bucket;
 use uuid::Uuid;
 
 use crate::{
     acquire_db_connection,
+    data::encode::generate_thumbnail,
     diesel::{BoolExpressionMethods, ExpressionMethods, RunQueryDsl},
     error::Error,
     model::{Broker, S3Object, User},
@@ -93,14 +94,18 @@ where
         }
     }
 
-    let thumbnail =
-        match generate_thumbnail(bucket, &object_key, &uuid, &content_type, broker, user).await {
-            Ok(thumbnail) => thumbnail,
-            Err(e) => {
-                log::error!("Failed to generate thumbnail: {}", e);
-                None
-            }
-        };
+    let path = object_key.clone();
+    let mime_type = content_type.clone();
+    let bucket = bucket.clone();
+    let broker_owned = broker.clone();
+    let user_owned = user.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            generate_thumbnail(bucket, path, uuid, content_type, broker_owned, user_owned).await
+        {
+            log::error!("Failed to generate thumbnail: {}", e);
+        }
+    });
 
     let source_filename = if filename.len() > 255 {
         None
@@ -113,10 +118,10 @@ where
             object_key,
             sha256_hash: Some(hash),
             size_bytes: reader.file_size as i64,
-            mime_type: content_type,
+            mime_type,
             fk_broker: broker.pk,
             fk_uploader: user.pk,
-            thumbnail_object_key: thumbnail.map(|t| t.object_key),
+            thumbnail_object_key: None,
             creation_timestamp: Utc::now(),
             filename: source_filename,
         })
@@ -124,143 +129,4 @@ where
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
     Ok((s3_object, false))
-}
-
-#[inline]
-fn content_type_is_video(content_type: &str) -> bool {
-    content_type.starts_with("video/")
-}
-
-#[inline]
-fn content_type_is_image(content_type: &str) -> bool {
-    content_type.starts_with("image/")
-}
-
-async fn generate_thumbnail(
-    bucket: &Bucket,
-    path: &str,
-    file_id: &Uuid,
-    content_type: &str,
-    broker: &Broker,
-    user: &User,
-) -> Result<Option<S3Object>, Error> {
-    let presigned_get_object = bucket.presign_get(path, 1800, None)?;
-
-    let content_type_is_video = content_type_is_video(content_type);
-    let content_type_is_image = content_type_is_image(content_type);
-    let thumbnail_extension;
-    let thumbnail_content_type;
-
-    if content_type_is_video || content_type_is_image {
-        let args = if content_type_is_video {
-            thumbnail_extension = "jpeg";
-            thumbnail_content_type = String::from("image/jpeg");
-            vec![
-                String::from("-i"),
-                presigned_get_object,
-                String::from("-vf"),
-                String::from(r"thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)"),
-                String::from("-vframes"),
-                String::from("1"),
-                String::from("-f"),
-                String::from("image2"),
-                String::from("-v"),
-                String::from("error"),
-                String::from("pipe:1"),
-            ]
-        } else if content_type == "image/png" {
-            thumbnail_extension = "png";
-            thumbnail_content_type = String::from("image/png");
-            vec![
-                String::from("-i"),
-                presigned_get_object,
-                String::from("-pix_fmt"),
-                String::from("rgba"),
-                String::from("-vf"),
-                String::from(
-                    r"format=rgba,thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)",
-                ),
-                String::from("-f"),
-                String::from("image2"),
-                String::from("-codec"),
-                String::from("png"),
-                String::from("-v"),
-                String::from("error"),
-                String::from("pipe:1"),
-            ]
-        } else {
-            thumbnail_extension = "jpeg";
-            thumbnail_content_type = String::from("image/jpeg");
-            vec![
-                String::from("-i"),
-                presigned_get_object,
-                String::from("-vf"),
-                String::from(r"thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)"),
-                String::from("-f"),
-                String::from("image2"),
-                String::from("-v"),
-                String::from("error"),
-                String::from("pipe:1"),
-            ]
-        };
-
-        log::info!("Spawning ffmpeg process to generate thumbnail for {}", path);
-        let mut process = async_process::Command::new("ffmpeg")
-            .args(args)
-            .stdout(async_process::Stdio::piped())
-            .spawn()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
-
-        let mut stdout = BufReader::new(process.stdout.take().ok_or_else(|| {
-            Error::FfmpegProcessError(String::from("Could not get stdout of process"))
-        })?);
-
-        let mut buf: [u8; 1 << 14] = [0; 1 << 14];
-        let mut thumb_bytes = Vec::new();
-        loop {
-            let n = stdout
-                .read(&mut buf)
-                .map_err(|e| Error::FfmpegProcessError(e.to_string()))
-                .await?;
-            if n == 0 {
-                break;
-            }
-
-            thumb_bytes.extend_from_slice(&buf[0..n]);
-            buf = [0; 1 << 14];
-        }
-
-        if thumb_bytes.is_empty() {
-            log::warn!("Received 0 bytes for thumbnail {}", file_id);
-            return Ok(None);
-        }
-
-        let thumb_path = format!("thumb_{}.{}", &file_id.to_string(), thumbnail_extension);
-        log::info!("Storing thumbnail {} for object {}", &thumb_path, path);
-        bucket.put_object(&thumb_path, &thumb_bytes).await?;
-
-        let mut connection = acquire_db_connection()?;
-        let s3_object = diesel::insert_into(s3_object::table)
-            .values(&S3Object {
-                object_key: thumb_path,
-                sha256_hash: None,
-                size_bytes: thumb_bytes.len() as i64,
-                mime_type: thumbnail_content_type,
-                fk_broker: broker.pk,
-                fk_uploader: user.pk,
-                thumbnail_object_key: None,
-                creation_timestamp: Utc::now(),
-                filename: None,
-            })
-            .get_result::<S3Object>(&mut connection)
-            .map_err(|e| Error::QueryError(e.to_string()))?;
-
-        Ok(Some(s3_object))
-    } else {
-        log::debug!(
-            "Not creating thumbnail for unsupported content type '{}'",
-            content_type
-        );
-        Ok(None)
-    }
 }
