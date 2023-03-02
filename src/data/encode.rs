@@ -55,8 +55,8 @@ pub async fn generate_thumbnail(
 
         if content_type_is_video || content_type_is_image {
             let args = if content_type_is_video {
-                thumbnail_extension = "jpeg";
-                thumbnail_content_type = String::from("image/jpeg");
+                thumbnail_extension = "webp";
+                thumbnail_content_type = String::from("image/webp");
                 vec![
                     String::from("-i"),
                     presigned_get_object,
@@ -66,47 +66,46 @@ pub async fn generate_thumbnail(
                     String::from("1"),
                     String::from("-f"),
                     String::from("image2"),
-                    String::from("-v"),
-                    String::from("error"),
-                    String::from("pipe:1"),
-                ]
-            } else if content_type == "image/png" {
-                thumbnail_extension = "png";
-                thumbnail_content_type = String::from("image/png");
-                vec![
-                    String::from("-i"),
-                    presigned_get_object,
-                    String::from("-pix_fmt"),
-                    String::from("rgba"),
-                    String::from("-vf"),
-                    String::from(
-                        r"format=rgba,thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)",
-                    ),
-                    String::from("-f"),
-                    String::from("image2"),
                     String::from("-codec"),
-                    String::from("png"),
+                    String::from("libwebp"),
+                    String::from("-update"),
+                    String::from("1"),
+                    String::from("-quality"),
+                    String::from("80"),
                     String::from("-v"),
                     String::from("error"),
                     String::from("pipe:1"),
                 ]
             } else {
-                thumbnail_extension = "jpeg";
-                thumbnail_content_type = String::from("image/jpeg");
+                thumbnail_extension = "webp";
+                thumbnail_content_type = String::from("image/webp");
                 vec![
                     String::from("-i"),
                     presigned_get_object,
                     String::from("-vf"),
                     String::from(r"thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)"),
+                    String::from("-pix_fmt"),
+                    String::from("bgra"),
                     String::from("-f"),
                     String::from("image2"),
+                    String::from("-codec"),
+                    String::from("libwebp"),
+                    String::from("-quality"),
+                    String::from("80"),
+                    String::from("-update"),
+                    String::from("1"),
+                    String::from("-frames:v"),
+                    String::from("1"),
                     String::from("-v"),
                     String::from("error"),
                     String::from("pipe:1"),
                 ]
             };
 
-            log::info!("Spawning ffmpeg process to generate thumbnail for {}", source_object_key);
+            log::info!(
+                "Spawning ffmpeg process to generate thumbnail for {}",
+                source_object_key
+            );
             let mut process = async_process::Command::new("ffmpeg")
                 .args(args)
                 .stdout(async_process::Stdio::piped())
@@ -138,7 +137,11 @@ pub async fn generate_thumbnail(
             }
 
             let thumb_path = format!("thumb_{}.{}", &file_id.to_string(), thumbnail_extension);
-            log::info!("Storing thumbnail {} for object {}", &thumb_path, source_object_key);
+            log::info!(
+                "Storing thumbnail {} for object {}",
+                &thumb_path,
+                source_object_key
+            );
             bucket.put_object(&thumb_path, &thumb_bytes).await?;
 
             let mut connection = acquire_db_connection()?;
@@ -171,7 +174,8 @@ pub async fn generate_thumbnail(
             );
             Ok(None)
         }
-    }).await
+    })
+    .await
 }
 
 #[inline]
