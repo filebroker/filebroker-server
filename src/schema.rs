@@ -29,6 +29,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    hls_stream (stream_playlist) {
+        stream_playlist -> Varchar,
+        stream_file -> Varchar,
+        master_playlist -> Varchar,
+        resolution -> Int4,
+        x264_preset -> Varchar,
+        target_bitrate -> Varchar,
+        min_bitrate -> Varchar,
+        max_bitrate -> Varchar,
+    }
+}
+
+diesel::table! {
     post (pk) {
         pk -> Int4,
         data_url -> Nullable<Varchar>,
@@ -123,6 +136,7 @@ diesel::table! {
         thumbnail_object_key -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
         filename -> Nullable<Varchar>,
+        hls_master_playlist -> Nullable<Varchar>,
     }
 }
 
@@ -206,6 +220,7 @@ diesel::joinable!(user_group_membership -> user_group (fk_group));
 diesel::allow_tables_to_appear_in_same_query!(
     broker,
     broker_access,
+    hls_stream,
     post,
     post_collection,
     post_collection_group_access,

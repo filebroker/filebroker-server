@@ -242,7 +242,6 @@ pub struct NewBroker {
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
 #[diesel(belongs_to(Broker, foreign_key = fk_broker))]
 #[diesel(belongs_to(User, foreign_key = fk_uploader))]
-#[diesel(belongs_to(S3Object, foreign_key = thumbnail_object_key))]
 #[diesel(table_name = s3_object)]
 #[diesel(primary_key(object_key))]
 pub struct S3Object {
@@ -255,6 +254,22 @@ pub struct S3Object {
     pub thumbnail_object_key: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub filename: Option<String>,
+    pub hls_master_playlist: Option<String>,
+}
+
+#[derive(Associations, Debug, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(S3Object, foreign_key = stream_playlist))]
+#[diesel(table_name = hls_stream)]
+#[diesel(primary_key(stream_file))]
+pub struct HlsStream {
+    pub stream_playlist: String,
+    pub stream_file: String,
+    pub master_playlist: String,
+    pub resolution: i32,
+    pub x264_preset: String,
+    pub target_bitrate: String,
+    pub min_bitrate: String,
+    pub max_bitrate: String,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]

@@ -67,6 +67,8 @@ pub enum Error {
     StdError(String),
     #[error("Submitted task was aborted")]
     CancellationError,
+    #[error("An IO Error occurred: {0}")]
+    IoError(String),
 }
 
 impl Reject for Error {}
@@ -160,7 +162,8 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             | Error::HyperError(_)
             | Error::FfmpegProcessError(_)
             | Error::StdError(_)
-            | Error::CancellationError => {
+            | Error::CancellationError
+            | Error::IoError(_) => {
                 log::error!("Encountered internal server error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None)
             }

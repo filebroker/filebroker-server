@@ -211,13 +211,13 @@ async fn setup_tokio_runtime() {
 
     let get_object_route = warp::path("get-object")
         .and(warp::get())
-        .and(warp::path::param())
+        .and(warp::filters::path::peek())
         .and(warp::header::optional::<String>("Range"))
         .and_then(data::get_object_handler);
 
     let get_object_head_route = warp::path("get-object")
         .and(warp::head())
-        .and(warp::path::param())
+        .and(warp::filters::path::peek())
         .and(warp::header::optional::<String>("Range"))
         .and_then(data::get_object_head_handler);
 

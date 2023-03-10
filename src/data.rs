@@ -10,6 +10,7 @@ use uuid::Uuid;
 use validator::Validate;
 use warp::{
     hyper::{self, Response},
+    path::Peek,
     Buf, Rejection, Reply,
 };
 
@@ -141,11 +142,13 @@ pub async fn upload_handler(
 }
 
 pub async fn get_object_handler(
-    object_key: String,
+    requested_path: Peek,
     range: Option<String>,
 ) -> Result<impl Reply, Rejection> {
+    let object_key = requested_path.as_str();
+    println!("object key: {}", &object_key);
     let mut connection = acquire_db_connection()?;
-    let (object, broker) = load_object(&object_key, &mut connection)?;
+    let (object, broker) = load_object(object_key, &mut connection)?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -190,11 +193,12 @@ pub async fn get_object_handler(
 }
 
 pub async fn get_object_head_handler(
-    object_key: String,
+    requested_path: Peek,
     range: Option<String>,
 ) -> Result<impl Reply, Rejection> {
+    let object_key = requested_path.as_str();
     let mut connection = acquire_db_connection()?;
-    let (object, broker) = load_object(&object_key, &mut connection)?;
+    let (object, broker) = load_object(object_key, &mut connection)?;
     drop(connection);
 
     let bucket = create_bucket(

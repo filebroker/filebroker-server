@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     acquire_db_connection,
-    data::encode::generate_thumbnail,
+    data::encode::{generate_hls_playlist, generate_thumbnail},
     diesel::{BoolExpressionMethods, ExpressionMethods, RunQueryDsl},
     error::Error,
     model::{Broker, S3Object, User},
@@ -38,7 +38,9 @@ where
         };
 
     log::info!("Starting S3 upload for {}", &object_key);
-    let status = bucket.put_object_stream(&mut reader, &object_key).await?;
+    let status = bucket
+        .put_object_stream_with_content_type(&mut reader, &object_key, &content_type)
+        .await?;
     if status >= 300 {
         return Err(Error::S3ResponseError(status));
     }
@@ -94,18 +96,41 @@ where
         }
     }
 
+    let is_video = content_type.starts_with("video/");
+
     let path = object_key.clone();
     let mime_type = content_type.clone();
-    let bucket = bucket.clone();
+    let bucket_owned = bucket.clone();
     let broker_owned = broker.clone();
     let user_owned = user.clone();
     tokio::spawn(async move {
-        if let Err(e) =
-            generate_thumbnail(bucket, path, uuid, content_type, broker_owned, user_owned).await
+        if let Err(e) = generate_thumbnail(
+            bucket_owned,
+            path,
+            uuid,
+            content_type,
+            broker_owned,
+            user_owned,
+        )
+        .await
         {
             log::error!("Failed to generate thumbnail: {}", e);
         }
     });
+
+    let path = object_key.clone();
+    let bucket_owned = bucket.clone();
+    let broker_owned = broker.clone();
+    let user_owned = user.clone();
+    if is_video {
+        tokio::spawn(async move {
+            if let Err(e) =
+                generate_hls_playlist(bucket_owned, path, uuid, broker_owned, user_owned).await
+            {
+                log::error!("Error occurred transcoding video to HLS: {}", e);
+            }
+        });
+    }
 
     let source_filename = if filename.len() > 255 {
         None
@@ -124,6 +149,7 @@ where
             thumbnail_object_key: None,
             creation_timestamp: Utc::now(),
             filename: source_filename,
+            hls_master_playlist: None,
         })
         .get_result::<S3Object>(&mut connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;
