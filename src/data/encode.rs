@@ -166,7 +166,6 @@ pub async fn generate_hls_playlist(
         split_string.push_str(&(downscaled_bitrates.len() + 1).to_string());
         split_string.push_str(
             &(0..=downscaled_bitrates.len())
-                .into_iter()
                 .map(|idx| format!("[v{}]", idx + 1))
                 .collect::<String>(),
         );
@@ -284,7 +283,7 @@ pub async fn generate_hls_playlist(
         transcode_args.push(String::from("-master_pl_name"));
         transcode_args.push(String::from("master.m3u8"));
         transcode_args.push(String::from("-var_stream_map"));
-        transcode_args.push((0..=downscaled_bitrates.len()).into_iter().map(|idx| format!("v:{idx},a:{idx}")).join(" "));
+        transcode_args.push((0..=downscaled_bitrates.len()).map(|idx| format!("v:{idx},a:{idx}")).join(" "));
         #[cfg(unix)]
         transcode_args.push(format!("{}/stream_%v.m3u8", fifo_dir.path().display()));
         #[cfg(not(unix))]

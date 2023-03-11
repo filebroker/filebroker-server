@@ -204,7 +204,10 @@ fn prepare_query_parameters(
         String::from("current_utc_timestamp"),
         Utc::now().to_string(),
     );
-    variables.insert(String::from("current_utc_date"), Utc::today().to_string());
+    variables.insert(
+        String::from("current_utc_date"),
+        Utc::now().date_naive().to_string(),
+    );
 
     if let Some(ref user) = user {
         variables.insert(String::from("current_user_key"), user.pk.to_string());
