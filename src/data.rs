@@ -146,7 +146,6 @@ pub async fn get_object_handler(
     range: Option<String>,
 ) -> Result<impl Reply, Rejection> {
     let object_key = requested_path.as_str();
-    println!("object key: {}", &object_key);
     let mut connection = acquire_db_connection()?;
     let (object, broker) = load_object(object_key, &mut connection)?;
     drop(connection);
