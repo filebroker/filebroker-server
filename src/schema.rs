@@ -12,6 +12,7 @@ diesel::table! {
         remove_duplicate_files -> Bool,
         fk_owner -> Int4,
         creation_timestamp -> Timestamptz,
+        hls_enabled -> Bool,
     }
 }
 
@@ -137,6 +138,7 @@ diesel::table! {
         creation_timestamp -> Timestamptz,
         filename -> Nullable<Varchar>,
         hls_master_playlist -> Nullable<Varchar>,
+        hls_disabled -> Bool,
     }
 }
 

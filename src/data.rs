@@ -40,6 +40,7 @@ pub async fn upload_handler(
     broker_pk: i32,
     user: User,
     mime: Mime,
+    disable_hls_transcoding: Option<bool>,
     body: impl Stream<Item = Result<impl Buf, warp::Error>> + Unpin,
 ) -> Result<impl Reply, Rejection> {
     let boundary = mime
@@ -90,8 +91,16 @@ pub async fn upload_handler(
                 file_size: 0,
             };
 
-            let (s3_object, is_existing) =
-                up::upload_file(&broker, &user, &bucket, reader, content_type, filename).await?;
+            let (s3_object, is_existing) = up::upload_file(
+                &broker,
+                &user,
+                &bucket,
+                reader,
+                content_type,
+                filename,
+                disable_hls_transcoding,
+            )
+            .await?;
 
             let mut posts_detailed = Vec::new();
             if is_existing {
@@ -301,6 +310,8 @@ pub async fn create_broker_handler(
             remove_duplicate_files: create_broker_request.remove_duplicate_files,
             fk_owner: user.pk,
             creation_timestamp: Utc::now(),
+            // TODO enable privleged users to create HLS enabled brokers
+            hls_enabled: false,
         })
         .get_result::<Broker>(&mut connection)
         .map_err(Error::from)?;

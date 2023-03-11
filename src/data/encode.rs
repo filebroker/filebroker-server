@@ -472,6 +472,7 @@ pub async fn generate_thumbnail(
                     creation_timestamp: Utc::now(),
                     filename: None,
                     hls_master_playlist: None,
+                    hls_disabled: true,
                 })
                 .get_result::<S3Object>(&mut connection)
                 .map_err(|e| Error::QueryError(e.to_string()))?;
@@ -573,6 +574,7 @@ async fn persist_hls_transcode_results(
         creation_timestamp: Utc::now(),
         filename: None,
         hls_master_playlist: None,
+        hls_disabled: true,
     }];
 
     let mut hls_streams = Vec::new();
@@ -592,6 +594,7 @@ async fn persist_hls_transcode_results(
             creation_timestamp: Utc::now(),
             filename: None,
             hls_master_playlist: None,
+            hls_disabled: true,
         });
 
         s3_objects.push(S3Object {
@@ -605,6 +608,7 @@ async fn persist_hls_transcode_results(
             creation_timestamp: Utc::now(),
             filename: None,
             hls_master_playlist: None,
+            hls_disabled: true,
         });
     }
 

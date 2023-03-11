@@ -223,6 +223,7 @@ pub struct Broker {
     pub remove_duplicate_files: bool,
     pub fk_owner: i32,
     pub creation_timestamp: DateTime<Utc>,
+    pub hls_enabled: bool,
 }
 
 #[derive(Insertable)]
@@ -237,6 +238,7 @@ pub struct NewBroker {
     pub remove_duplicate_files: bool,
     pub fk_owner: i32,
     pub creation_timestamp: DateTime<Utc>,
+    pub hls_enabled: bool,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -255,6 +257,7 @@ pub struct S3Object {
     pub creation_timestamp: DateTime<Utc>,
     pub filename: Option<String>,
     pub hls_master_playlist: Option<String>,
+    pub hls_disabled: bool,
 }
 
 #[derive(Associations, Debug, Clone, Identifiable, Insertable, Queryable, Serialize)]

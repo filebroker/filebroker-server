@@ -1,0 +1,2 @@
+ALTER TABLE broker ADD COLUMN hls_enabled BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE s3_object ADD COLUMN hls_disabled BOOLEAN NOT NULL DEFAULT false;

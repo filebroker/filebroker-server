@@ -24,6 +24,7 @@ pub async fn upload_file<S>(
     mut reader: s3utils::FileReader<IntoAsyncRead<S>>,
     content_type: String,
     filename: String,
+    disable_hls_transcoding: Option<bool>,
 ) -> Result<(S3Object, bool), Error>
 where
     S: TryStream<Error = std::io::Error> + Unpin,
@@ -97,6 +98,8 @@ where
     }
 
     let is_video = content_type.starts_with("video/");
+    let broker_hls_enabled = broker.hls_enabled;
+    let hls_transcoding_disabled = disable_hls_transcoding.unwrap_or(false);
 
     let path = object_key.clone();
     let mime_type = content_type.clone();
@@ -122,7 +125,7 @@ where
     let bucket_owned = bucket.clone();
     let broker_owned = broker.clone();
     let user_owned = user.clone();
-    if is_video {
+    if is_video && broker_hls_enabled && !hls_transcoding_disabled {
         tokio::spawn(async move {
             if let Err(e) =
                 generate_hls_playlist(bucket_owned, path, uuid, broker_owned, user_owned).await
@@ -150,6 +153,7 @@ where
             creation_timestamp: Utc::now(),
             filename: source_filename,
             hls_master_playlist: None,
+            hls_disabled: hls_transcoding_disabled,
         })
         .get_result::<S3Object>(&mut connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;

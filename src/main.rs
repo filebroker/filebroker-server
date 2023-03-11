@@ -206,6 +206,7 @@ async fn setup_tokio_runtime() {
         .and(warp::path::param())
         .and(auth::with_user())
         .and(warp::header::<Mime>("content-type"))
+        .and(warp::header::optional::<bool>("Disable-HLS-Transcoding"))
         .and(warp::body::stream())
         .and_then(data::upload_handler);
 
