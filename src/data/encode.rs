@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, path::Path};
+use std::cmp::Reverse;
 
 use chrono::Utc;
 use futures::{future::try_join_all, io::BufReader, ready, AsyncReadExt, Future, TryFutureExt};
@@ -514,6 +514,7 @@ struct UploadedHlsStream {
 struct S3UploadResult {
     path: String,
     bytes_read: usize,
+    #[cfg(any(unix))]
     response_status: u16,
 }
 
@@ -526,6 +527,7 @@ pin_project! {
 }
 
 impl ByteCountingTokioFileReader {
+    #[cfg(any(unix))]
     fn new(file: tokio::fs::File) -> Self {
         ByteCountingTokioFileReader {
             file,
@@ -693,7 +695,7 @@ fn spawn_hls_output_reader(
 fn spawn_hls_output_reader(
     _bucket: Bucket,
     _hls_stream: HlsStream,
-) -> Result<JoinHandle<Result<HlsStream, Error>>, Error> {
+) -> Result<JoinHandle<Result<UploadedHlsStream, Error>>, Error> {
     // TODO implement named pipes on windows
     Err(Error::FfmpegProcessError(String::from(
         "HLS transcoding not supported on current platform",
@@ -704,7 +706,7 @@ fn spawn_hls_output_reader(
 fn spawn_hls_output_reader(
     _bucket: Bucket,
     _hls_stream: HlsStream,
-) -> Result<JoinHandle<Result<HlsStream, Error>>, Error> {
+) -> Result<JoinHandle<Result<UploadedHlsStream, Error>>, Error> {
     Err(Error::FfmpegProcessError(String::from(
         "HLS transcoding not supported on current platform",
     )))
@@ -742,8 +744,8 @@ fn spawn_hls_master_playlist_reader(
 
 #[cfg(windows)]
 fn spawn_hls_master_playlist_reader(
-    bucket: Bucket,
-    master_playlist_path: String,
+    _bucket: Bucket,
+    _master_playlist_path: String,
 ) -> Result<JoinHandle<Result<S3UploadResult, Error>>, Error> {
     // TODO implement named pipes on windows
     Err(Error::FfmpegProcessError(String::from(
@@ -753,17 +755,18 @@ fn spawn_hls_master_playlist_reader(
 
 #[cfg(not(any(unix, windows)))]
 fn spawn_hls_master_playlist_reader(
-    bucket: Bucket,
-    master_playlist_path: String,
+    _bucket: Bucket,
+    _master_playlist_path: String,
 ) -> Result<JoinHandle<Result<S3UploadResult, Error>>, Error> {
     Err(Error::FfmpegProcessError(String::from(
         "HLS transcoding not supported on current platform",
     )))
 }
 
+#[cfg(any(unix))]
 fn upload_tokio_file(
     bucket: Bucket,
-    file_path: impl AsRef<Path>,
+    file_path: impl AsRef<std::path::Path>,
     s3_path: String,
     content_type: String,
 ) -> impl Future<Output = Result<S3UploadResult, Error>> {
