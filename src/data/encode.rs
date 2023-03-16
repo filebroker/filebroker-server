@@ -53,9 +53,9 @@ static VIDEO_TRANSCODE_RESOLUTIONS: [TranscodeResolution; 5] = [
     },
     TranscodeResolution {
         resolution: 360,
-        target_bitrate: "18M",
-        min_bitrate: "9M",
-        max_bitrate: "26100K",
+        target_bitrate: "500K",
+        min_bitrate: "256K",
+        max_bitrate: "800K",
         downscale_target: true,
     },
 ];
