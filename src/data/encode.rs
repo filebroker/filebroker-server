@@ -1,10 +1,7 @@
 use std::cmp::Reverse;
 
 use chrono::Utc;
-use futures::{
-    executor::block_on, future::try_join_all, io::BufReader, ready, AsyncReadExt, Future,
-    TryFutureExt,
-};
+use futures::{future::try_join_all, io::BufReader, ready, AsyncReadExt, Future, TryFutureExt};
 use itertools::Itertools;
 use pin_project_lite::pin_project;
 use rusty_pool::ThreadPool;
@@ -78,16 +75,10 @@ lazy_static! {
         .build();
 }
 
-async fn submit_tokio_future_to_pool<R: Send + 'static>(
+async fn spawn_blocking<R: Send + 'static>(
     future: impl Future<Output = Result<R, Error>> + 'static + Send,
 ) -> Result<R, Error> {
-    let tokio_handle = tokio::runtime::Handle::current();
-    let join_handle = ENCODE_POOL.spawn_await(async move {
-        match tokio_handle.spawn(future).await {
-            Ok(t) => t,
-            Err(_) => Err(Error::CancellationError),
-        }
-    });
+    let join_handle = ENCODE_POOL.complete(future);
 
     match join_handle.receiver.await {
         Ok(t) => t,
@@ -102,254 +93,290 @@ pub async fn generate_hls_playlist(
     broker: Broker,
     user: User,
 ) -> Result<(), Error> {
-    submit_tokio_future_to_pool(async move {
-        log::debug!(
-            "Waiting to acquire permit to start HLS transcode for {}",
-            &source_object_key
-        );
-        let _semaphore = VIDEO_TRANSCODE_SEMAPHORE
-            .acquire()
-            .await
-            .map_err(|_| Error::CancellationError)?;
-        log::info!("Starting HLS transcode for {}", &source_object_key);
-        let start_time = std::time::Instant::now();
-        let presigned_get_object = bucket.presign_get(&source_object_key, 3600, None)?;
+    log::debug!(
+        "Waiting to acquire permit to start HLS transcode for {}",
+        &source_object_key
+    );
+    let _semaphore = VIDEO_TRANSCODE_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| Error::CancellationError)?;
+    log::info!("Starting HLS transcode for {}", &source_object_key);
+    let start_time = std::time::Instant::now();
+    let presigned_get_object = bucket.presign_get(&source_object_key, 3600, None)?;
 
-        let mut resolution_probe_process = async_process::Command::new("ffprobe")
-            .args([
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=height",
-                "-of",
-                "csv=s=x:p=0",
-                "-v",
-                "error",
-                &presigned_get_object,
-            ])
-            .stdout(async_process::Stdio::piped())
-            .spawn()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+    let mut resolution_probe_process = async_process::Command::new("ffprobe")
+        .args([
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "csv=s=x:p=0",
+            "-v",
+            "error",
+            &presigned_get_object,
+        ])
+        .stdout(async_process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
 
-        let mut resolution_probe_stdout =
-            BufReader::new(resolution_probe_process.stdout.take().ok_or_else(|| {
-                Error::FfmpegProcessError(String::from("Could not get stdout of process"))
-            })?);
+    let mut resolution_probe_stdout =
+        BufReader::new(resolution_probe_process.stdout.take().ok_or_else(|| {
+            Error::FfmpegProcessError(String::from("Could not get stdout of process"))
+        })?);
 
+    let resolution_string = spawn_blocking(async move {
         let mut resolution_string = String::new();
-        block_on(resolution_probe_stdout
-            .read_to_string(&mut resolution_string))
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+        resolution_probe_stdout
+            .read_to_string(&mut resolution_string)
+            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+            .await?;
+        Ok(resolution_string)
+    })
+    .await?;
 
-        let resolution = resolution_string.trim().parse::<usize>().map_err(|_| {
-            Error::FfmpegProcessError(format!(
-                "Invalid resolution from ffprobe for '{}': {}",
-                &source_object_key, &resolution_string
-            ))
-        })?;
+    let resolution = resolution_string.trim().parse::<usize>().map_err(|_| {
+        Error::FfmpegProcessError(format!(
+            "Invalid resolution from ffprobe for '{}': {}",
+            &source_object_key, &resolution_string
+        ))
+    })?;
 
-        let mut video_transcode_resolutions = VIDEO_TRANSCODE_RESOLUTIONS;
-        video_transcode_resolutions.sort_by_key(|t| Reverse(t.resolution));
+    let mut video_transcode_resolutions = VIDEO_TRANSCODE_RESOLUTIONS;
+    video_transcode_resolutions.sort_by_key(|t| Reverse(t.resolution));
 
-        let target_bitrate = video_transcode_resolutions
-            .into_iter()
-            .find(|t| t.resolution <= resolution)
-            .unwrap_or_else(|| *video_transcode_resolutions.last().unwrap());
+    let target_bitrate = video_transcode_resolutions
+        .into_iter()
+        .find(|t| t.resolution <= resolution)
+        .unwrap_or_else(|| *video_transcode_resolutions.last().unwrap());
 
-        let downscaled_bitrates = video_transcode_resolutions
-            .into_iter()
-            .filter(|t| t.resolution < target_bitrate.resolution && t.downscale_target)
-            .take(2)
-            .collect::<Vec<_>>();
+    let downscaled_bitrates = video_transcode_resolutions
+        .into_iter()
+        .filter(|t| t.resolution < target_bitrate.resolution && t.downscale_target)
+        .take(2)
+        .collect::<Vec<_>>();
 
-        // generate string that splits the input video into separate streams for the source resolution and the two downscaled resolutions
-        // e.g. [0:v]split=3[v1][v2][v3]; [v1]copy[v1out]; [v2]scale=w=1280:h=720[v2out]; [v3]scale=w=640:h=360[v3out]
-        let mut split_string = String::from("[0:v]split=");
-        split_string.push_str(&(downscaled_bitrates.len() + 1).to_string());
-        split_string.push_str(
-            &(0..=downscaled_bitrates.len())
-                .map(|idx| format!("[v{}]", idx + 1))
-                .collect::<String>(),
-        );
-        split_string.push_str("; [v1]copy[v1out]");
-        if !downscaled_bitrates.is_empty() {
-            split_string.push_str("; ");
-            let scale_string = downscaled_bitrates
-                .iter()
-                .enumerate()
-                .map(|(i, bitrate)| {
-                    format!(
-                        "[v{idx}]scale=w=-1:h={resolution}[v{idx}out]",
-                        idx = i + 2,
-                        resolution = bitrate.resolution
-                    )
-                })
-                .join("; ");
+    // generate string that splits the input video into separate streams for the source resolution and the two downscaled resolutions
+    // e.g. [0:v]split=3[v1][v2][v3]; [v1]copy[v1out]; [v2]scale=w=1280:h=720[v2out]; [v3]scale=w=640:h=360[v3out]
+    let mut split_string = String::from("[0:v]split=");
+    split_string.push_str(&(downscaled_bitrates.len() + 1).to_string());
+    split_string.push_str(
+        &(0..=downscaled_bitrates.len())
+            .map(|idx| format!("[v{}]", idx + 1))
+            .collect::<String>(),
+    );
+    split_string.push_str("; [v1]copy[v1out]");
+    if !downscaled_bitrates.is_empty() {
+        split_string.push_str("; ");
+        let scale_string = downscaled_bitrates
+            .iter()
+            .enumerate()
+            .map(|(i, bitrate)| {
+                format!(
+                    "[v{idx}]scale=w=-1:h={resolution}[v{idx}out]",
+                    idx = i + 2,
+                    resolution = bitrate.resolution
+                )
+            })
+            .join("; ");
 
-            split_string.push_str(&scale_string);
-        }
+        split_string.push_str(&scale_string);
+    }
 
-        let mut transcode_args = vec![
-            String::from("-i"),
-            presigned_get_object,
-            String::from("-v"),
-            String::from("error"),
-            String::from("-filter_complex"),
-            split_string
-        ];
+    let mut transcode_args = vec![
+        String::from("-i"),
+        presigned_get_object,
+        String::from("-v"),
+        String::from("error"),
+        String::from("-filter_complex"),
+        split_string,
+    ];
 
-        let mut output_reader_join_handles = Vec::new();
+    let mut output_reader_join_handles = Vec::new();
 
-        #[cfg(unix)]
-        let fifo_dir = tempfile::tempdir().map_err(|e| Error::IoError(e.to_string()))?;
+    #[cfg(unix)]
+    let fifo_dir = tempfile::tempdir().map_err(|e| Error::IoError(e.to_string()))?;
 
-        for i in 0..=downscaled_bitrates.len() {
-            transcode_args.push(String::from("-map"));
-            let is_target_resolution = i == 0;
-            let bitrate = if is_target_resolution {
-                target_bitrate
-            } else {
-                downscaled_bitrates[i - 1]
-            };
+    for i in 0..=downscaled_bitrates.len() {
+        transcode_args.push(String::from("-map"));
+        let is_target_resolution = i == 0;
+        let bitrate = if is_target_resolution {
+            target_bitrate
+        } else {
+            downscaled_bitrates[i - 1]
+        };
 
-            let preset = if is_target_resolution {
-                "medium"
-            } else {
-                "fast"
-            };
+        let preset = if is_target_resolution {
+            "medium"
+        } else {
+            "fast"
+        };
 
-            transcode_args.push(format!("[v{}out]", i + 1));
-            transcode_args.push(format!("-c:v:{i}"));
-            transcode_args.push(String::from("libx264"));
-            transcode_args.push(String::from("-x264-params"));
-            transcode_args.push(String::from("nal-hrd=cbr:force-cfr=1"));
-            transcode_args.push(format!("-b:v:{i}"));
-            transcode_args.push(bitrate.target_bitrate.to_string());
-            transcode_args.push(format!("-maxrate:v:{i}"));
-            transcode_args.push(bitrate.max_bitrate.to_string());
-            transcode_args.push(format!("-minrate:v:{i}"));
-            transcode_args.push(bitrate.min_bitrate.to_string());
-            transcode_args.push(format!("-bufsize:v:{i}"));
-            transcode_args.push(bitrate.max_bitrate.to_string());
-            transcode_args.push(String::from("-preset"));
-            transcode_args.push(preset.to_string());
-            transcode_args.push(String::from("-g"));
-            transcode_args.push(String::from("48"));
-            transcode_args.push(String::from("-sc_threshold"));
-            transcode_args.push(String::from("0"));
-            transcode_args.push(String::from("-keyint_min"));
-            transcode_args.push(String::from("48"));
+        transcode_args.push(format!("[v{}out]", i + 1));
+        transcode_args.push(format!("-c:v:{i}"));
+        transcode_args.push(String::from("libx264"));
+        transcode_args.push(String::from("-x264-params"));
+        transcode_args.push(String::from("nal-hrd=cbr:force-cfr=1"));
+        transcode_args.push(format!("-b:v:{i}"));
+        transcode_args.push(bitrate.target_bitrate.to_string());
+        transcode_args.push(format!("-maxrate:v:{i}"));
+        transcode_args.push(bitrate.max_bitrate.to_string());
+        transcode_args.push(format!("-minrate:v:{i}"));
+        transcode_args.push(bitrate.min_bitrate.to_string());
+        transcode_args.push(format!("-bufsize:v:{i}"));
+        transcode_args.push(bitrate.max_bitrate.to_string());
+        transcode_args.push(String::from("-preset"));
+        transcode_args.push(preset.to_string());
+        transcode_args.push(String::from("-g"));
+        transcode_args.push(String::from("48"));
+        transcode_args.push(String::from("-sc_threshold"));
+        transcode_args.push(String::from("0"));
+        transcode_args.push(String::from("-keyint_min"));
+        transcode_args.push(String::from("48"));
 
-            let output_reader_join_handle = spawn_hls_output_reader(
-                #[cfg(unix)]
-                &fifo_dir,
-                bucket.clone(),
-                HlsStream {
-                    stream_playlist: format!("{}/stream_{i}.m3u8", &file_id),
-                    stream_file: format!("{}/stream_{i}.ts",&file_id),
-                    master_playlist: format!("{}/master.m3u8", &file_id),
-                    resolution: bitrate.resolution as i32,
-                    x264_preset: String::from(preset),
-                    target_bitrate: String::from(bitrate.target_bitrate),
-                    min_bitrate: String::from(bitrate.min_bitrate),
-                    max_bitrate: String::from(bitrate.max_bitrate)
-                }
-            )?;
-
-            output_reader_join_handles.push(output_reader_join_handle);
-        }
-
-        for i in 0..=downscaled_bitrates.len() {
-            transcode_args.push(String::from("-map"));
-            transcode_args.push(String::from("a:0"));
-            transcode_args.push(format!("-c:a:{i}"));
-            transcode_args.push(String::from("aac"));
-            transcode_args.push(format!("-b:a:{i}"));
-            transcode_args.push(String::from("96k"));
-            transcode_args.push(String::from("-ac"));
-            transcode_args.push(String::from("2"));
-        }
-
-        transcode_args.push(String::from("-f"));
-        transcode_args.push(String::from("hls"));
-        transcode_args.push(String::from("-hls_time"));
-        transcode_args.push(String::from("2"));
-        transcode_args.push(String::from("-hls_playlist_type"));
-        transcode_args.push(String::from("vod"));
-        transcode_args.push(String::from("-hls_flags"));
-        transcode_args.push(String::from("independent_segments"));
-        transcode_args.push(String::from("-hls_segment_type"));
-        transcode_args.push(String::from("mpegts"));
-        transcode_args.push(String::from("-hls_flags"));
-        transcode_args.push(String::from("single_file"));
-        transcode_args.push(String::from("-master_pl_name"));
-        transcode_args.push(String::from("master.m3u8"));
-        transcode_args.push(String::from("-var_stream_map"));
-        transcode_args.push((0..=downscaled_bitrates.len()).map(|idx| format!("v:{idx},a:{idx}")).join(" "));
-        #[cfg(unix)]
-        transcode_args.push(format!("{}/stream_%v.m3u8", fifo_dir.path().display()));
-        #[cfg(not(unix))]
-        transcode_args.push(format!("{}_stream_%v.m3u8", &file_id));
-
-        let master_playlist_join_handle = spawn_hls_master_playlist_reader(
+        let output_reader_join_handle = spawn_hls_output_reader(
             #[cfg(unix)]
             &fifo_dir,
             bucket.clone(),
-            format!("{}/master.m3u8", &file_id)
+            HlsStream {
+                stream_playlist: format!("{}/stream_{i}.m3u8", &file_id),
+                stream_file: format!("{}/stream_{i}.ts", &file_id),
+                master_playlist: format!("{}/master.m3u8", &file_id),
+                resolution: bitrate.resolution as i32,
+                x264_preset: String::from(preset),
+                target_bitrate: String::from(bitrate.target_bitrate),
+                min_bitrate: String::from(bitrate.min_bitrate),
+                max_bitrate: String::from(bitrate.max_bitrate),
+            },
         )?;
 
-        log::debug!("Spawning HLS transcode ffmpeg command with args {:?}", &transcode_args);
-        let process = match async_process::Command::new("ffmpeg")
-            .args(transcode_args)
-            .stdout(async_process::Stdio::piped())
-            .spawn()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string())) {
-                Ok(process) => process,
-                Err(e) => {
-                    master_playlist_join_handle.abort();
-                    for hanle in output_reader_join_handles {
-                        hanle.abort();
-                    }
-                    return Err(Error::FfmpegProcessError(e.to_string()));
-                }
-            };
+        output_reader_join_handles.push(output_reader_join_handle);
+    }
 
-        let process_output = block_on(process.output()).map_err(|e| Error::FfmpegProcessError(e.to_string()));
-        match process_output {
-            Ok(process_output) if !process_output.status.success() => {
-                master_playlist_join_handle.abort();
-                for hanle in output_reader_join_handles {
-                    hanle.abort();
-                }
-                return Err(Error::FfmpegProcessError(format!("ffmpeg failed with status {}", process_output.status)));
+    for i in 0..=downscaled_bitrates.len() {
+        transcode_args.push(String::from("-map"));
+        transcode_args.push(String::from("a:0"));
+        transcode_args.push(format!("-c:a:{i}"));
+        transcode_args.push(String::from("aac"));
+        transcode_args.push(format!("-b:a:{i}"));
+        transcode_args.push(String::from("96k"));
+        transcode_args.push(String::from("-ac"));
+        transcode_args.push(String::from("2"));
+    }
+
+    transcode_args.push(String::from("-f"));
+    transcode_args.push(String::from("hls"));
+    transcode_args.push(String::from("-hls_time"));
+    transcode_args.push(String::from("2"));
+    transcode_args.push(String::from("-hls_playlist_type"));
+    transcode_args.push(String::from("vod"));
+    transcode_args.push(String::from("-hls_flags"));
+    transcode_args.push(String::from("independent_segments"));
+    transcode_args.push(String::from("-hls_segment_type"));
+    transcode_args.push(String::from("mpegts"));
+    transcode_args.push(String::from("-hls_flags"));
+    transcode_args.push(String::from("single_file"));
+    transcode_args.push(String::from("-master_pl_name"));
+    transcode_args.push(String::from("master.m3u8"));
+    transcode_args.push(String::from("-var_stream_map"));
+    transcode_args.push(
+        (0..=downscaled_bitrates.len())
+            .map(|idx| format!("v:{idx},a:{idx}"))
+            .join(" "),
+    );
+    #[cfg(unix)]
+    transcode_args.push(format!("{}/stream_%v.m3u8", fifo_dir.path().display()));
+    #[cfg(not(unix))]
+    transcode_args.push(format!("{}_stream_%v.m3u8", &file_id));
+
+    let master_playlist_join_handle = spawn_hls_master_playlist_reader(
+        #[cfg(unix)]
+        &fifo_dir,
+        bucket.clone(),
+        format!("{}/master.m3u8", &file_id),
+    )?;
+
+    log::debug!(
+        "Spawning HLS transcode ffmpeg command with args {:?}",
+        &transcode_args
+    );
+    let process = match async_process::Command::new("ffmpeg")
+        .args(transcode_args)
+        .stdout(async_process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+    {
+        Ok(process) => process,
+        Err(e) => {
+            master_playlist_join_handle.abort();
+            for hanle in output_reader_join_handles {
+                hanle.abort();
             }
-            Err(e) => {
-                master_playlist_join_handle.abort();
-                for hanle in output_reader_join_handles {
-                    hanle.abort();
-                }
-                return Err(Error::FfmpegProcessError(e.to_string()));
-            }
-            _ => {}
+            return Err(Error::FfmpegProcessError(e.to_string()));
         }
+    };
 
-        if let Err(e) = persist_hls_transcode_results(&source_object_key, broker.pk, user.pk, master_playlist_join_handle, output_reader_join_handles).await {
-            log::error!("Failed to await and persist HLS transcode results to db with error: {}. Going to delete created objects", e.to_string());
-            // ignore deletion results for files that have never been created
-            let _ = bucket.delete_object(&format!("{}/master.m3u8", &file_id)).await;
-            for i in 0..=downscaled_bitrates.len() {
-                let _ = bucket.delete_object(&format!("{}/stream_{i}.m3u8", &file_id)).await;
-                let _ = bucket.delete_object(&format!("{}/stream_{i}.ts", &file_id)).await;
+    let process_output = spawn_blocking(
+        process
+            .output()
+            .map_err(|e| Error::FfmpegProcessError(e.to_string())),
+    )
+    .await;
+    match process_output {
+        Ok(process_output) if !process_output.status.success() => {
+            master_playlist_join_handle.abort();
+            for hanle in output_reader_join_handles {
+                hanle.abort();
             }
-
+            return Err(Error::FfmpegProcessError(format!(
+                "ffmpeg failed with status {}",
+                process_output.status
+            )));
+        }
+        Err(e) => {
+            master_playlist_join_handle.abort();
+            for hanle in output_reader_join_handles {
+                hanle.abort();
+            }
             return Err(e);
         }
+        _ => {}
+    }
 
-        log::info!("Completed HLS transcoding for {} after {}s", &source_object_key, start_time.elapsed().as_secs());
-
-        Ok(())
-    })
+    if let Err(e) = persist_hls_transcode_results(
+        &source_object_key,
+        broker.pk,
+        user.pk,
+        master_playlist_join_handle,
+        output_reader_join_handles,
+    )
     .await
+    {
+        log::error!("Failed to await and persist HLS transcode results to db with error: {}. Going to delete created objects", e.to_string());
+        // ignore deletion results for files that have never been created
+        let _ = bucket
+            .delete_object(&format!("{}/master.m3u8", &file_id))
+            .await;
+        for i in 0..=downscaled_bitrates.len() {
+            let _ = bucket
+                .delete_object(&format!("{}/stream_{i}.m3u8", &file_id))
+                .await;
+            let _ = bucket
+                .delete_object(&format!("{}/stream_{i}.ts", &file_id))
+                .await;
+        }
+
+        return Err(e);
+    }
+
+    log::info!(
+        "Completed HLS transcoding for {} after {}s",
+        &source_object_key,
+        start_time.elapsed().as_secs()
+    );
+
+    Ok(())
 }
 
 pub async fn generate_thumbnail(
@@ -360,85 +387,84 @@ pub async fn generate_thumbnail(
     broker: Broker,
     user: User,
 ) -> Result<(), Error> {
-    submit_tokio_future_to_pool(async move {
-        let presigned_get_object = bucket.presign_get(&source_object_key, 1800, None)?;
+    let presigned_get_object = bucket.presign_get(&source_object_key, 1800, None)?;
 
-        let content_type_is_video = content_type_is_video(&content_type);
-        let content_type_is_image = content_type_is_image(&content_type);
-        let thumbnail_extension;
-        let thumbnail_content_type;
+    let content_type_is_video = content_type_is_video(&content_type);
+    let content_type_is_image = content_type_is_image(&content_type);
+    let thumbnail_extension;
+    let thumbnail_content_type;
 
-        if content_type_is_video || content_type_is_image {
-            let args = if content_type_is_video {
-                thumbnail_extension = "webp";
-                thumbnail_content_type = String::from("image/webp");
-                vec![
-                    String::from("-i"),
-                    presigned_get_object,
-                    String::from("-vf"),
-                    String::from(r"thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)"),
-                    String::from("-vframes"),
-                    String::from("1"),
-                    String::from("-f"),
-                    String::from("image2"),
-                    String::from("-codec"),
-                    String::from("libwebp"),
-                    String::from("-update"),
-                    String::from("1"),
-                    String::from("-quality"),
-                    String::from("80"),
-                    String::from("-v"),
-                    String::from("error"),
-                    String::from("pipe:1"),
-                ]
-            } else {
-                thumbnail_extension = "webp";
-                thumbnail_content_type = String::from("image/webp");
-                vec![
-                    String::from("-i"),
-                    presigned_get_object,
-                    String::from("-vf"),
-                    String::from(r"thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)"),
-                    String::from("-pix_fmt"),
-                    String::from("bgra"),
-                    String::from("-f"),
-                    String::from("image2"),
-                    String::from("-codec"),
-                    String::from("libwebp"),
-                    String::from("-quality"),
-                    String::from("80"),
-                    String::from("-update"),
-                    String::from("1"),
-                    String::from("-frames:v"),
-                    String::from("1"),
-                    String::from("-v"),
-                    String::from("error"),
-                    String::from("pipe:1"),
-                ]
-            };
+    if content_type_is_video || content_type_is_image {
+        let args = if content_type_is_video {
+            thumbnail_extension = "webp";
+            thumbnail_content_type = String::from("image/webp");
+            vec![
+                String::from("-i"),
+                presigned_get_object,
+                String::from("-vf"),
+                String::from(r"thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)"),
+                String::from("-vframes"),
+                String::from("1"),
+                String::from("-f"),
+                String::from("image2"),
+                String::from("-codec"),
+                String::from("libwebp"),
+                String::from("-update"),
+                String::from("1"),
+                String::from("-quality"),
+                String::from("80"),
+                String::from("-v"),
+                String::from("error"),
+                String::from("pipe:1"),
+            ]
+        } else {
+            thumbnail_extension = "webp";
+            thumbnail_content_type = String::from("image/webp");
+            vec![
+                String::from("-i"),
+                presigned_get_object,
+                String::from("-vf"),
+                String::from(r"thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)"),
+                String::from("-pix_fmt"),
+                String::from("bgra"),
+                String::from("-f"),
+                String::from("image2"),
+                String::from("-codec"),
+                String::from("libwebp"),
+                String::from("-quality"),
+                String::from("80"),
+                String::from("-update"),
+                String::from("1"),
+                String::from("-frames:v"),
+                String::from("1"),
+                String::from("-v"),
+                String::from("error"),
+                String::from("pipe:1"),
+            ]
+        };
 
-            log::info!(
-                "Spawning ffmpeg process to generate thumbnail for {}",
-                source_object_key
-            );
-            let mut process = async_process::Command::new("ffmpeg")
-                .args(args)
-                .stdout(async_process::Stdio::piped())
-                .spawn()
-                .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+        log::info!(
+            "Spawning ffmpeg process to generate thumbnail for {}",
+            source_object_key
+        );
+        let mut process = async_process::Command::new("ffmpeg")
+            .args(args)
+            .stdout(async_process::Stdio::piped())
+            .spawn()
+            .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
 
-            let mut stdout = BufReader::new(process.stdout.take().ok_or_else(|| {
-                Error::FfmpegProcessError(String::from("Could not get stdout of process"))
-            })?);
+        let mut stdout = BufReader::new(process.stdout.take().ok_or_else(|| {
+            Error::FfmpegProcessError(String::from("Could not get stdout of process"))
+        })?);
 
+        let thumb_bytes = spawn_blocking(async move {
             let mut buf: [u8; 1 << 14] = [0; 1 << 14];
             let mut thumb_bytes = Vec::new();
             loop {
-                let n = block_on(
-                    stdout
-                        .read(&mut buf)
-                        .map_err(|e| Error::FfmpegProcessError(e.to_string())),
-                )?;
+                let n = stdout
+                    .read(&mut buf)
+                    .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+                    .await?;
                 if n == 0 {
                     break;
                 }
@@ -447,55 +473,57 @@ pub async fn generate_thumbnail(
                 buf = [0; 1 << 14];
             }
 
-            if thumb_bytes.is_empty() {
-                log::warn!("Received 0 bytes for thumbnail {}", file_id);
-                return Ok(());
-            }
+            Ok(thumb_bytes)
+        })
+        .await?;
 
-            let thumb_path = format!("thumb_{}.{}", &file_id.to_string(), thumbnail_extension);
-            log::info!(
-                "Storing thumbnail {} for object {}",
-                &thumb_path,
-                source_object_key
-            );
-            bucket
-                .put_object_with_content_type(&thumb_path, &thumb_bytes, &thumbnail_content_type)
-                .await?;
-
-            let mut connection = acquire_db_connection()?;
-            let s3_object = diesel::insert_into(s3_object::table)
-                .values(&S3Object {
-                    object_key: thumb_path,
-                    sha256_hash: None,
-                    size_bytes: thumb_bytes.len() as i64,
-                    mime_type: thumbnail_content_type,
-                    fk_broker: broker.pk,
-                    fk_uploader: user.pk,
-                    thumbnail_object_key: None,
-                    creation_timestamp: Utc::now(),
-                    filename: None,
-                    hls_master_playlist: None,
-                    hls_disabled: true,
-                })
-                .get_result::<S3Object>(&mut connection)
-                .map_err(|e| Error::QueryError(e.to_string()))?;
-
-            diesel::update(s3_object::table)
-                .filter(s3_object::object_key.eq(&source_object_key))
-                .set(s3_object::thumbnail_object_key.eq(&s3_object.object_key))
-                .execute(&mut connection)
-                .map_err(|e| Error::QueryError(e.to_string()))?;
-
-            Ok(())
-        } else {
-            log::debug!(
-                "Not creating thumbnail for unsupported content type '{}'",
-                content_type
-            );
-            Ok(())
+        if thumb_bytes.is_empty() {
+            log::warn!("Received 0 bytes for thumbnail {}", file_id);
+            return Ok(());
         }
-    })
-    .await
+
+        let thumb_path = format!("thumb_{}.{}", &file_id.to_string(), thumbnail_extension);
+        log::info!(
+            "Storing thumbnail {} for object {}",
+            &thumb_path,
+            source_object_key
+        );
+        bucket
+            .put_object_with_content_type(&thumb_path, &thumb_bytes, &thumbnail_content_type)
+            .await?;
+
+        let mut connection = acquire_db_connection()?;
+        let s3_object = diesel::insert_into(s3_object::table)
+            .values(&S3Object {
+                object_key: thumb_path,
+                sha256_hash: None,
+                size_bytes: thumb_bytes.len() as i64,
+                mime_type: thumbnail_content_type,
+                fk_broker: broker.pk,
+                fk_uploader: user.pk,
+                thumbnail_object_key: None,
+                creation_timestamp: Utc::now(),
+                filename: None,
+                hls_master_playlist: None,
+                hls_disabled: true,
+            })
+            .get_result::<S3Object>(&mut connection)
+            .map_err(|e| Error::QueryError(e.to_string()))?;
+
+        diesel::update(s3_object::table)
+            .filter(s3_object::object_key.eq(&source_object_key))
+            .set(s3_object::thumbnail_object_key.eq(&s3_object.object_key))
+            .execute(&mut connection)
+            .map_err(|e| Error::QueryError(e.to_string()))?;
+
+        Ok(())
+    } else {
+        log::debug!(
+            "Not creating thumbnail for unsupported content type '{}'",
+            content_type
+        );
+        Ok(())
+    }
 }
 
 #[inline]
