@@ -78,8 +78,19 @@ pub async fn upload_handler(
 
             let content_type = field
                 .content_type()
-                .map_err(|e| Error::InvalidFileError(e.to_string()))?
-                .to_string();
+                .map_err(|e| Error::InvalidFileError(e.to_string()))?;
+
+            let parsed_content_type = content_type
+                .parse::<Mime>()
+                .unwrap_or(mime::APPLICATION_OCTET_STREAM);
+
+            let content_type_string = if parsed_content_type == mime::APPLICATION_OCTET_STREAM {
+                mime_guess::from_path(&filename)
+                    .first_or(mime::APPLICATION_OCTET_STREAM)
+                    .to_string()
+            } else {
+                parsed_content_type.to_string()
+            };
 
             let async_read = field
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
@@ -96,7 +107,7 @@ pub async fn upload_handler(
                 &user,
                 &bucket,
                 reader,
-                content_type,
+                content_type_string,
                 filename,
                 disable_hls_transcoding,
             )
