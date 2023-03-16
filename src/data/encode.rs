@@ -1,7 +1,10 @@
 use std::cmp::Reverse;
 
 use chrono::Utc;
-use futures::{future::try_join_all, io::BufReader, ready, AsyncReadExt, Future, TryFutureExt};
+use futures::{
+    executor::block_on, future::try_join_all, io::BufReader, ready, AsyncReadExt, Future,
+    TryFutureExt,
+};
 use itertools::Itertools;
 use pin_project_lite::pin_project;
 use rusty_pool::ThreadPool;
@@ -79,7 +82,7 @@ async fn submit_tokio_future_to_pool<R: Send + 'static>(
     future: impl Future<Output = Result<R, Error>> + 'static + Send,
 ) -> Result<R, Error> {
     let tokio_handle = tokio::runtime::Handle::current();
-    let join_handle = ENCODE_POOL.complete(async move {
+    let join_handle = ENCODE_POOL.spawn_await(async move {
         match tokio_handle.spawn(future).await {
             Ok(t) => t,
             Err(_) => Err(Error::CancellationError),
@@ -134,9 +137,8 @@ pub async fn generate_hls_playlist(
             })?);
 
         let mut resolution_string = String::new();
-        resolution_probe_stdout
-            .read_to_string(&mut resolution_string)
-            .await
+        block_on(resolution_probe_stdout
+            .read_to_string(&mut resolution_string))
             .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
 
         let resolution = resolution_string.trim().parse::<usize>().map_err(|_| {
@@ -312,7 +314,7 @@ pub async fn generate_hls_playlist(
                 }
             };
 
-        let process_output = process.output().await.map_err(|e| Error::FfmpegProcessError(e.to_string()));
+        let process_output = block_on(process.output()).map_err(|e| Error::FfmpegProcessError(e.to_string()));
         match process_output {
             Ok(process_output) if !process_output.status.success() => {
                 master_playlist_join_handle.abort();
@@ -432,10 +434,11 @@ pub async fn generate_thumbnail(
             let mut buf: [u8; 1 << 14] = [0; 1 << 14];
             let mut thumb_bytes = Vec::new();
             loop {
-                let n = stdout
-                    .read(&mut buf)
-                    .map_err(|e| Error::FfmpegProcessError(e.to_string()))
-                    .await?;
+                let n = block_on(
+                    stdout
+                        .read(&mut buf)
+                        .map_err(|e| Error::FfmpegProcessError(e.to_string())),
+                )?;
                 if n == 0 {
                     break;
                 }
