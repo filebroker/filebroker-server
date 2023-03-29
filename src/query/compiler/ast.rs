@@ -461,6 +461,10 @@ impl Visitor for SemanticAnalysisVisitor {
         log: &mut Log,
         location: Location,
     ) {
+        for argument in function_call_node.arguments.iter() {
+            argument.accept(self, log);
+        }
+
         let identifier: &str = &function_call_node.identifier;
         if let Some(function) = dict::FUNCTIONS.get(identifier) {
             let arguments = &function_call_node.arguments;
@@ -479,6 +483,10 @@ impl Visitor for SemanticAnalysisVisitor {
         log: &mut Log,
         location: Location,
     ) {
+        for argument in modifier_node.arguments.iter() {
+            argument.accept(self, log);
+        }
+
         let identifier: &str = &modifier_node.identifier;
         if let Some(modifier) = dict::MODIFIERS.get(identifier) {
             let arguments = &modifier_node.arguments;
