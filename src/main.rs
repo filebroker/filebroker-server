@@ -302,6 +302,7 @@ async fn setup_tokio_runtime() {
             .allow_any_origin()
             .allow_header("content-type")
             .allow_header("Authorization")
+            .allow_header("Range")
             .allow_credentials(true)
             .allow_method(warp::http::Method::DELETE)
             .allow_method(warp::http::Method::GET)
