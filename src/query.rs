@@ -261,7 +261,7 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
 
     let mut log = Log { errors: Vec::new() };
     let query_len = request.query.len();
-    let ast = match compiler::compile_ast(request.query, &mut log) {
+    let ast = match compiler::compile_ast(request.query, &mut log, false) {
         Ok(ast) => ast,
         Err(Error::QueryCompilationError(phase, errors)) => {
             return Ok(warp::reply::json(&AnalyzeQueryResponse {

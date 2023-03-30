@@ -5,7 +5,7 @@ use std::{collections::HashMap, fmt};
 
 use self::{
     ast::{Node, QueryBuilderVisitor, QueryNode, SemanticAnalysisVisitor},
-    parser::{Parser, ParserError},
+    parser::Parser,
 };
 
 use super::QueryParameters;
@@ -182,8 +182,13 @@ pub fn compile_window_query(
 /// Compile the provided query string to a [`QueryNode`]. Reports errors observed up until (including) the parser step but does not perform semantic analysis.
 ///
 /// The provided log reference is consumed (swapped for an empty log) when an error is logged and a QueryCompilationError is returned.
-pub fn compile_ast(query: String, log: &mut Log) -> Result<Node<QueryNode>, crate::Error> {
-    let len = query.len();
+///
+/// If `fail_on_parse_error` is false, the compiled ast is still returned even if errors were observed, this is useful for autocomplete.
+pub fn compile_ast(
+    query: String,
+    log: &mut Log,
+    fail_on_parse_error: bool,
+) -> Result<Node<QueryNode>, crate::Error> {
     let token_stream = Lexer::new_for_string(query, log).read_token_stream();
     if !log.errors.is_empty() {
         let log = std::mem::take(log);
@@ -193,32 +198,9 @@ pub fn compile_ast(query: String, log: &mut Log) -> Result<Node<QueryNode>, crat
         ));
     }
 
-    let ast = match Parser::new(token_stream, log).parse_query() {
-        Ok(query_node) => query_node,
-        Err(ParserError::PrematureEof) => {
-            return Err(crate::Error::QueryCompilationError(
-                String::from("parser"),
-                vec![Error {
-                    location: Location {
-                        start: len - 1,
-                        end: len - 1,
-                    },
-                    msg: String::from("Expected additional token"),
-                }],
-            ))
-        }
-        Err(ParserError::UnexpectedToken(token)) => {
-            return Err(crate::Error::QueryCompilationError(
-                String::from("parser"),
-                vec![Error {
-                    location: token.location,
-                    msg: format!("Unexpected token: {:?}", token.parsed_token),
-                }],
-            ))
-        }
-    };
+    let ast = Parser::new(token_stream, log).parse_query();
 
-    if !log.errors.is_empty() {
+    if fail_on_parse_error && !log.errors.is_empty() {
         let log = std::mem::take(log);
         return Err(crate::Error::QueryCompilationError(
             String::from("parser"),
@@ -234,7 +216,7 @@ fn compile_expressions(
     query_parameters: &mut QueryParameters,
 ) -> Result<(HashMap<String, Cte>, Vec<String>), crate::Error> {
     let mut log = Log { errors: Vec::new() };
-    let ast = compile_ast(query, &mut log)?;
+    let ast = compile_ast(query, &mut log, true)?;
     let mut semantic_analysis_visitor = SemanticAnalysisVisitor {};
     ast.accept(&mut semantic_analysis_visitor, &mut log);
     if !log.errors.is_empty() {

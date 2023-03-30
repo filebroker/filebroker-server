@@ -34,13 +34,21 @@ impl<'l> Parser<'l> {
 }
 
 impl Parser<'_> {
-    pub fn parse_query(mut self) -> Result<Node<QueryNode>, ParserError> {
+    pub fn parse_query(mut self) -> Node<QueryNode> {
         let mut statements = Vec::new();
         let start = self.current_start;
 
         if self.advance() {
             loop {
-                statements.push(self.parse_statement()?);
+                let statement = match self.parse_statement() {
+                    Ok(statement) => statement,
+                    Err(e) => {
+                        e.report(&mut self);
+                        break;
+                    }
+                };
+
+                statements.push(statement);
                 if self.is_end() {
                     break;
                 }
@@ -48,13 +56,13 @@ impl Parser<'_> {
         }
 
         self.advance();
-        Ok(Node {
+        Node {
             location: Location {
                 start,
                 end: self.prev_end,
             },
             node_type: QueryNode { statements },
-        })
+        }
     }
 
     fn parse_statement(&mut self) -> Result<Box<Node<dyn StatementNode>>, ParserError> {
@@ -451,7 +459,8 @@ impl Parser<'_> {
         if !self.curr_is_tag(tag) {
             self.report_error(format!(
                 "Expected static token for tag {:?} but got {:?}",
-                tag, self.curr_tok
+                tag,
+                self.curr_tok.as_ref().map(|tok| tok.parsed_token.clone())
             ));
         }
         self.advance();
@@ -506,6 +515,24 @@ impl Parser<'_> {
 pub enum ParserError {
     PrematureEof,
     UnexpectedToken(Token),
+}
+
+impl ParserError {
+    fn report(&self, parser: &mut Parser) {
+        match self {
+            Self::PrematureEof => parser.log.errors.push(Error {
+                location: Location {
+                    start: parser.prev_end,
+                    end: parser.prev_end,
+                },
+                msg: String::from("Expected additional token"),
+            }),
+            Self::UnexpectedToken(token) => parser.log.errors.push(Error {
+                location: token.location,
+                msg: format!("Unexpected token: {:?}", token.parsed_token),
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -951,9 +978,8 @@ mod tests {
         assert!(log.errors.is_empty());
         let parser = Parser::new(token_stream, &mut log);
         let query_node = parser.parse_query();
-        assert!(query_node.is_ok());
         assert!(log.errors.is_empty());
-        query_node.unwrap()
+        query_node
     }
 
     fn assert_post_tag_statement(
