@@ -25,37 +25,22 @@ static VIDEO_TRANSCODE_SEMAPHORE: Semaphore =
 static VIDEO_TRANSCODE_RESOLUTIONS: [TranscodeResolution; 5] = [
     TranscodeResolution {
         resolution: 2160,
-        target_bitrate: "18M",
-        min_bitrate: "9M",
-        max_bitrate: "26100K",
         downscale_target: true,
     },
     TranscodeResolution {
         resolution: 1440,
-        target_bitrate: "9M",
-        min_bitrate: "4500K",
-        max_bitrate: "13050K",
         downscale_target: false,
     },
     TranscodeResolution {
         resolution: 1080,
-        target_bitrate: "3M",
-        min_bitrate: "1500K",
-        max_bitrate: "4350K",
         downscale_target: true,
     },
     TranscodeResolution {
         resolution: 720,
-        target_bitrate: "1800K",
-        min_bitrate: "900K",
-        max_bitrate: "2610K",
         downscale_target: true,
     },
     TranscodeResolution {
         resolution: 360,
-        target_bitrate: "500K",
-        min_bitrate: "256K",
-        max_bitrate: "800K",
         downscale_target: true,
     },
 ];
@@ -63,9 +48,6 @@ static VIDEO_TRANSCODE_RESOLUTIONS: [TranscodeResolution; 5] = [
 #[derive(Debug, Clone, Copy)]
 struct TranscodeResolution {
     resolution: usize,
-    target_bitrate: &'static str,
-    min_bitrate: &'static str,
-    max_bitrate: &'static str,
     downscale_target: bool,
 }
 
@@ -166,7 +148,7 @@ pub async fn generate_hls_playlist(
             .map(|idx| format!("[v{}]", idx + 1))
             .collect::<String>(),
     );
-    split_string.push_str("; [v1]copy[v1out]");
+    split_string.push_str("; [v1]format=yuv420p,fps=source_fps[v1out]");
     if !downscaled_bitrates.is_empty() {
         split_string.push_str("; ");
         let scale_string = downscaled_bitrates
@@ -174,7 +156,7 @@ pub async fn generate_hls_playlist(
             .enumerate()
             .map(|(i, bitrate)| {
                 format!(
-                    "[v{idx}]scale=w=-1:h={resolution}[v{idx}out]",
+                    "[v{idx}]scale=w=-1:h={resolution},format=yuv420p,fps=source_fps[v{idx}out]",
                     idx = i + 2,
                     resolution = bitrate.resolution
                 )
@@ -216,24 +198,18 @@ pub async fn generate_hls_playlist(
         transcode_args.push(format!("[v{}out]", i + 1));
         transcode_args.push(format!("-c:v:{i}"));
         transcode_args.push(String::from("libx264"));
-        transcode_args.push(String::from("-x264-params"));
-        transcode_args.push(String::from("nal-hrd=cbr:force-cfr=1"));
-        transcode_args.push(format!("-b:v:{i}"));
-        transcode_args.push(bitrate.target_bitrate.to_string());
-        transcode_args.push(format!("-maxrate:v:{i}"));
-        transcode_args.push(bitrate.max_bitrate.to_string());
-        transcode_args.push(format!("-minrate:v:{i}"));
-        transcode_args.push(bitrate.min_bitrate.to_string());
-        transcode_args.push(format!("-bufsize:v:{i}"));
-        transcode_args.push(bitrate.max_bitrate.to_string());
         transcode_args.push(String::from("-preset"));
         transcode_args.push(preset.to_string());
+        transcode_args.push(format!("-profile:v:{i}"));
+        transcode_args.push(String::from("high"));
         transcode_args.push(String::from("-g"));
         transcode_args.push(String::from("48"));
         transcode_args.push(String::from("-sc_threshold"));
         transcode_args.push(String::from("0"));
         transcode_args.push(String::from("-keyint_min"));
         transcode_args.push(String::from("48"));
+        transcode_args.push(String::from("-movflags"));
+        transcode_args.push(String::from("+faststart"));
 
         let output_reader_join_handle = spawn_hls_output_reader(
             #[cfg(unix)]
@@ -245,9 +221,6 @@ pub async fn generate_hls_playlist(
                 master_playlist: format!("{}/master.m3u8", &file_id),
                 resolution: bitrate.resolution as i32,
                 x264_preset: String::from(preset),
-                target_bitrate: String::from(bitrate.target_bitrate),
-                min_bitrate: String::from(bitrate.min_bitrate),
-                max_bitrate: String::from(bitrate.max_bitrate),
             },
         )?;
 

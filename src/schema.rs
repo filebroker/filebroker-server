@@ -36,9 +36,6 @@ diesel::table! {
         master_playlist -> Varchar,
         resolution -> Int4,
         x264_preset -> Varchar,
-        target_bitrate -> Varchar,
-        min_bitrate -> Varchar,
-        max_bitrate -> Varchar,
     }
 }
 
