@@ -156,7 +156,7 @@ pub async fn generate_hls_playlist(
             .enumerate()
             .map(|(i, bitrate)| {
                 format!(
-                    "[v{idx}]scale=w=-1:h={resolution},format=yuv420p,fps=source_fps[v{idx}out]",
+                    "[v{idx}]scale=w=-2:h={resolution},format=yuv420p,fps=source_fps[v{idx}out]",
                     idx = i + 2,
                     resolution = bitrate.resolution
                 )
