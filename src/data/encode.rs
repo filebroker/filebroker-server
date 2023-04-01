@@ -17,6 +17,7 @@ use crate::{
     error::Error,
     model::{Broker, HlsStream, S3Object, User},
     schema::{hls_stream, s3_object},
+    util::format_duration,
 };
 
 const CONCURRENT_VIDEO_TRANSCODE_LIMIT: usize = 4;
@@ -344,9 +345,9 @@ pub async fn generate_hls_playlist(
     }
 
     log::info!(
-        "Completed HLS transcoding for {} after {}s",
+        "Completed HLS transcoding for {} after {}",
         &source_object_key,
-        start_time.elapsed().as_secs()
+        format_duration(start_time.elapsed())
     );
 
     Ok(())

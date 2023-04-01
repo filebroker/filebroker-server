@@ -9,7 +9,7 @@ use s3::{command::Command, error::S3Error, request::Reqwest, request_trait::Requ
 use tokio::time::timeout;
 use warp::hyper;
 
-use crate::{error::Error, model::S3Object};
+use crate::{error::Error, model::S3Object, util::format_duration};
 
 pin_project! {
     pub struct FileReader<R> {
@@ -309,8 +309,10 @@ pub async fn get_command_stream(
     sender: &mut hyper::body::Sender,
 ) -> Result<u16, S3CommandError> {
     log::debug!("Executing S3 command streaming: {:?}", &command);
+    let now = std::time::Instant::now();
     let request = Reqwest::new(bucket, path, command);
     let response = request.response().await?;
+    let latency = now.elapsed();
     let status = response.status();
     let mut stream = response.bytes_stream();
     let mut total_bytes = 0;
@@ -318,7 +320,8 @@ pub async fn get_command_stream(
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(S3Error::from)?;
         let byte_len = bytes.len();
-        log::trace!("Sending {} bytes to S3 response", byte_len);
+        #[cfg(debug_assertions)]
+        let now = std::time::Instant::now();
         let res = timeout(Duration::from_secs(300), sender.send_data(bytes)).await;
         match res {
             Ok(Err(e)) => return Err(S3CommandError::SendError(e)),
@@ -329,10 +332,20 @@ pub async fn get_command_stream(
             }
             Ok(Ok(_)) => {}
         }
+        #[cfg(debug_assertions)]
+        log::debug!(
+            "Sent {} bytes to S3 response in {}",
+            byte_len,
+            format_duration(now.elapsed())
+        );
         total_bytes += byte_len;
-        log::trace!("Bytes sent");
     }
 
+    log::debug!(
+        "Streamed {total_bytes} bytes from S3 in {} ({} request latency)",
+        format_duration(now.elapsed()),
+        format_duration(latency)
+    );
     Ok(status.as_u16())
 }
 

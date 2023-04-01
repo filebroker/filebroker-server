@@ -15,6 +15,8 @@ use query::QueryParametersFilter;
 use std::str::FromStr;
 use warp::Filter;
 
+use crate::util::OptFmt;
+
 mod auth;
 mod data;
 mod error;
@@ -23,6 +25,7 @@ mod perms;
 mod post;
 mod query;
 mod schema;
+mod util;
 
 pub type DbConnection = PooledConnection<ConnectionManager<PgConnection>>;
 
@@ -294,7 +297,30 @@ async fn setup_tokio_runtime() {
 
     let filter = routes
         .recover(error::handle_rejection)
-        .with(warp::log("filebroker::api"));
+        .with(warp::log::custom(|info| {
+            let log_level = if info.elapsed().as_secs() >= 10 && !info.path().starts_with("/upload")
+            {
+                log::Level::Warn
+            } else if info.elapsed().as_millis() >= 100 {
+                log::Level::Info
+            } else {
+                log::Level::Debug
+            };
+
+            log::log!(
+                target: "filebroker::api",
+                log_level,
+                "{} \"{} {} {:?}\" {} \"{}\" \"{}\" {:?}",
+                OptFmt(info.remote_addr()),
+                info.method(),
+                info.path(),
+                info.version(),
+                info.status().as_u16(),
+                OptFmt(info.referer()),
+                OptFmt(info.user_agent()),
+                info.elapsed(),
+            );
+        }));
 
     #[cfg(debug_assertions)]
     let filter = filter.with(
