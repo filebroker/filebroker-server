@@ -274,6 +274,9 @@ pub struct HlsStream {
     pub master_playlist: String,
     pub resolution: i32,
     pub x264_preset: String,
+    pub target_bitrate: Option<String>,
+    pub min_bitrate: Option<String>,
+    pub max_bitrate: Option<String>,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]

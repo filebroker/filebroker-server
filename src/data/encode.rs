@@ -26,22 +26,37 @@ static VIDEO_TRANSCODE_SEMAPHORE: Semaphore =
 static VIDEO_TRANSCODE_RESOLUTIONS: [TranscodeResolution; 5] = [
     TranscodeResolution {
         resolution: 2160,
+        target_bitrate: "27M",
+        min_bitrate: "13M",
+        max_bitrate: "39150K",
         downscale_target: true,
     },
     TranscodeResolution {
         resolution: 1440,
+        target_bitrate: "13M",
+        min_bitrate: "6750K",
+        max_bitrate: "19575K",
         downscale_target: false,
     },
     TranscodeResolution {
         resolution: 1080,
+        target_bitrate: "4500K",
+        min_bitrate: "2250K",
+        max_bitrate: "6525K",
         downscale_target: true,
     },
     TranscodeResolution {
         resolution: 720,
+        target_bitrate: "2700K",
+        min_bitrate: "1350K",
+        max_bitrate: "3930K",
         downscale_target: true,
     },
     TranscodeResolution {
         resolution: 360,
+        target_bitrate: "750K",
+        min_bitrate: "384K",
+        max_bitrate: "1200K",
         downscale_target: true,
     },
 ];
@@ -49,6 +64,9 @@ static VIDEO_TRANSCODE_RESOLUTIONS: [TranscodeResolution; 5] = [
 #[derive(Debug, Clone, Copy)]
 struct TranscodeResolution {
     resolution: usize,
+    target_bitrate: &'static str,
+    min_bitrate: &'static str,
+    max_bitrate: &'static str,
     downscale_target: bool,
 }
 
@@ -67,6 +85,81 @@ async fn spawn_blocking<R: Send + 'static>(
         Ok(t) => t,
         Err(_) => Err(Error::CancellationError),
     }
+}
+
+async fn get_video_resolution(presigned_get_object: &str) -> Result<String, Error> {
+    let mut resolution_probe_process = async_process::Command::new("ffprobe")
+        .args([
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "csv=s=x:p=0",
+            "-v",
+            "error",
+            presigned_get_object,
+        ])
+        .stdout(async_process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+
+    let mut resolution_probe_stdout =
+        BufReader::new(resolution_probe_process.stdout.take().ok_or_else(|| {
+            Error::FfmpegProcessError(String::from("Could not get stdout of process"))
+        })?);
+
+    spawn_blocking(async move {
+        let mut resolution_string = String::new();
+        resolution_probe_stdout
+            .read_to_string(&mut resolution_string)
+            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+            .await?;
+        Ok(resolution_string)
+    })
+    .await
+}
+
+async fn video_has_audio(presigned_get_object: &str) -> Result<bool, Error> {
+    video_has_stream("a", presigned_get_object).await
+}
+
+/*
+Generating HLS playlists with subtitles is broken: https://trac.ffmpeg.org/ticket/9719#no1
+async fn video_has_subtitles(presigned_get_object: &str) -> Result<bool, Error> {
+    video_has_stream("s", presigned_get_object).await
+}
+*/
+
+async fn video_has_stream(stream: &str, presigned_get_object: &str) -> Result<bool, Error> {
+    let mut audio_probe_process = async_process::Command::new("ffprobe")
+        .args([
+            "-show_streams",
+            "-select_streams",
+            stream,
+            "-v",
+            "error",
+            "-i",
+            presigned_get_object,
+        ])
+        .stdout(async_process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+
+    let mut audio_probe_stdout =
+        BufReader::new(audio_probe_process.stdout.take().ok_or_else(|| {
+            Error::FfmpegProcessError(String::from("Could not get stdout of process"))
+        })?);
+
+    spawn_blocking(async move {
+        let mut str = String::new();
+        audio_probe_stdout
+            .read_to_string(&mut str)
+            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+            .await?;
+        Ok(!str.trim().is_empty())
+    })
+    .await
 }
 
 pub async fn generate_hls_playlist(
@@ -88,36 +181,8 @@ pub async fn generate_hls_playlist(
     let start_time = std::time::Instant::now();
     let presigned_get_object = bucket.presign_get(&source_object_key, 3600, None)?;
 
-    let mut resolution_probe_process = async_process::Command::new("ffprobe")
-        .args([
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=height",
-            "-of",
-            "csv=s=x:p=0",
-            "-v",
-            "error",
-            &presigned_get_object,
-        ])
-        .stdout(async_process::Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
-
-    let mut resolution_probe_stdout =
-        BufReader::new(resolution_probe_process.stdout.take().ok_or_else(|| {
-            Error::FfmpegProcessError(String::from("Could not get stdout of process"))
-        })?);
-
-    let resolution_string = spawn_blocking(async move {
-        let mut resolution_string = String::new();
-        resolution_probe_stdout
-            .read_to_string(&mut resolution_string)
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
-            .await?;
-        Ok(resolution_string)
-    })
-    .await?;
+    let resolution_string = get_video_resolution(&presigned_get_object).await?;
+    let has_audio = video_has_audio(&presigned_get_object).await?;
 
     let resolution = resolution_string.trim().parse::<usize>().map_err(|_| {
         Error::FfmpegProcessError(format!(
@@ -199,6 +264,16 @@ pub async fn generate_hls_playlist(
         transcode_args.push(format!("[v{}out]", i + 1));
         transcode_args.push(format!("-c:v:{i}"));
         transcode_args.push(String::from("libx264"));
+        transcode_args.push(String::from("-x264-params"));
+        transcode_args.push(String::from("nal-hrd=cbr:force-cfr=1"));
+        transcode_args.push(format!("-b:v:{i}"));
+        transcode_args.push(bitrate.target_bitrate.to_string());
+        transcode_args.push(format!("-maxrate:v:{i}"));
+        transcode_args.push(bitrate.max_bitrate.to_string());
+        transcode_args.push(format!("-minrate:v:{i}"));
+        transcode_args.push(bitrate.min_bitrate.to_string());
+        transcode_args.push(format!("-bufsize:v:{i}"));
+        transcode_args.push(bitrate.max_bitrate.to_string());
         transcode_args.push(String::from("-preset"));
         transcode_args.push(preset.to_string());
         transcode_args.push(format!("-profile:v:{i}"));
@@ -222,21 +297,26 @@ pub async fn generate_hls_playlist(
                 master_playlist: format!("{}/master.m3u8", &file_id),
                 resolution: bitrate.resolution as i32,
                 x264_preset: String::from(preset),
+                target_bitrate: Some(String::from(bitrate.target_bitrate)),
+                min_bitrate: Some(String::from(bitrate.min_bitrate)),
+                max_bitrate: Some(String::from(bitrate.max_bitrate)),
             },
         )?;
 
         output_reader_join_handles.push(output_reader_join_handle);
     }
 
-    for i in 0..=downscaled_bitrates.len() {
-        transcode_args.push(String::from("-map"));
-        transcode_args.push(String::from("a:0"));
-        transcode_args.push(format!("-c:a:{i}"));
-        transcode_args.push(String::from("aac"));
-        transcode_args.push(format!("-b:a:{i}"));
-        transcode_args.push(String::from("96k"));
-        transcode_args.push(String::from("-ac"));
-        transcode_args.push(String::from("2"));
+    if has_audio {
+        for i in 0..=downscaled_bitrates.len() {
+            transcode_args.push(String::from("-map"));
+            transcode_args.push(String::from("a:0"));
+            transcode_args.push(format!("-c:a:{i}"));
+            transcode_args.push(String::from("aac"));
+            transcode_args.push(format!("-b:a:{i}"));
+            transcode_args.push(String::from("96k"));
+            transcode_args.push(String::from("-ac"));
+            transcode_args.push(String::from("2"));
+        }
     }
 
     transcode_args.push(String::from("-f"));
@@ -256,7 +336,13 @@ pub async fn generate_hls_playlist(
     transcode_args.push(String::from("-var_stream_map"));
     transcode_args.push(
         (0..=downscaled_bitrates.len())
-            .map(|idx| format!("v:{idx},a:{idx}"))
+            .map(|idx| {
+                let mut s = format!("v:{idx}");
+                if has_audio {
+                    s.push_str(&format!(",a:{idx}"));
+                }
+                s
+            })
             .join(" "),
     );
     #[cfg(unix)]
