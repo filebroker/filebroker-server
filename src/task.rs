@@ -91,6 +91,10 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         log::info!("generate_missing_hls_streams disabled");
         return Ok(());
     }
+    if !encode::is_hls_supported_on_current_platform() {
+        log::warn!("Skipping generate_missing_hls_streams because it is unsupported on the current platform");
+        return Ok(());
+    }
     let mut connection = acquire_db_connection()?;
 
     let relevant_objects = diesel::sql_query("
@@ -120,6 +124,10 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
             .collect::<Vec<_>>(),
     };
 
+    log::info!(
+        "Found {} objects with missing HLS playlists",
+        relevant_objects.len()
+    );
     for object in relevant_objects {
         let mut connection = acquire_db_connection()?;
 
@@ -246,6 +254,10 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
             .collect::<Vec<_>>(),
     };
 
+    log::info!(
+        "Found {} objects with missing thumbnails",
+        relevant_objects.len()
+    );
     for object in relevant_objects {
         let mut connection = acquire_db_connection()?;
 

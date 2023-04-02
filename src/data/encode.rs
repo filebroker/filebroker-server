@@ -678,6 +678,10 @@ async fn persist_hls_transcode_results(
     Ok(())
 }
 
+pub fn is_hls_supported_on_current_platform() -> bool {
+    cfg!(unix)
+}
+
 #[cfg(unix)]
 fn spawn_hls_output_reader(
     fifo_dir: &tempfile::TempDir,
