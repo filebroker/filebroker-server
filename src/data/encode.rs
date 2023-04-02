@@ -278,14 +278,15 @@ pub async fn generate_hls_playlist(
     let process = match async_process::Command::new("ffmpeg")
         .args(transcode_args)
         .stdout(async_process::Stdio::piped())
+        .stderr(async_process::Stdio::piped())
         .spawn()
         .map_err(|e| Error::FfmpegProcessError(e.to_string()))
     {
         Ok(process) => process,
         Err(e) => {
             master_playlist_join_handle.abort();
-            for hanle in output_reader_join_handles {
-                hanle.abort();
+            for handle in output_reader_join_handles {
+                handle.abort();
             }
             return Err(Error::FfmpegProcessError(e.to_string()));
         }
@@ -300,18 +301,20 @@ pub async fn generate_hls_playlist(
     match process_output {
         Ok(process_output) if !process_output.status.success() => {
             master_playlist_join_handle.abort();
-            for hanle in output_reader_join_handles {
-                hanle.abort();
+            for handle in output_reader_join_handles {
+                handle.abort();
             }
+            let error_msg = std::str::from_utf8(&process_output.stderr)
+                .unwrap_or("(stderr contains invalid utf8)");
             return Err(Error::FfmpegProcessError(format!(
-                "ffmpeg failed with status {}",
-                process_output.status
+                "ffmpeg for hls_transcoding of {} failed with status {}: {}",
+                &source_object_key, process_output.status, error_msg
             )));
         }
         Err(e) => {
             master_playlist_join_handle.abort();
-            for hanle in output_reader_join_handles {
-                hanle.abort();
+            for handle in output_reader_join_handles {
+                handle.abort();
             }
             return Err(e);
         }
@@ -424,6 +427,7 @@ pub async fn generate_thumbnail(
         let mut process = async_process::Command::new("ffmpeg")
             .args(args)
             .stdout(async_process::Stdio::piped())
+            .stderr(async_process::Stdio::piped())
             .spawn()
             .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
 
@@ -450,6 +454,25 @@ pub async fn generate_thumbnail(
             Ok(thumb_bytes)
         })
         .await?;
+
+        let process_output = process
+            .output()
+            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+            .await;
+        match process_output {
+            Ok(process_output) if !process_output.status.success() => {
+                let error_msg = std::str::from_utf8(&process_output.stderr)
+                    .unwrap_or("(stderr contains invalid utf8)");
+                return Err(Error::FfmpegProcessError(format!(
+                    "ffmpeg for thumbnail of {} failed with status {}: {}",
+                    &source_object_key, process_output.status, error_msg
+                )));
+            }
+            Err(e) => {
+                return Err(e);
+            }
+            _ => {}
+        }
 
         if thumb_bytes.is_empty() {
             log::warn!("Received 0 bytes for thumbnail {}", file_id);
@@ -480,6 +503,10 @@ pub async fn generate_thumbnail(
                 filename: None,
                 hls_master_playlist: None,
                 hls_disabled: true,
+                hls_locked_at: Some(Utc::now()),
+                thumbnail_locked_at: Some(Utc::now()),
+                hls_fail_count: None,
+                thumbnail_fail_count: None,
             })
             .get_result::<S3Object>(&mut connection)
             .map_err(|e| Error::QueryError(e.to_string()))?;
@@ -582,6 +609,10 @@ async fn persist_hls_transcode_results(
         filename: None,
         hls_master_playlist: None,
         hls_disabled: true,
+        hls_locked_at: Some(Utc::now()),
+        thumbnail_locked_at: Some(Utc::now()),
+        hls_fail_count: None,
+        thumbnail_fail_count: None,
     }];
 
     let mut hls_streams = Vec::new();
@@ -602,6 +633,10 @@ async fn persist_hls_transcode_results(
             filename: None,
             hls_master_playlist: None,
             hls_disabled: true,
+            hls_locked_at: Some(Utc::now()),
+            thumbnail_locked_at: Some(Utc::now()),
+            hls_fail_count: None,
+            thumbnail_fail_count: None,
         });
 
         s3_objects.push(S3Object {
@@ -616,6 +651,10 @@ async fn persist_hls_transcode_results(
             filename: None,
             hls_master_playlist: None,
             hls_disabled: true,
+            hls_locked_at: Some(Utc::now()),
+            thumbnail_locked_at: Some(Utc::now()),
+            hls_fail_count: None,
+            thumbnail_fail_count: None,
         });
     }
 

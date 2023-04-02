@@ -241,7 +241,7 @@ pub struct NewBroker {
     pub hls_enabled: bool,
 }
 
-#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, QueryableByName, Serialize)]
 #[diesel(belongs_to(Broker, foreign_key = fk_broker))]
 #[diesel(belongs_to(User, foreign_key = fk_uploader))]
 #[diesel(table_name = s3_object)]
@@ -258,6 +258,10 @@ pub struct S3Object {
     pub filename: Option<String>,
     pub hls_master_playlist: Option<String>,
     pub hls_disabled: bool,
+    pub hls_locked_at: Option<DateTime<Utc>>,
+    pub thumbnail_locked_at: Option<DateTime<Utc>>,
+    pub hls_fail_count: Option<i32>,
+    pub thumbnail_fail_count: Option<i32>,
 }
 
 #[derive(Associations, Debug, Clone, Identifiable, Insertable, Queryable, Serialize)]

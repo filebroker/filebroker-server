@@ -1,5 +1,7 @@
 #[macro_use]
 extern crate diesel;
+use chrono::Utc;
+use clokwerk::Scheduler;
 #[cfg(feature = "auto_migration")]
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
@@ -12,7 +14,7 @@ use error::{Error, TransactionRuntimeError};
 use lazy_static::lazy_static;
 use mime::Mime;
 use query::QueryParametersFilter;
-use std::str::FromStr;
+use std::{str::FromStr, thread::JoinHandle};
 use warp::Filter;
 
 use crate::util::OptFmt;
@@ -25,6 +27,7 @@ mod perms;
 mod post;
 mod query;
 mod schema;
+mod task;
 mod util;
 
 pub type DbConnection = PooledConnection<ConnectionManager<PgConnection>>;
@@ -82,6 +85,8 @@ fn main() {
         }
         log::info!("Done running diesel migrations");
     }
+
+    let _task_scheduler = start_task_scheduler_runtime(configure_scheduler());
 
     setup_tokio_runtime();
 }
@@ -378,4 +383,65 @@ fn setup_logger() {
         .chain(fern::DateBased::new("logs/", "logs_%Y-%m-%d.log"))
         .apply()
         .expect("Failed to set up logging");
+}
+
+fn configure_scheduler() -> Scheduler<Utc> {
+    let mut scheduler = Scheduler::with_tz(Utc);
+    scheduler.every(clokwerk::Interval::Hours(2)).run(|| {
+        task::submit_task(
+            "generate_missing_hls_streams",
+            task::generate_missing_hls_streams,
+        )
+    });
+    scheduler.every(clokwerk::Interval::Hours(2)).run(|| {
+        task::submit_task(
+            "generate_missing_thumbnails",
+            task::generate_missing_thumbnails,
+        )
+    });
+    scheduler.every(clokwerk::Interval::Hours(1)).run(|| {
+        task::submit_task("clear_old_object_locks", task::clear_old_object_locks);
+    });
+
+    scheduler
+}
+
+fn start_task_scheduler_runtime(scheduler: Scheduler<Utc>) -> JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(String::from("task_scheduler"))
+        .spawn(move || {
+            let mut task_scheduler_sentinel = TaskSchedulerSentinel { scheduler };
+
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .thread_name("task_tokio_worker")
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    eprintln!("Failed to start task scheduler runtime: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            runtime.block_on(async {
+                loop {
+                    task_scheduler_sentinel.scheduler.run_pending();
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
+        })
+        .expect("Failed to spawn task scheduler thread")
+}
+
+struct TaskSchedulerSentinel {
+    scheduler: Scheduler<Utc>,
+}
+
+impl Drop for TaskSchedulerSentinel {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            start_task_scheduler_runtime(configure_scheduler());
+        }
+    }
 }

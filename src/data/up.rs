@@ -154,6 +154,10 @@ where
             filename: source_filename,
             hls_master_playlist: None,
             hls_disabled: hls_transcoding_disabled,
+            hls_locked_at: Some(Utc::now()),
+            thumbnail_locked_at: Some(Utc::now()),
+            hls_fail_count: None,
+            thumbnail_fail_count: None,
         })
         .get_result::<S3Object>(&mut connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;

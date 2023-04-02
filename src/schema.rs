@@ -136,6 +136,10 @@ diesel::table! {
         filename -> Nullable<Varchar>,
         hls_master_playlist -> Nullable<Varchar>,
         hls_disabled -> Bool,
+        hls_locked_at -> Nullable<Timestamptz>,
+        thumbnail_locked_at -> Nullable<Timestamptz>,
+        hls_fail_count -> Nullable<Int4>,
+        thumbnail_fail_count -> Nullable<Int4>,
     }
 }
 
