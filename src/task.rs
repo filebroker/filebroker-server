@@ -108,7 +108,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
             AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
             AND NOT EXISTS(SELECT * FROM hls_stream WHERE stream_playlist = obj.object_key OR stream_file = obj.object_key OR master_playlist = obj.object_key)
             AND (hls_fail_count IS NULL OR hls_fail_count < 3)
-            ORDER BY creation_timestamp
+            ORDER BY hls_fail_count ASC NULLS FIRST, creation_timestamp ASC
             LIMIT 25
         )
         UPDATE s3_object SET hls_locked_at = NOW() WHERE hls_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
@@ -238,7 +238,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
             AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
             AND NOT EXISTS(SELECT * FROM hls_stream WHERE stream_playlist = obj.object_key OR stream_file = obj.object_key OR master_playlist = obj.object_key)
             AND (thumbnail_fail_count IS NULL OR thumbnail_fail_count < 3)
-            ORDER BY creation_timestamp
+            ORDER BY thumbnail_fail_count ASC NULLS FIRST, creation_timestamp ASC
             LIMIT 100
         )
         UPDATE s3_object SET thumbnail_locked_at = NOW() WHERE thumbnail_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
