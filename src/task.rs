@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use chrono::Utc;
 use diesel::{
     query_dsl::methods::FilterDsl,
     sql_types::{Array, VarChar},
@@ -8,7 +7,7 @@ use diesel::{
 };
 use rusty_pool::ThreadPool;
 use s3::Bucket;
-use tokio::{runtime::Handle, task::JoinHandle};
+use tokio::runtime::Handle;
 
 use lazy_static::lazy_static;
 use uuid::Uuid;
@@ -19,7 +18,7 @@ use crate::{
     diesel::ExpressionMethods,
     error::Error,
     model::{Broker, S3Object, User},
-    schema::{broker, registered_user, s3_object},
+    schema::{broker, registered_user},
     DbConnection,
 };
 
@@ -164,33 +163,6 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                 continue;
             }
         };
-
-        let refresh_object_key = object.object_key.clone();
-        let refresh_lock_handle = tokio_handle.spawn(async move {
-            // refresh lock every 15 minutes
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60 * 15)).await;
-                match acquire_db_connection() {
-                    Ok(mut connection) => {
-                        if let Err(e) = diesel::update(s3_object::table)
-                            .set(s3_object::hls_locked_at.eq(Utc::now()))
-                            .filter(s3_object::object_key.eq(&refresh_object_key))
-                            .execute(&mut connection)
-                        {
-                            log::error!(
-                                "Failed to refresh hls_locked_at for object {}: {e}",
-                                &refresh_object_key
-                            );
-                        }
-                    }
-                    Err(e) => log::error!(
-                        "Failed to refresh hls_locked_at for object {}: {e}",
-                        &refresh_object_key
-                    ),
-                }
-            }
-        });
-        let _refresh_lock_handle = ShutdownTaskOnDrop(refresh_lock_handle);
 
         if let Err(e) = tokio_handle.block_on(encode::generate_hls_playlist(
             bucket,
@@ -388,13 +360,5 @@ impl Drop for LockedObjectTaskSentinel {
         if let Err(e) = res {
             log::error!("Could not unlock objects: {}", e);
         }
-    }
-}
-
-struct ShutdownTaskOnDrop<T>(JoinHandle<T>);
-
-impl<T> Drop for ShutdownTaskOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }

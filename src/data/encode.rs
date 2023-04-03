@@ -303,6 +303,8 @@ pub async fn generate_hls_playlist(
         }
     };
 
+    let _refresh_lock_handle = spawn_hls_lock_refresh_task(source_object_key.clone());
+
     let process_output = spawn_blocking(
         process
             .output()
@@ -449,6 +451,42 @@ async fn video_has_stream(stream: &str, presigned_get_object: &str) -> Result<bo
         Ok(process_output) => Ok(!process_output.stdout.is_empty()),
         Err(e) => Err(e),
     }
+}
+
+struct ShutdownTaskOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for ShutdownTaskOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_hls_lock_refresh_task(refresh_object_key: String) -> ShutdownTaskOnDrop<()> {
+    let refresh_lock_handle = tokio::spawn(async move {
+        // refresh lock every 15 minutes
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60 * 15)).await;
+            match acquire_db_connection() {
+                Ok(mut connection) => {
+                    if let Err(e) = diesel::update(s3_object::table)
+                        .set(s3_object::hls_locked_at.eq(Utc::now()))
+                        .filter(s3_object::object_key.eq(&refresh_object_key))
+                        .execute(&mut connection)
+                    {
+                        log::error!(
+                            "Failed to refresh hls_locked_at for object {}: {e}",
+                            &refresh_object_key
+                        );
+                    }
+                }
+                Err(e) => log::error!(
+                    "Failed to refresh hls_locked_at for object {}: {e}",
+                    &refresh_object_key
+                ),
+            }
+        }
+    });
+    ShutdownTaskOnDrop(refresh_lock_handle)
 }
 
 pub async fn generate_thumbnail(
