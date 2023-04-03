@@ -87,81 +87,6 @@ async fn spawn_blocking<R: Send + 'static>(
     }
 }
 
-async fn get_video_resolution(presigned_get_object: &str) -> Result<String, Error> {
-    let mut resolution_probe_process = async_process::Command::new("ffprobe")
-        .args([
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=height",
-            "-of",
-            "csv=s=x:p=0",
-            "-v",
-            "error",
-            presigned_get_object,
-        ])
-        .stdout(async_process::Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
-
-    let mut resolution_probe_stdout =
-        BufReader::new(resolution_probe_process.stdout.take().ok_or_else(|| {
-            Error::FfmpegProcessError(String::from("Could not get stdout of process"))
-        })?);
-
-    spawn_blocking(async move {
-        let mut resolution_string = String::new();
-        resolution_probe_stdout
-            .read_to_string(&mut resolution_string)
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
-            .await?;
-        Ok(resolution_string)
-    })
-    .await
-}
-
-async fn video_has_audio(presigned_get_object: &str) -> Result<bool, Error> {
-    video_has_stream("a", presigned_get_object).await
-}
-
-/*
-Generating HLS playlists with subtitles is broken: https://trac.ffmpeg.org/ticket/9719#no1
-async fn video_has_subtitles(presigned_get_object: &str) -> Result<bool, Error> {
-    video_has_stream("s", presigned_get_object).await
-}
-*/
-
-async fn video_has_stream(stream: &str, presigned_get_object: &str) -> Result<bool, Error> {
-    let mut audio_probe_process = async_process::Command::new("ffprobe")
-        .args([
-            "-show_streams",
-            "-select_streams",
-            stream,
-            "-v",
-            "error",
-            "-i",
-            presigned_get_object,
-        ])
-        .stdout(async_process::Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
-
-    let mut audio_probe_stdout =
-        BufReader::new(audio_probe_process.stdout.take().ok_or_else(|| {
-            Error::FfmpegProcessError(String::from("Could not get stdout of process"))
-        })?);
-
-    spawn_blocking(async move {
-        let mut str = String::new();
-        audio_probe_stdout
-            .read_to_string(&mut str)
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
-            .await?;
-        Ok(!str.trim().is_empty())
-    })
-    .await
-}
-
 pub async fn generate_hls_playlist(
     bucket: Bucket,
     source_object_key: String,
@@ -390,8 +315,7 @@ pub async fn generate_hls_playlist(
             for handle in output_reader_join_handles {
                 handle.abort();
             }
-            let error_msg = std::str::from_utf8(&process_output.stderr)
-                .unwrap_or("(stderr contains invalid utf8)");
+            let error_msg = String::from_utf8_lossy(&process_output.stderr);
             return Err(Error::FfmpegProcessError(format!(
                 "ffmpeg for hls_transcoding of {} failed with status {}: {}",
                 &source_object_key, process_output.status, error_msg
@@ -440,6 +364,91 @@ pub async fn generate_hls_playlist(
     );
 
     Ok(())
+}
+
+async fn get_video_resolution(presigned_get_object: &str) -> Result<String, Error> {
+    let resolution_probe_process = async_process::Command::new("ffprobe")
+        .args([
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=height",
+            "-of",
+            "csv=s=x:p=0",
+            "-v",
+            "error",
+            presigned_get_object,
+        ])
+        .stdout(async_process::Stdio::piped())
+        .stderr(async_process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+
+    let process_output = spawn_blocking(
+        resolution_probe_process
+            .output()
+            .map_err(|e| Error::FfmpegProcessError(e.to_string())),
+    )
+    .await;
+    match process_output {
+        Ok(process_output) if !process_output.status.success() => {
+            let error_msg = String::from_utf8_lossy(&process_output.stderr);
+            Err(Error::FfmpegProcessError(format!(
+                "ffprobe failed with status {}: {}",
+                process_output.status, error_msg
+            )))
+        }
+        Ok(process_output) => Ok(String::from_utf8_lossy(&process_output.stdout)
+            .trim()
+            .to_string()),
+        Err(e) => Err(e),
+    }
+}
+
+async fn video_has_audio(presigned_get_object: &str) -> Result<bool, Error> {
+    video_has_stream("a", presigned_get_object).await
+}
+
+/*
+Generating HLS playlists with subtitles is broken: https://trac.ffmpeg.org/ticket/9719#no1
+async fn video_has_subtitles(presigned_get_object: &str) -> Result<bool, Error> {
+    video_has_stream("s", presigned_get_object).await
+}
+*/
+
+async fn video_has_stream(stream: &str, presigned_get_object: &str) -> Result<bool, Error> {
+    let audio_probe_process = async_process::Command::new("ffprobe")
+        .args([
+            "-show_streams",
+            "-select_streams",
+            stream,
+            "-v",
+            "error",
+            "-i",
+            presigned_get_object,
+        ])
+        .stdout(async_process::Stdio::piped())
+        .stderr(async_process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+
+    let process_output = spawn_blocking(
+        audio_probe_process
+            .output()
+            .map_err(|e| Error::FfmpegProcessError(e.to_string())),
+    )
+    .await;
+    match process_output {
+        Ok(process_output) if !process_output.status.success() => {
+            let error_msg = String::from_utf8_lossy(&process_output.stderr);
+            Err(Error::FfmpegProcessError(format!(
+                "ffprobe failed with status {}: {}",
+                process_output.status, error_msg
+            )))
+        }
+        Ok(process_output) => Ok(!process_output.stdout.is_empty()),
+        Err(e) => Err(e),
+    }
 }
 
 pub async fn generate_thumbnail(
@@ -547,8 +556,7 @@ pub async fn generate_thumbnail(
             .await;
         match process_output {
             Ok(process_output) if !process_output.status.success() => {
-                let error_msg = std::str::from_utf8(&process_output.stderr)
-                    .unwrap_or("(stderr contains invalid utf8)");
+                let error_msg = String::from_utf8_lossy(&process_output.stderr);
                 return Err(Error::FfmpegProcessError(format!(
                     "ffmpeg for thumbnail of {} failed with status {}: {}",
                     &source_object_key, process_output.status, error_msg
