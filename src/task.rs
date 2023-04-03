@@ -18,6 +18,7 @@ use crate::{
     diesel::ExpressionMethods,
     error::Error,
     model::{Broker, S3Object, User},
+    retry_on_serialization_failure, run_serializable_transaction,
     schema::{broker, registered_user},
     DbConnection,
 };
@@ -96,7 +97,8 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
     }
     let mut connection = acquire_db_connection()?;
 
-    let relevant_objects = diesel::sql_query("
+    let relevant_objects = run_serializable_transaction(&mut connection, |connection| {
+        diesel::sql_query("
         WITH relevant_s3objects AS(
             SELECT * FROM s3_object AS obj
             WHERE NOT hls_disabled
@@ -112,7 +114,9 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         )
         UPDATE s3_object SET hls_locked_at = NOW() WHERE hls_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
     ")
-    .load::<S3Object>(&mut connection)?;
+    .load::<S3Object>(connection)
+    .map_err(retry_on_serialization_failure)
+    })?;
     drop(connection);
 
     let _sentinel = LockedObjectTaskSentinel {
@@ -201,7 +205,8 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
     }
     let mut connection = acquire_db_connection()?;
 
-    let relevant_objects = diesel::sql_query("
+    let relevant_objects = run_serializable_transaction(&mut connection, |connection| {
+        diesel::sql_query("
         WITH relevant_s3objects AS(
             SELECT * FROM s3_object AS obj
             WHERE thumbnail_object_key IS NULL
@@ -215,7 +220,9 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
         )
         UPDATE s3_object SET thumbnail_locked_at = NOW() WHERE thumbnail_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
     ")
-    .load::<S3Object>(&mut connection)?;
+    .load::<S3Object>(connection)
+    .map_err(retry_on_serialization_failure)
+    })?;
     drop(connection);
 
     let _sentinel = LockedObjectTaskSentinel {

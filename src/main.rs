@@ -6,6 +6,7 @@ use clokwerk::Scheduler;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 use diesel::{
+    pg::TransactionBuilder,
     r2d2::{self, ConnectionManager, Pool, PooledConnection},
     PgConnection,
 };
@@ -104,13 +105,31 @@ pub fn run_retryable_transaction<
     connection: &mut DbConnection,
     function: F,
 ) -> Result<T, Error> {
+    run_retryable_transaction_with_level(connection.build_transaction().read_committed(), function)
+}
+
+pub fn run_serializable_transaction<
+    T,
+    F: Fn(&mut PgConnection) -> Result<T, TransactionRuntimeError>,
+>(
+    connection: &mut DbConnection,
+    function: F,
+) -> Result<T, Error> {
+    run_retryable_transaction_with_level(connection.build_transaction().serializable(), function)
+}
+
+fn run_retryable_transaction_with_level<
+    T,
+    F: Fn(&mut PgConnection) -> Result<T, TransactionRuntimeError>,
+>(
+    mut transaction_builder: TransactionBuilder<PgConnection>,
+    function: F,
+) -> Result<T, Error> {
     let mut retry_count: usize = 0;
     loop {
         retry_count += 1;
-        let transaction_result = connection
-            .build_transaction()
-            .read_committed()
-            .run::<_, TransactionRuntimeError, _>(&function);
+        let transaction_result =
+            transaction_builder.run::<_, TransactionRuntimeError, _>(&function);
 
         match transaction_result {
             Err(TransactionRuntimeError::Retry(_)) if retry_count <= 10 => { /* retry max 10 attempts */
@@ -129,6 +148,16 @@ pub fn retry_on_constraint_violation(e: diesel::result::Error) -> TransactionRun
         diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::UniqueViolation
             | diesel::result::DatabaseErrorKind::ForeignKeyViolation,
+            _,
+        ) => TransactionRuntimeError::Retry(e.into()),
+        _ => TransactionRuntimeError::Rollback(e.into()),
+    }
+}
+
+pub fn retry_on_serialization_failure(e: diesel::result::Error) -> TransactionRuntimeError {
+    match e {
+        diesel::result::Error::DatabaseError(
+            diesel::result::DatabaseErrorKind::SerializationFailure,
             _,
         ) => TransactionRuntimeError::Retry(e.into()),
         _ => TransactionRuntimeError::Rollback(e.into()),
