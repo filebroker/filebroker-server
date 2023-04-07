@@ -312,7 +312,9 @@ pub async fn generate_hls_playlist(
     )
     .await;
     match process_output {
-        Ok(process_output) if !process_output.status.success() => {
+        Ok(process_output)
+            if !process_output.status.success() || !process_output.stderr.is_empty() =>
+        {
             master_playlist_join_handle.abort();
             for handle in output_reader_join_handles {
                 handle.abort();
@@ -393,7 +395,9 @@ async fn get_video_resolution(presigned_get_object: &str) -> Result<String, Erro
     )
     .await;
     match process_output {
-        Ok(process_output) if !process_output.status.success() => {
+        Ok(process_output)
+            if !process_output.status.success() || !process_output.stderr.is_empty() =>
+        {
             let error_msg = String::from_utf8_lossy(&process_output.stderr);
             Err(Error::FfmpegProcessError(format!(
                 "ffprobe failed with status {}: {}",
@@ -441,7 +445,9 @@ async fn video_has_stream(stream: &str, presigned_get_object: &str) -> Result<bo
     )
     .await;
     match process_output {
-        Ok(process_output) if !process_output.status.success() => {
+        Ok(process_output)
+            if !process_output.status.success() || !process_output.stderr.is_empty() =>
+        {
             let error_msg = String::from_utf8_lossy(&process_output.stderr);
             Err(Error::FfmpegProcessError(format!(
                 "ffprobe failed with status {}: {}",
@@ -593,7 +599,9 @@ pub async fn generate_thumbnail(
             .map_err(|e| Error::FfmpegProcessError(e.to_string()))
             .await;
         match process_output {
-            Ok(process_output) if !process_output.status.success() => {
+            Ok(process_output)
+                if !process_output.status.success() || !process_output.stderr.is_empty() =>
+            {
                 let error_msg = String::from_utf8_lossy(&process_output.stderr);
                 return Err(Error::FfmpegProcessError(format!(
                     "ffmpeg for thumbnail of {} failed with status {}: {}",
