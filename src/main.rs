@@ -16,6 +16,7 @@ use lazy_static::lazy_static;
 use mime::Mime;
 use query::QueryParametersFilter;
 use std::{str::FromStr, thread::JoinHandle};
+use url::Url;
 use warp::Filter;
 
 use crate::util::OptFmt;
@@ -61,6 +62,13 @@ lazy_static! {
     };
     pub static ref CERT_PATH: Option<String> = std::env::var("CERT_PATH").ok();
     pub static ref KEY_PATH: Option<String> = std::env::var("KEY_PATH").ok();
+    pub static ref API_BASE_URL: Url = std::env::var("API_BASE_URL")
+        .map(|url| Url::parse(&url).expect("API_BASE_URL is not valid"))
+        .unwrap_or_else(|_| {
+            let protocol = if CERT_PATH.is_some() { "https" } else { "http" };
+
+            Url::parse(&format!("{protocol}://localhost:{}/", *PORT)).unwrap()
+        });
 }
 
 #[cfg(feature = "auto_migration")]
@@ -73,6 +81,7 @@ fn main() {
     lazy_static::initialize(&CONNECTION_POOL);
     lazy_static::initialize(&JWT_SECRET);
     lazy_static::initialize(&PORT);
+    lazy_static::initialize(&API_BASE_URL);
 
     setup_logger();
 

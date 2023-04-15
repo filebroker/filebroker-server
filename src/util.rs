@@ -1,5 +1,9 @@
 use std::{fmt, time::Duration};
 
+use url::Url;
+
+use crate::{error::Error, API_BASE_URL};
+
 #[derive(Debug, Clone)]
 pub struct FormattedDuration(Duration);
 
@@ -97,4 +101,23 @@ impl<T: fmt::Display> fmt::Display for OptFmt<T> {
             f.write_str("-")
         }
     }
+}
+
+pub fn join_api_url<'a>(segments: impl IntoIterator<Item = &'a str>) -> Result<Url, Error> {
+    let mut url = API_BASE_URL.clone();
+    join_url(&mut url, segments)?;
+    Ok(url)
+}
+
+pub fn join_url<'a>(
+    url: &mut Url,
+    segments: impl IntoIterator<Item = &'a str>,
+) -> Result<(), Error> {
+    let mut path_segments = url
+        .path_segments_mut()
+        .map_err(|_| Error::InvalidUrlError(String::from("URL cannot be a base")))?;
+    for segment in segments {
+        path_segments.push(segment);
+    }
+    Ok(())
 }

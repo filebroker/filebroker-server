@@ -17,7 +17,7 @@ use crate::{
     error::Error,
     model::{Broker, HlsStream, S3Object, User},
     schema::{hls_stream, s3_object},
-    util::format_duration,
+    util::{format_duration, join_api_url},
 };
 
 const CONCURRENT_VIDEO_TRANSCODE_LIMIT: usize = 4;
@@ -104,10 +104,10 @@ pub async fn generate_hls_playlist(
         .map_err(|_| Error::CancellationError)?;
     log::info!("Starting HLS transcode for {}", &source_object_key);
     let start_time = std::time::Instant::now();
-    let presigned_get_object = bucket.presign_get(&source_object_key, 3600, None)?;
+    let object_url = join_api_url(["get-object", &source_object_key])?.to_string();
 
-    let resolution_string = get_video_resolution(&presigned_get_object).await?;
-    let has_audio = video_has_audio(&presigned_get_object).await?;
+    let resolution_string = get_video_resolution(&object_url).await?;
+    let has_audio = video_has_audio(&object_url).await?;
 
     let resolution = resolution_string.trim().parse::<usize>().map_err(|_| {
         Error::FfmpegProcessError(format!(
@@ -159,7 +159,7 @@ pub async fn generate_hls_playlist(
 
     let mut transcode_args = vec![
         String::from("-i"),
-        presigned_get_object,
+        object_url,
         String::from("-v"),
         String::from("error"),
         String::from("-filter_complex"),
@@ -370,7 +370,7 @@ pub async fn generate_hls_playlist(
     Ok(())
 }
 
-async fn get_video_resolution(presigned_get_object: &str) -> Result<String, Error> {
+async fn get_video_resolution(object_url: &str) -> Result<String, Error> {
     let resolution_probe_process = async_process::Command::new("ffprobe")
         .args([
             "-select_streams",
@@ -381,7 +381,7 @@ async fn get_video_resolution(presigned_get_object: &str) -> Result<String, Erro
             "csv=s=x:p=0",
             "-v",
             "error",
-            presigned_get_object,
+            object_url,
         ])
         .stdout(async_process::Stdio::piped())
         .stderr(async_process::Stdio::piped())
@@ -411,18 +411,18 @@ async fn get_video_resolution(presigned_get_object: &str) -> Result<String, Erro
     }
 }
 
-async fn video_has_audio(presigned_get_object: &str) -> Result<bool, Error> {
-    video_has_stream("a", presigned_get_object).await
+async fn video_has_audio(object_url: &str) -> Result<bool, Error> {
+    video_has_stream("a", object_url).await
 }
 
 /*
 Generating HLS playlists with subtitles is broken: https://trac.ffmpeg.org/ticket/9719#no1
-async fn video_has_subtitles(presigned_get_object: &str) -> Result<bool, Error> {
-    video_has_stream("s", presigned_get_object).await
+async fn video_has_subtitles(object_url: &str) -> Result<bool, Error> {
+    video_has_stream("s", object_url).await
 }
 */
 
-async fn video_has_stream(stream: &str, presigned_get_object: &str) -> Result<bool, Error> {
+async fn video_has_stream(stream: &str, object_url: &str) -> Result<bool, Error> {
     let audio_probe_process = async_process::Command::new("ffprobe")
         .args([
             "-show_streams",
@@ -431,7 +431,7 @@ async fn video_has_stream(stream: &str, presigned_get_object: &str) -> Result<bo
             "-v",
             "error",
             "-i",
-            presigned_get_object,
+            object_url,
         ])
         .stdout(async_process::Stdio::piped())
         .stderr(async_process::Stdio::piped())
@@ -503,7 +503,7 @@ pub async fn generate_thumbnail(
     broker: Broker,
     user: User,
 ) -> Result<(), Error> {
-    let presigned_get_object = bucket.presign_get(&source_object_key, 1800, None)?;
+    let object_url = join_api_url(["get-object", &source_object_key])?.to_string();
 
     let content_type_is_video = content_type_is_video(&content_type);
     let content_type_is_image = content_type_is_image(&content_type);
@@ -516,7 +516,7 @@ pub async fn generate_thumbnail(
             thumbnail_content_type = String::from("image/webp");
             vec![
                 String::from("-i"),
-                presigned_get_object,
+                object_url,
                 String::from("-vf"),
                 String::from(r"thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)"),
                 String::from("-vframes"),
@@ -538,7 +538,7 @@ pub async fn generate_thumbnail(
             thumbnail_content_type = String::from("image/webp");
             vec![
                 String::from("-i"),
-                presigned_get_object,
+                object_url,
                 String::from("-vf"),
                 String::from(r"thumbnail,scale=iw*min(640/iw\,360/ih):ih*min(640/iw\,360/ih)"),
                 String::from("-pix_fmt"),
