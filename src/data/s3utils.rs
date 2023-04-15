@@ -333,7 +333,7 @@ pub async fn get_command_stream(
             Ok(Ok(_)) => {}
         }
         #[cfg(debug_assertions)]
-        log::debug!(
+        log::trace!(
             "Sent {} bytes to S3 response in {}",
             byte_len,
             format_duration(now.elapsed())

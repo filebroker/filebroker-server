@@ -415,8 +415,9 @@ fn setup_logger() {
                 message
             ))
         })
-        .level(logging_level)
-        .level_for("filebroker::api", logging_level)
+        .level(log::LevelFilter::Info)
+        .level_for("filebroker", logging_level)
+        .level_for("filebroker_server", logging_level)
         .chain(std::io::stdout())
         .chain(fern::DateBased::new("logs/", "logs_%Y-%m-%d.log"))
         .apply()
