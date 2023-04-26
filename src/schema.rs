@@ -143,6 +143,7 @@ diesel::table! {
         thumbnail_locked_at -> Nullable<Timestamptz>,
         hls_fail_count -> Nullable<Int4>,
         thumbnail_fail_count -> Nullable<Int4>,
+        thumbnail_disabled -> Bool,
     }
 }
 

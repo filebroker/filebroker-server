@@ -101,46 +101,13 @@ where
     let broker_hls_enabled = broker.hls_enabled;
     let hls_transcoding_disabled = disable_hls_transcoding.unwrap_or(false);
 
-    let path = object_key.clone();
-    let mime_type = content_type.clone();
-    let bucket_owned = bucket.clone();
-    let broker_owned = broker.clone();
-    let user_owned = user.clone();
-    tokio::spawn(async move {
-        if let Err(e) = generate_thumbnail(
-            bucket_owned,
-            path,
-            uuid,
-            content_type,
-            broker_owned,
-            user_owned,
-        )
-        .await
-        {
-            log::error!("Failed to generate thumbnail: {}", e);
-        }
-    });
-
-    let path = object_key.clone();
-    let bucket_owned = bucket.clone();
-    let broker_owned = broker.clone();
-    let user_owned = user.clone();
-    if is_video && broker_hls_enabled && !hls_transcoding_disabled {
-        tokio::spawn(async move {
-            if let Err(e) =
-                generate_hls_playlist(bucket_owned, path, uuid, broker_owned, user_owned).await
-            {
-                log::error!("Error occurred transcoding video to HLS: {}", e);
-            }
-        });
-    }
-
     let source_filename = if filename.len() > 255 {
         None
     } else {
         Some(filename)
     };
 
+    let mime_type = content_type.clone();
     let s3_object = diesel::insert_into(s3_object::table)
         .values(&S3Object {
             object_key,
@@ -154,13 +121,49 @@ where
             filename: source_filename,
             hls_master_playlist: None,
             hls_disabled: hls_transcoding_disabled,
-            hls_locked_at: Some(Utc::now()),
-            thumbnail_locked_at: Some(Utc::now()),
+            hls_locked_at: None,
+            thumbnail_locked_at: None,
             hls_fail_count: None,
             thumbnail_fail_count: None,
+            thumbnail_disabled: false,
         })
         .get_result::<S3Object>(&mut connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;
+
+    let path = s3_object.object_key.clone();
+    let bucket_owned = bucket.clone();
+    let broker_owned = broker.clone();
+    let user_owned = user.clone();
+    tokio::spawn(async move {
+        if let Err(e) = generate_thumbnail(
+            bucket_owned,
+            path,
+            uuid,
+            content_type,
+            broker_owned,
+            user_owned,
+            false,
+        )
+        .await
+        {
+            log::error!("Failed to generate thumbnail: {}", e);
+        }
+    });
+
+    let path = s3_object.object_key.clone();
+    let bucket_owned = bucket.clone();
+    let broker_owned = broker.clone();
+    let user_owned = user.clone();
+    if is_video && broker_hls_enabled && !hls_transcoding_disabled {
+        tokio::spawn(async move {
+            if let Err(e) =
+                generate_hls_playlist(bucket_owned, path, uuid, broker_owned, user_owned, false)
+                    .await
+            {
+                log::error!("Error occurred transcoding video to HLS: {}", e);
+            }
+        });
+    }
 
     Ok((s3_object, false))
 }

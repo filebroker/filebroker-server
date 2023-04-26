@@ -1,13 +1,14 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use diesel::{
     query_dsl::methods::FilterDsl,
     sql_types::{Array, VarChar},
     RunQueryDsl,
 };
+use parking_lot::Mutex;
 use rusty_pool::ThreadPool;
 use s3::Bucket;
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, task::JoinHandle};
 
 use lazy_static::lazy_static;
 use uuid::Uuid;
@@ -119,13 +120,14 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
     })?;
     drop(connection);
 
-    let _sentinel = LockedObjectTaskSentinel {
-        lock_column: "hls_locked_at",
-        object_keys: relevant_objects
+    let _sentinel = LockedObjectsTaskSentinel::new(
+        "hls_locked_at",
+        relevant_objects
             .iter()
             .map(|o| o.object_key.clone())
             .collect::<Vec<_>>(),
-    };
+        &tokio_handle,
+    );
 
     log::info!(
         "Found {} objects with missing HLS playlists",
@@ -174,6 +176,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
             file_id,
             broker,
             user,
+            true,
         )) {
             log::error!(
                 "Failed HLS transcoding of object {}: {}",
@@ -209,7 +212,8 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
         diesel::sql_query("
         WITH relevant_s3objects AS(
             SELECT * FROM s3_object AS obj
-            WHERE thumbnail_object_key IS NULL
+            WHERE NOT thumbnail_disabled
+            AND thumbnail_object_key IS NULL
             AND (LOWER(mime_type) LIKE 'video/%' OR LOWER(mime_type) LIKE 'image/%')
             AND thumbnail_locked_at IS NULL
             AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
@@ -225,13 +229,14 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
     })?;
     drop(connection);
 
-    let _sentinel = LockedObjectTaskSentinel {
-        lock_column: "thumbnail_locked_at",
-        object_keys: relevant_objects
+    let _sentinel = LockedObjectsTaskSentinel::new(
+        "thumbnail_locked_at",
+        relevant_objects
             .iter()
             .map(|o| o.object_key.clone())
             .collect::<Vec<_>>(),
-    };
+        &tokio_handle,
+    );
 
     log::info!(
         "Found {} objects with missing thumbnails",
@@ -281,6 +286,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
             object.mime_type,
             broker,
             user,
+            true,
         )) {
             log::error!(
                 "Failed generating thumbnail for object {}: {}",
@@ -332,23 +338,68 @@ fn load_object_relations(
 pub fn clear_old_object_locks(_tokio_handle: Handle) -> Result<(), Error> {
     let mut connection = acquire_db_connection()?;
 
-    diesel::sql_query(
-        "UPDATE s3_object SET hls_locked_at = NULL WHERE hls_locked_at < NOW() - interval '1 day'",
-    )
-    .execute(&mut connection)?;
+    run_serializable_transaction(&mut connection, |connection| {
+        diesel::sql_query("UPDATE s3_object SET hls_locked_at = NULL WHERE hls_locked_at < NOW() - interval '1 day'")
+            .execute(connection)
+            .map_err(retry_on_serialization_failure)?;
 
-    diesel::sql_query("UPDATE s3_object SET thumbnail_locked_at = NULL WHERE thumbnail_locked_at < NOW() - interval '1 day'").execute(&mut connection)?;
+        diesel::sql_query("UPDATE s3_object SET thumbnail_locked_at = NULL WHERE thumbnail_locked_at < NOW() - interval '1 day'")
+            .execute(connection)
+            .map_err(retry_on_serialization_failure)?;
+
+        Ok(())
+    })?;
 
     Ok(())
 }
 
-struct LockedObjectTaskSentinel {
+struct LockedObjectsTaskSentinel {
     lock_column: &'static str,
     object_keys: Vec<String>,
+    refresh_task_join_handle: JoinHandle<()>,
+    update_mutex: Arc<Mutex<()>>,
 }
 
-impl Drop for LockedObjectTaskSentinel {
+impl LockedObjectsTaskSentinel {
+    fn new(lock_column: &'static str, object_keys: Vec<String>, tokio_handle: &Handle) -> Self {
+        let keys_to_refresh = object_keys.clone();
+        let update_mutex = Arc::new(Mutex::new(()));
+        let background_mutex = update_mutex.clone();
+        let refresh_task_join_handle = tokio_handle.spawn(async move {
+            // refresh lock every 15 minutes
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60 * 15)).await;
+                let _mutex_guard = background_mutex.lock();
+                match acquire_db_connection() {
+                    Ok(mut connection) => {
+                        if let Err(e) = diesel::sql_query(format!(
+                            "UPDATE s3_object SET {} = NOW() WHERE object_key = ANY($1)",
+                            lock_column
+                        ))
+                        .bind::<Array<VarChar>, _>(&keys_to_refresh)
+                        .execute(&mut connection)
+                        {
+                            log::error!("Failed to refresh {lock_column} for objects: {e}");
+                        }
+                    }
+                    Err(e) => log::error!("Failed to refresh {lock_column} for objects: {e}"),
+                }
+            }
+        });
+
+        Self {
+            lock_column,
+            object_keys,
+            refresh_task_join_handle,
+            update_mutex,
+        }
+    }
+}
+
+impl Drop for LockedObjectsTaskSentinel {
     fn drop(&mut self) {
+        self.refresh_task_join_handle.abort();
+        let _update_mutex = self.update_mutex.lock();
         let mut connection = match acquire_db_connection() {
             Ok(connection) => connection,
             Err(e) => {

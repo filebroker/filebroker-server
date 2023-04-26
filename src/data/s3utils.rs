@@ -322,7 +322,7 @@ pub async fn get_command_stream(
         let byte_len = bytes.len();
         #[cfg(debug_assertions)]
         let now = std::time::Instant::now();
-        let res = timeout(Duration::from_secs(300), sender.send_data(bytes)).await;
+        let res = timeout(Duration::from_secs(30), sender.send_data(bytes)).await;
         match res {
             Ok(Err(e)) => return Err(S3CommandError::SendError(e)),
             Err(_) => {

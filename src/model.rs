@@ -262,6 +262,7 @@ pub struct S3Object {
     pub thumbnail_locked_at: Option<DateTime<Utc>>,
     pub hls_fail_count: Option<i32>,
     pub thumbnail_fail_count: Option<i32>,
+    pub thumbnail_disabled: bool,
 }
 
 #[derive(Associations, Debug, Clone, Identifiable, Insertable, Queryable, Serialize)]
