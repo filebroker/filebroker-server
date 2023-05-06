@@ -69,6 +69,12 @@ lazy_static! {
 
             Url::parse(&format!("{protocol}://localhost:{}/", *PORT)).unwrap()
         });
+    pub static ref CONCURRENT_VIDEO_TRANSCODE_LIMIT: Option<usize> =
+        std::env::var("CONCURRENT_VIDEO_TRANSCODE_LIMIT")
+            .map(|v| v
+                .parse::<usize>()
+                .expect("CONCURRENT_VIDEO_TRANSCODE_LIMIT is not a valid usize"))
+            .ok();
 }
 
 #[cfg(feature = "auto_migration")]
@@ -82,6 +88,7 @@ fn main() {
     lazy_static::initialize(&JWT_SECRET);
     lazy_static::initialize(&PORT);
     lazy_static::initialize(&API_BASE_URL);
+    lazy_static::initialize(&CONCURRENT_VIDEO_TRANSCODE_LIMIT);
 
     setup_logger();
 

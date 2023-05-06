@@ -1,4 +1,7 @@
-use std::{cmp::Reverse, sync::Arc};
+use std::{
+    cmp::{max, min, Reverse},
+    sync::Arc,
+};
 
 use async_process::Output;
 use chrono::Utc;
@@ -22,11 +25,9 @@ use crate::{
     retry_on_serialization_failure, run_retryable_transaction,
     schema::{hls_stream, s3_object},
     util::{format_duration, join_api_url},
+    CONCURRENT_VIDEO_TRANSCODE_LIMIT,
 };
 
-const CONCURRENT_VIDEO_TRANSCODE_LIMIT: usize = 4;
-static VIDEO_TRANSCODE_SEMAPHORE: Semaphore =
-    Semaphore::const_new(CONCURRENT_VIDEO_TRANSCODE_LIMIT);
 static VIDEO_TRANSCODE_RESOLUTIONS: [TranscodeResolution; 5] = [
     TranscodeResolution {
         resolution: 2160,
@@ -78,6 +79,17 @@ lazy_static! {
     pub static ref ENCODE_POOL: ThreadPool = rusty_pool::Builder::new()
         .name(String::from("encode_pool"))
         .build();
+    pub static ref VIDEO_TRANSCODE_SEMAPHORE: Semaphore = {
+        let limit = match *CONCURRENT_VIDEO_TRANSCODE_LIMIT {
+            Some(limit) => limit,
+            None => {
+                let num_cpus = num_cpus::get();
+                max(1, min(8, num_cpus / 2))
+            }
+        };
+        log::info!("CONCURRENT_VIDEO_TRANSCODE_LIMIT set to {limit}");
+        Semaphore::new(limit)
+    };
 }
 
 async fn spawn_blocking<R: Send + 'static>(
