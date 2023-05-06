@@ -15,7 +15,10 @@ use uuid::Uuid;
 
 use crate::{
     acquire_db_connection,
-    data::{create_bucket, encode},
+    data::{
+        create_bucket,
+        encode::{self, SUBMITTED_HLS_TRANSCODINGS, VIDEO_TRANSCODE_SEMAPHORE},
+    },
     diesel::ExpressionMethods,
     error::Error,
     model::{Broker, S3Object, User},
@@ -96,13 +99,19 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         log::warn!("Skipping generate_missing_hls_streams because it is unsupported on the current platform");
         return Ok(());
     }
+    log::debug!("Waiting to acquire permit to start HLS transcoding");
+    let _semaphore = tokio_handle
+        .block_on(VIDEO_TRANSCODE_SEMAPHORE.acquire())
+        .map_err(|_| Error::CancellationError)?;
     let mut connection = acquire_db_connection()?;
 
     let relevant_objects = run_serializable_transaction(&mut connection, |connection| {
+        let submitted_hls_transcodings = SUBMITTED_HLS_TRANSCODINGS.lock();
         diesel::sql_query("
         WITH relevant_s3objects AS(
             SELECT * FROM s3_object AS obj
             WHERE NOT hls_disabled
+            AND NOT(obj.object_key = ANY($1))
             AND hls_master_playlist IS NULL
             AND LOWER(mime_type) LIKE 'video/%'
             AND hls_locked_at IS NULL
@@ -115,6 +124,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         )
         UPDATE s3_object SET hls_locked_at = NOW() WHERE hls_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
     ")
+    .bind::<Array<VarChar>, _>(submitted_hls_transcodings.iter().collect::<Vec<_>>())
     .load::<S3Object>(connection)
     .map_err(retry_on_serialization_failure)
     })?;

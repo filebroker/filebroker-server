@@ -1,5 +1,6 @@
 use std::{
     cmp::{max, min, Reverse},
+    collections::HashSet,
     sync::Arc,
 };
 
@@ -90,6 +91,7 @@ lazy_static! {
         log::info!("CONCURRENT_VIDEO_TRANSCODE_LIMIT set to {limit}");
         Semaphore::new(limit)
     };
+    pub static ref SUBMITTED_HLS_TRANSCODINGS: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
 }
 
 async fn spawn_blocking<R: Send + 'static>(
@@ -103,6 +105,10 @@ async fn spawn_blocking<R: Send + 'static>(
     }
 }
 
+/// Generate an HLS playlist for the given object. Videos are transcoded to h264 and split into up to 3 streams, the source resolution and
+/// the two nearest lower resolutions.
+///
+/// `hls_lock_acquired` should only be `true` if the caller manages the `VIDEO_TRANSCODE_SEMAPHORE` and `hls_locked_at` timestamps
 pub async fn generate_hls_playlist(
     bucket: Bucket,
     source_object_key: String,
@@ -111,24 +117,27 @@ pub async fn generate_hls_playlist(
     user: User,
     hls_lock_acquired: bool,
 ) -> Result<(), Error> {
-    log::debug!(
-        "Waiting to acquire permit to start HLS transcode for {}",
-        &source_object_key
-    );
-    let _semaphore = VIDEO_TRANSCODE_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|_| Error::CancellationError)?;
+    let _submitted_hls_transcoding_sentinel =
+        SubmittedHlsTranscodingSentinel::new(&source_object_key);
 
-    let _locked_object_task_sentinel = if hls_lock_acquired {
-        None
+    let (_locked_object_task_sentinel, _semaphore) = if hls_lock_acquired {
+        (None, None)
     } else {
+        log::debug!(
+            "Waiting to acquire permit to start HLS transcode for {}",
+            &source_object_key
+        );
+        let semaphore = VIDEO_TRANSCODE_SEMAPHORE
+            .acquire()
+            .await
+            .map_err(|_| Error::CancellationError)?;
+
         match LockedObjectTaskSentinel::new(
             "hls_locked_at",
             source_object_key.clone(),
             |s3_object| &s3_object.hls_master_playlist,
         )? {
-            Some(sentinel) => Some(sentinel),
+            Some(sentinel) => (Some(sentinel), Some(semaphore)),
             None => {
                 log::info!(
                     "Aborting HLS transcode for object {} because it has already been locked",
@@ -1199,5 +1208,24 @@ impl Drop for LockedObjectTaskSentinel {
         if let Err(e) = res {
             log::error!("Could not unlock object {}: {e}", &self.object_key);
         }
+    }
+}
+
+struct SubmittedHlsTranscodingSentinel<'a> {
+    object_key: &'a str,
+}
+
+impl<'a> SubmittedHlsTranscodingSentinel<'a> {
+    fn new(object_key: &'a str) -> Self {
+        let mut submitted_hls_transcodings = SUBMITTED_HLS_TRANSCODINGS.lock();
+        submitted_hls_transcodings.insert(String::from(object_key));
+        SubmittedHlsTranscodingSentinel { object_key }
+    }
+}
+
+impl Drop for SubmittedHlsTranscodingSentinel<'_> {
+    fn drop(&mut self) {
+        let mut submitted_hls_transcodings = SUBMITTED_HLS_TRANSCODINGS.lock();
+        submitted_hls_transcodings.remove(self.object_key);
     }
 }
