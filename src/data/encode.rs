@@ -152,8 +152,15 @@ pub async fn generate_hls_playlist(
     let start_time = std::time::Instant::now();
     let object_url = join_api_url(["get-object", &source_object_key])?.to_string();
 
-    let resolution = get_video_resolution(&source_object_key, &object_url).await?;
+    let resolution_string = get_video_resolution(&object_url).await?;
     let has_audio = video_has_audio(&object_url).await?;
+
+    let resolution = resolution_string.trim().parse::<usize>().map_err(|_| {
+        Error::FfmpegProcessError(format!(
+            "Invalid resolution from ffprobe for '{}': {}",
+            &source_object_key, &resolution_string
+        ))
+    })?;
 
     let mut video_transcode_resolutions = VIDEO_TRANSCODE_RESOLUTIONS;
     video_transcode_resolutions.sort_by_key(|t| Reverse(t.resolution));
@@ -406,7 +413,7 @@ pub async fn generate_hls_playlist(
     Ok(())
 }
 
-async fn get_video_resolution(source_object_key: &str, object_url: &str) -> Result<usize, Error> {
+async fn get_video_resolution(object_url: &str) -> Result<String, Error> {
     let resolution_probe_process = async_process::Command::new("ffprobe")
         .args([
             "-select_streams",
@@ -431,28 +438,18 @@ async fn get_video_resolution(source_object_key: &str, object_url: &str) -> Resu
     )
     .await;
     match process_output {
-        Ok(process_output) => {
-            let resolution_string = String::from_utf8_lossy(&process_output.stdout)
-                .trim()
-                .to_string();
-            if !process_output.status.success() || !process_output.stderr.is_empty() {
-                let error_msg = String::from_utf8_lossy(&process_output.stderr);
-                if process_output.status.success() {
-                    log::warn!("ffprobe reported error while getting resolution for {source_object_key}, going to check output validity: {error_msg}");
-                } else {
-                    return Err(Error::FfmpegProcessError(format!(
-                        "ffprobe failed with status {}: {}",
-                        process_output.status, error_msg
-                    )));
-                }
-            }
-
-            resolution_string.trim().parse::<usize>().map_err(|_| {
-                Error::FfmpegProcessError(format!(
-                    "Invalid resolution from ffprobe for '{source_object_key}': {resolution_string}"
-                ))
-            })
+        Ok(process_output)
+            if !process_output.status.success() || !process_output.stderr.is_empty() =>
+        {
+            let error_msg = String::from_utf8_lossy(&process_output.stderr);
+            Err(Error::FfmpegProcessError(format!(
+                "ffprobe failed with status {}: {}",
+                process_output.status, error_msg
+            )))
         }
+        Ok(process_output) => Ok(String::from_utf8_lossy(&process_output.stdout)
+            .trim()
+            .to_string()),
         Err(e) => Err(e),
     }
 }
@@ -491,22 +488,16 @@ async fn video_has_stream(stream: &str, object_url: &str) -> Result<bool, Error>
     )
     .await;
     match process_output {
-        Ok(process_output) => {
+        Ok(process_output)
+            if !process_output.status.success() || !process_output.stderr.is_empty() =>
+        {
             let error_msg = String::from_utf8_lossy(&process_output.stderr);
-            if process_output.status.success() {
-                // if the exit code is successful then the selected streams should have been written to stdout
-                // it should be fine to ignore reported errors if the process exits successfully in this case
-                // (unlike ffmpeg video transcoding where the process exits successfully if the transcoding fails
-                // halfway through) but log the error as a warning just in case
-                log::warn!("ffprobe reported error selecting streams for {object_url} but the process finished successfully, proceeding: {error_msg}");
-            } else {
-                return Err(Error::FfmpegProcessError(format!(
-                    "ffprobe failed with status {}: {}",
-                    process_output.status, error_msg
-                )));
-            }
-            Ok(!process_output.stdout.is_empty())
+            Err(Error::FfmpegProcessError(format!(
+                "ffprobe failed with status {}: {}",
+                process_output.status, error_msg
+            )))
         }
+        Ok(process_output) => Ok(!process_output.stdout.is_empty()),
         Err(e) => Err(e),
     }
 }
@@ -636,19 +627,10 @@ pub async fn generate_thumbnail(
                 if !process_output.status.success() || !process_output.stderr.is_empty() =>
             {
                 let error_msg = String::from_utf8_lossy(&process_output.stderr);
-                if process_output.status.success() {
-                    log::warn!("ffmpeg reported error generating thumnail for {source_object_key}, going to check output for valid webp: {error_msg}");
-                    if webp::Decoder::new(&thumb_bytes).decode().is_none() {
-                        return Err(Error::FfmpegProcessError(format!(
-                            "ffmpeg output contains invalid webp data for thumbnail of {source_object_key}"
-                        )));
-                    }
-                } else {
-                    return Err(Error::FfmpegProcessError(format!(
-                        "ffmpeg for thumbnail of {} failed with status {}: {}",
-                        &source_object_key, process_output.status, error_msg
-                    )));
-                }
+                return Err(Error::FfmpegProcessError(format!(
+                    "ffmpeg for thumbnail of {} failed with status {}: {}",
+                    &source_object_key, process_output.status, error_msg
+                )));
             }
             Err(e) => {
                 return Err(e);
