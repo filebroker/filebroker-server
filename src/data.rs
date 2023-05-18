@@ -190,7 +190,7 @@ pub async fn get_object_handler(
     let mut response_builder = Response::builder()
         .header("Content-Type", &content_type)
         .header("Accept-Ranges", "bytes")
-        .header("Cache-Control", "max-age=604800, immutable")
+        .header("Cache-Control", "max-age=31536000, immutable")
         .header("Content-Length", content_length);
 
     if let Some(ref content_range) = content_range {
@@ -247,7 +247,7 @@ pub async fn get_object_head_handler(
     let mut response_builder = Response::builder()
         .header("Content-Type", &content_type)
         .header("Accept-Ranges", "bytes")
-        .header("Cache-Control", "max-age=604800, immutable")
+        .header("Cache-Control", "max-age=31536000, immutable")
         .header("Content-Length", content_length);
 
     if let Some(ref content_range) = content_range {
