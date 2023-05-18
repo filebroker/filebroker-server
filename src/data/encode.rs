@@ -1,13 +1,13 @@
 use std::{
     cmp::{max, min, Reverse},
     collections::HashSet,
+    process::{Command, Output, Stdio},
     sync::Arc,
 };
 
-use async_process::Output;
 use chrono::Utc;
 use diesel::{sql_types::VarChar, OptionalExtension};
-use futures::{future::try_join_all, io::BufReader, ready, AsyncReadExt, Future, TryFutureExt};
+use futures::{future::try_join_all, ready, Future, TryFutureExt};
 use itertools::Itertools;
 use parking_lot::Mutex;
 use pin_project_lite::pin_project;
@@ -95,9 +95,9 @@ lazy_static! {
 }
 
 async fn spawn_blocking<R: Send + 'static>(
-    future: impl Future<Output = Result<R, Error>> + 'static + Send,
+    task: impl FnOnce() -> Result<R, Error> + Send + 'static,
 ) -> Result<R, Error> {
-    let join_handle = ENCODE_POOL.complete(future);
+    let join_handle = ENCODE_POOL.evaluate(task);
 
     match join_handle.receiver.await {
         Ok(t) => t,
@@ -325,10 +325,10 @@ pub async fn generate_hls_playlist(
         "Spawning HLS transcode ffmpeg command with args {:?}",
         &transcode_args
     );
-    let process = match async_process::Command::new("ffmpeg")
+    let process = match Command::new("ffmpeg")
         .args(transcode_args)
-        .stdout(async_process::Stdio::piped())
-        .stderr(async_process::Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| Error::FfmpegProcessError(e.to_string()))
     {
@@ -342,11 +342,11 @@ pub async fn generate_hls_playlist(
         }
     };
 
-    let process_output = spawn_blocking(
+    let process_output = spawn_blocking(|| {
         process
-            .output()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string())),
-    )
+            .wait_with_output()
+            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+    })
     .await;
     let process_output = match process_output {
         Ok(process_output) if !process_output.status.success() => {
@@ -407,7 +407,7 @@ pub async fn generate_hls_playlist(
 }
 
 async fn get_video_resolution(source_object_key: &str, object_url: &str) -> Result<usize, Error> {
-    let resolution_probe_process = async_process::Command::new("ffprobe")
+    let resolution_probe_process = Command::new("ffprobe")
         .args([
             "-select_streams",
             "v:0",
@@ -419,16 +419,16 @@ async fn get_video_resolution(source_object_key: &str, object_url: &str) -> Resu
             "error",
             object_url,
         ])
-        .stdout(async_process::Stdio::piped())
-        .stderr(async_process::Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
 
-    let process_output = spawn_blocking(
+    let process_output = spawn_blocking(|| {
         resolution_probe_process
-            .output()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string())),
-    )
+            .wait_with_output()
+            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+    })
     .await;
     match process_output {
         Ok(process_output) => {
@@ -469,7 +469,7 @@ async fn video_has_subtitles(object_url: &str) -> Result<bool, Error> {
 */
 
 async fn video_has_stream(stream: &str, object_url: &str) -> Result<bool, Error> {
-    let audio_probe_process = async_process::Command::new("ffprobe")
+    let audio_probe_process = Command::new("ffprobe")
         .args([
             "-show_streams",
             "-select_streams",
@@ -479,16 +479,16 @@ async fn video_has_stream(stream: &str, object_url: &str) -> Result<bool, Error>
             "-i",
             object_url,
         ])
-        .stdout(async_process::Stdio::piped())
-        .stderr(async_process::Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
 
-    let process_output = spawn_blocking(
+    let process_output = spawn_blocking(|| {
         audio_probe_process
-            .output()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string())),
-    )
+            .wait_with_output()
+            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+    })
     .await;
     match process_output {
         Ok(process_output) => {
@@ -598,64 +598,36 @@ pub async fn generate_thumbnail(
             "Spawning ffmpeg process to generate thumbnail for {}",
             source_object_key
         );
-        let mut process = async_process::Command::new("ffmpeg")
+        let process = Command::new("ffmpeg")
             .args(args)
-            .stdout(async_process::Stdio::piped())
-            .stderr(async_process::Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
 
-        let mut stdout = BufReader::new(process.stdout.take().ok_or_else(|| {
-            Error::FfmpegProcessError(String::from("Could not get stdout of process"))
-        })?);
-
-        let thumb_bytes = spawn_blocking(async move {
-            let mut buf: [u8; 1 << 14] = [0; 1 << 14];
-            let mut thumb_bytes = Vec::new();
-            loop {
-                let n = stdout
-                    .read(&mut buf)
-                    .map_err(|e| Error::FfmpegProcessError(e.to_string()))
-                    .await?;
-                if n == 0 {
-                    break;
-                }
-
-                thumb_bytes.extend_from_slice(&buf[0..n]);
-                buf = [0; 1 << 14];
-            }
-
-            Ok(thumb_bytes)
+        let process_output = spawn_blocking(|| {
+            process
+                .wait_with_output()
+                .map_err(|e| Error::FfmpegProcessError(e.to_string()))
         })
         .await?;
 
-        let process_output = process
-            .output()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
-            .await;
-        match process_output {
-            Ok(process_output)
-                if !process_output.status.success() || !process_output.stderr.is_empty() =>
-            {
-                let error_msg = String::from_utf8_lossy(&process_output.stderr);
-                if process_output.status.success() {
-                    log::warn!("ffmpeg reported error generating thumnail for {source_object_key}, going to check output for valid webp: {error_msg}");
-                    if webp::Decoder::new(&thumb_bytes).decode().is_none() {
-                        return Err(Error::FfmpegProcessError(format!(
+        let thumb_bytes = process_output.stdout;
+        if !process_output.status.success() || !process_output.stderr.is_empty() {
+            let error_msg = String::from_utf8_lossy(&process_output.stderr);
+            if process_output.status.success() {
+                log::warn!("ffmpeg reported error generating thumnail for {source_object_key}, going to check output for valid webp: {error_msg}");
+                if webp::Decoder::new(&thumb_bytes).decode().is_none() {
+                    return Err(Error::FfmpegProcessError(format!(
                             "ffmpeg output contains invalid webp data for thumbnail of {source_object_key}"
                         )));
-                    }
-                } else {
-                    return Err(Error::FfmpegProcessError(format!(
-                        "ffmpeg for thumbnail of {} failed with status {}: {}",
-                        &source_object_key, process_output.status, error_msg
-                    )));
                 }
+            } else {
+                return Err(Error::FfmpegProcessError(format!(
+                    "ffmpeg for thumbnail of {} failed with status {}: {}",
+                    &source_object_key, process_output.status, error_msg
+                )));
             }
-            Err(e) => {
-                return Err(e);
-            }
-            _ => {}
         }
 
         if thumb_bytes.is_empty() {
@@ -938,22 +910,25 @@ struct ObjectDuration {
 }
 
 async fn get_object_duration(object_url: &str) -> Result<ObjectDuration, Error> {
-    let ffprobe_output = spawn_blocking(
-        async_process::Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                object_url,
-            ])
-            .stdout(async_process::Stdio::piped())
-            .stderr(async_process::Stdio::piped())
-            .output()
-            .map_err(|e| Error::FfmpegProcessError(format!("ffprobe failed: {}", e))),
-    )
+    let process = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            object_url,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+    let ffprobe_output = spawn_blocking(|| {
+        process
+            .wait_with_output()
+            .map_err(|e| Error::FfmpegProcessError(format!("ffprobe failed: {}", e)))
+    })
     .await?;
 
     if !ffprobe_output.status.success() {
