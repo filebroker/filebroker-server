@@ -5,12 +5,7 @@ use bytes::Bytes;
 use futures::{ready, stream::IntoAsyncRead, StreamExt, TryStream};
 use pin_project_lite::pin_project;
 use ring::digest;
-use s3::{
-    command::Command,
-    error::S3Error,
-    request::{tokio_backend::Reqwest, Request},
-    Bucket,
-};
+use s3::{command::Command, error::S3Error, request::Reqwest, request_trait::Request, Bucket};
 use tokio::time::timeout;
 use warp::hyper;
 
@@ -315,7 +310,7 @@ pub async fn get_command_stream(
 ) -> Result<u16, S3CommandError> {
     log::debug!("Executing S3 command streaming: {:?}", &command);
     let now = std::time::Instant::now();
-    let request = Reqwest::new(bucket, path, command).map_err(S3CommandError::S3Error)?;
+    let request = Reqwest::new(bucket, path, command);
     let response = request.response().await?;
     let latency = now.elapsed();
     let status = response.status();
