@@ -7,7 +7,7 @@ use std::{
 
 use chrono::Utc;
 use diesel::{sql_types::VarChar, OptionalExtension};
-use futures::{future::try_join_all, ready, Future, TryFutureExt};
+use futures::{future::try_join_all, ready};
 use itertools::Itertools;
 use parking_lot::Mutex;
 use pin_project_lite::pin_project;
@@ -1091,7 +1091,8 @@ fn upload_tokio_file(
     file_path: impl AsRef<std::path::Path>,
     s3_path: String,
     content_type: String,
-) -> impl Future<Output = Result<S3UploadResult, Error>> {
+) -> impl futures::Future<Output = Result<S3UploadResult, Error>> {
+    use futures::TryFutureExt;
     tokio::fs::File::open(file_path)
         .map_err(|e| Error::IoError(e.to_string()))
         .and_then(|f| async move {
