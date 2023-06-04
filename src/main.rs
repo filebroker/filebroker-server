@@ -351,7 +351,7 @@ async fn setup_tokio_runtime() {
             let log_level = if info.elapsed().as_secs() >= 10 && !info.path().starts_with("/upload")
             {
                 log::Level::Warn
-            } else if info.elapsed().as_millis() >= 250 {
+            } else if info.elapsed().as_millis() >= 250 || !info.status().is_success() {
                 log::Level::Info
             } else {
                 log::Level::Debug
