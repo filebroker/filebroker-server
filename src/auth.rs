@@ -420,7 +420,7 @@ pub async fn register_handler(
                 match existing_count {
                     Ok(count) => {
                         if count != 0 {
-                            return Err(Error::UserExistsError(user_registration.user_name));
+                            return Err(Error::UniqueValueError(user_registration.user_name));
                         }
                     }
                     Err(e) => return Err(Error::QueryError(e.to_string())),

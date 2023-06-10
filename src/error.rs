@@ -7,8 +7,49 @@ use crate::query::compiler;
 #[allow(clippy::enum_variant_names)]
 #[derive(Error, Debug, PartialEq)]
 pub enum Error {
+    // 400
+    #[error("The request is invalid: {0}")]
+    BadRequestError(String),
+    #[error("The given value is not unique: '{0}'")]
+    UniqueValueError(String),
+    #[error("Failed to decode request header as valid utf8")]
+    UtfEncodingError,
+    #[error("The auth header is not formatted correctly (expected JWT 'Bearer ' header)")]
+    InvalidAuthHeaderError,
+    #[error("The request input could not be validated: '{0}'")]
+    InvalidRequestInputError(String),
+    #[error("The provided query is invalid: {0}")]
+    IllegalQueryInputError(String),
+    #[error("The provided S3 bucket is invalid. Error '{0}'.")]
+    InvalidBucketError(String),
+    #[error("The file upload form is invalid. {0}.")]
+    InvalidFileError(String),
+    #[error("No entity found for key: {0}")]
+    InvalidEntityReferenceError(String),
+    #[error("Query could not be compiled due to error in phase '{0}'")]
+    QueryCompilationError(String, Vec<compiler::Error>),
+
+    // 401
     #[error("invalid credentials")]
     InvalidCredentialsError,
+    #[error("No auth header provided")]
+    MissingAuthHeaderError,
+    #[error("The JWT is not or no longer valid")]
+    InvalidJwtError,
+    #[error("The provided refresh token is invalid")]
+    InvalidRefreshTokenError,
+
+    // 403
+    #[error("Cannot access object with provided pk {0}")]
+    InaccessibleObjectError(i32),
+    #[error("Cannot access object with provided key {0}")]
+    InaccessibleS3ObjectError(String),
+
+    // 416
+    #[error("The provided byte range is invalid: {0}")]
+    IllegalRangeError(String),
+
+    // 500
     #[error("Could not establish database connection")]
     DatabaseConnectionError,
     #[error("There has been an error executing a query: '{0}'")]
@@ -19,50 +60,14 @@ pub enum Error {
     JwtCreationError,
     #[error("There has been an error encrypting / decrypting a password")]
     EncryptionError,
-    #[error("There already exists a principal with the given identifier: '{0}'")]
-    UserExistsError(String),
-    #[error("Failed to decode request header as valid utf8")]
-    UtfEncodingError,
-    #[error("The auth header is not formatted correctly (expected JWT 'Bearer ' header)")]
-    InvalidAuthHeaderError,
-    #[error("No auth header provided")]
-    MissingAuthHeaderError,
-    #[error("The request is invalid: {0}")]
-    BadRequestError(String),
-    #[error("The JWT is not or no longer valid")]
-    InvalidJwtError,
     #[error("Failed to serialise data")]
     SerialisationError,
-    #[error("The provided refresh token is invalid")]
-    InvalidRefreshTokenError,
-    #[error("The request input could not be validated: '{0}'")]
-    InvalidRequestInputError(String),
-    #[error("Query could not be compiled due to error in phase '{0}'")]
-    QueryCompilationError(String, Vec<compiler::Error>),
-    #[error("The provided query is invalid: {0}")]
-    IllegalQueryInputError(String),
-    #[error("Cannot access object with provided pk {0}")]
-    InaccessibleObjectError(i32),
-    #[error("Cannot access object with provided key {0}")]
-    InaccessibleS3ObjectError(String),
-    #[error("The provided S3 bucket is invalid. Error '{0}'.")]
-    InvalidBucketError(String),
-    #[error("The file upload form is invalid. {0}.")]
-    InvalidFileError(String),
     #[error("An error occurred connecting to S3: {0}")]
     S3Error(String),
-    #[error("Received error response code from S3: {0}")]
-    S3ResponseError(u16),
-    #[error("Received error response code from S3: {0}, Message: '{1}'")]
-    S3ResponseErrorMsg(u16, String),
-    #[error("The provided byte range is invalid: {0}")]
-    IllegalRangeError(String),
     #[error("Error occurred in hyper: {0}")]
     HyperError(String),
     #[error("Error in ffmpeg process: {0}")]
     FfmpegProcessError(String),
-    #[error("No entity found for key: {0}")]
-    InvalidEntityReferenceError(String),
     #[error("Internal error: {0}")]
     StdError(String),
     #[error("Submitted task was aborted")]
@@ -71,6 +76,94 @@ pub enum Error {
     IoError(String),
     #[error("Invalid URL: {0}")]
     InvalidUrlError(String),
+
+    #[error("Received error response code from S3: {0}")]
+    S3ResponseError(u16),
+    #[error("Received error response code from S3: {0}, Message: '{1}'")]
+    S3ResponseErrorMsg(u16, String),
+}
+
+impl Error {
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            Error::InaccessibleObjectError(_) | Error::InaccessibleS3ObjectError(_) => {
+                StatusCode::FORBIDDEN
+            }
+            Error::InvalidCredentialsError
+            | Error::MissingAuthHeaderError
+            | Error::InvalidJwtError
+            | Error::InvalidRefreshTokenError => StatusCode::UNAUTHORIZED,
+            Error::BadRequestError(_)
+            | Error::UniqueValueError(_)
+            | Error::UtfEncodingError
+            | Error::InvalidAuthHeaderError
+            | Error::InvalidRequestInputError(_)
+            | Error::IllegalQueryInputError(_)
+            | Error::InvalidBucketError(_)
+            | Error::InvalidFileError(_)
+            | Error::InvalidEntityReferenceError(_)
+            | Error::QueryCompilationError(..) => StatusCode::BAD_REQUEST,
+            Error::DatabaseConnectionError
+            | Error::QueryError(_)
+            | Error::TransactionError(_)
+            | Error::JwtCreationError
+            | Error::EncryptionError
+            | Error::SerialisationError
+            | Error::S3Error(_)
+            | Error::HyperError(_)
+            | Error::FfmpegProcessError(_)
+            | Error::StdError(_)
+            | Error::CancellationError
+            | Error::IoError(_)
+            | Error::InvalidUrlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::IllegalRangeError(_) => StatusCode::RANGE_NOT_SATISFIABLE,
+            Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => {
+                StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+            }
+        }
+    }
+
+    pub fn error_code(&self) -> u32 {
+        match self {
+            Self::BadRequestError(_) => 400_001,
+            Self::UniqueValueError(_) => 400_002,
+            Self::UtfEncodingError => 400_003,
+            Self::InvalidAuthHeaderError => 400_004,
+            Self::InvalidRequestInputError(_) => 400_005,
+            Self::IllegalQueryInputError(_) => 400_006,
+            Self::InvalidBucketError(_) => 400_007,
+            Self::InvalidFileError(_) => 400_008,
+            Self::InvalidEntityReferenceError(_) => 400_009,
+            Self::QueryCompilationError(..) => 400_010,
+
+            Self::InvalidCredentialsError => 401_001,
+            Self::MissingAuthHeaderError => 401_002,
+            Self::InvalidJwtError => 401_003,
+            Self::InvalidRefreshTokenError => 401_004,
+
+            Self::InaccessibleObjectError(_) => 403_001,
+            Self::InaccessibleS3ObjectError(_) => 403_002,
+
+            Self::IllegalRangeError(_) => 416_001,
+
+            Self::DatabaseConnectionError => 500_001,
+            Self::QueryError(_) => 500_002,
+            Self::TransactionError(_) => 500_003,
+            Self::JwtCreationError => 500_004,
+            Self::EncryptionError => 500_005,
+            Self::SerialisationError => 500_006,
+            Self::S3Error(_) => 500_007,
+            Self::HyperError(_) => 500_008,
+            Self::FfmpegProcessError(_) => 500_009,
+            Self::StdError(_) => 500_010,
+            Self::CancellationError => 500_011,
+            Self::IoError(_) => 500_012,
+            Self::InvalidUrlError(_) => 500_013,
+
+            Self::S3ResponseError(_) => 600_001,
+            Self::S3ResponseErrorMsg(..) => 600_002,
+        }
+    }
 }
 
 impl Reject for Error {}
@@ -129,72 +222,44 @@ impl From<diesel::result::Error> for TransactionRuntimeError {
 struct ErrorResponse {
     message: String,
     status: String,
+    error_code: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     compilation_errors: Option<Vec<compiler::Error>>,
 }
 
 /// Creates a Rejection response for the given error and logs internal server errors.
 pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
     if let Some(e) = err.find::<Error>() {
-        let (code, message, compilation_errors) = match e {
-            Error::InaccessibleObjectError(_) | Error::InaccessibleS3ObjectError(_) => {
-                (StatusCode::FORBIDDEN, e.to_string(), None)
-            }
-            Error::InvalidCredentialsError
-            | Error::MissingAuthHeaderError
-            | Error::InvalidJwtError
-            | Error::InvalidRefreshTokenError => (StatusCode::UNAUTHORIZED, e.to_string(), None),
-            Error::UserExistsError(_)
-            | Error::UtfEncodingError
-            | Error::InvalidAuthHeaderError
-            | Error::BadRequestError(_)
-            | Error::InvalidRequestInputError(_)
-            | Error::IllegalQueryInputError(_)
-            | Error::InvalidBucketError(_)
-            | Error::InvalidFileError(_)
-            | Error::InvalidEntityReferenceError(_) => {
-                (StatusCode::BAD_REQUEST, e.to_string(), None)
-            }
-            Error::DatabaseConnectionError
-            | Error::QueryError(_)
-            | Error::TransactionError(_)
-            | Error::JwtCreationError
-            | Error::EncryptionError
-            | Error::SerialisationError
-            | Error::S3Error(_)
-            | Error::HyperError(_)
-            | Error::FfmpegProcessError(_)
-            | Error::StdError(_)
-            | Error::CancellationError
-            | Error::IoError(_)
-            | Error::InvalidUrlError(_) => {
-                log::error!("Encountered internal server error: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None)
-            }
-            Error::IllegalRangeError(_) => (StatusCode::RANGE_NOT_SATISFIABLE, e.to_string(), None),
-            Error::QueryCompilationError(_, errors) => {
-                let errors = errors
+        let status_code = e.status_code();
+        let message = e.to_string();
+        let error_code = e.error_code();
+
+        if let StatusCode::INTERNAL_SERVER_ERROR = status_code {
+            log::error!("Encountered internal server error: {}", e);
+        }
+
+        let compilation_errors = if let Error::QueryCompilationError(_, errors) = e {
+            Some(
+                errors
                     .iter()
                     .map(compiler::Error::clone)
                     .take(5)
-                    .collect::<Vec<_>>();
-                (StatusCode::BAD_REQUEST, e.to_string(), Some(errors))
-            }
-            Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => (
-                StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                e.to_string(),
-                None,
-            ),
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
         };
 
         let err_response = ErrorResponse {
             message,
-            status: code.to_string(),
+            status: status_code.to_string(),
+            error_code,
             compilation_errors,
         };
 
         let json = warp::reply::json(&err_response);
 
-        Ok(warp::reply::with_status(json, code))
+        Ok(warp::reply::with_status(json, status_code))
     } else {
         Err(err)
     }
