@@ -1,0 +1,2 @@
+DROP TRIGGER before_insert_or_update_set_empty_post_strings_to_null ON post;
+DROP FUNCTION set_empty_post_strings_to_null();
