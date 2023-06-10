@@ -290,8 +290,8 @@ pub fn apply_ordering(sql_query: &mut String, ordering: &mut Vec<Ordering>) {
             sql_query.push_str(&ordering.expression);
 
             match ordering.direction {
-                Direction::Ascending => sql_query.push_str(" ASC"),
-                Direction::Descending => sql_query.push_str(" DESC"),
+                Direction::Ascending => sql_query.push_str(" ASC NULLS LAST"),
+                Direction::Descending => sql_query.push_str(" DESC NULLS LAST"),
             }
 
             if i < ordering_len - 1 {
