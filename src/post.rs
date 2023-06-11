@@ -180,8 +180,8 @@ fn sanitize_tag(tag: String) -> String {
 fn sanitize_request_tags(request_tags: Vec<String>) -> Vec<String> {
     request_tags
         .into_iter()
-        .unique()
         .map(sanitize_tag)
+        .unique()
         .collect::<Vec<_>>()
 }
 
