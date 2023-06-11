@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use bcrypt::{hash, verify, DEFAULT_COST};
 use chrono::{offset::Utc, DateTime, Duration};
 use diesel::{dsl::count, expression_methods::BoolExpressionMethods, Connection};
@@ -24,6 +26,8 @@ use crate::{
     schema::{refresh_token, registered_user},
     DbConnection,
 };
+
+mod captcha;
 
 lazy_static! {
     pub static ref ACCESS_TOKEN_EXPIRATION: Duration = Duration::hours(3);
@@ -57,7 +61,9 @@ pub struct UserRegistration {
     pub email: Option<String>,
     #[validate(url)]
     pub avatar_url: Option<String>,
+    pub captcha_token: Option<String>,
 }
+
 /// Struct encoded in the JWT that contains its expiry and subject user.
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -215,15 +221,15 @@ fn create_login_response(
 ) -> Result<impl Reply, Error> {
     let login_response = create_login_response_struct(registered_user, refresh_token_cookie.token)?;
 
-    let json_response =
-        serde_json::to_vec(&login_response).map_err(|_| Error::SerialisationError)?;
+    let json_response = serde_json::to_vec(&login_response)
+        .map_err(|e| Error::SerialisationError(e.to_string()))?;
 
     let response_body = Response::builder()
         .status(StatusCode::OK)
         .header(header::SET_COOKIE, refresh_token_cookie.cookie)
         .header(header::CONTENT_TYPE, "application/json")
         .body(json_response)
-        .map_err(|_| Error::SerialisationError)?;
+        .map_err(|e| Error::SerialisationError(e.to_string()))?;
 
     Ok(response_body)
 }
@@ -298,7 +304,7 @@ pub async fn try_refresh_login_handler(
     };
 
     let json_response = serde_json::to_vec(&login_response)
-        .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
+        .map_err(|e| warp::reject::custom(Error::SerialisationError(e.to_string())))?;
 
     let mut response_builder = Response::builder().status(StatusCode::OK);
 
@@ -309,7 +315,7 @@ pub async fn try_refresh_login_handler(
     let response_body = response_builder
         .header(header::CONTENT_TYPE, "application/json")
         .body(json_response)
-        .map_err(|_| warp::reject::custom(Error::SerialisationError))?;
+        .map_err(|e| warp::reject::custom(Error::SerialisationError(e.to_string())))?;
 
     Ok(response_body)
 }
@@ -399,6 +405,7 @@ lazy_static! {
 /// constraint violation when committing either transaction.
 pub async fn register_handler(
     user_registration: UserRegistration,
+    remote_addr: Option<SocketAddr>,
 ) -> Result<impl Reply, Rejection> {
     user_registration.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
@@ -406,6 +413,13 @@ pub async fn register_handler(
             e
         )))
     })?;
+
+    if let Some(ref captcha_secret) = *captcha::CAPTCHA_SECRET {
+        let captcha_token = user_registration
+            .captcha_token
+            .ok_or(Error::InvalidCaptchaError)?;
+        captcha::verify_captcha(captcha_secret.clone(), captcha_token, remote_addr).await?;
+    }
 
     // synchronise user creation based on user_name
     USER_NAME_SYNC.evaluate(user_registration.user_name.clone(), || {

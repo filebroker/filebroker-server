@@ -28,6 +28,10 @@ pub enum Error {
     InvalidEntityReferenceError(String),
     #[error("Query could not be compiled due to error in phase '{0}'")]
     QueryCompilationError(String, Vec<compiler::Error>),
+    #[error("Captcha token is missing or malformed")]
+    InvalidCaptchaError,
+    #[error("Failed to validate captcha: {0}")]
+    CaptchaValidationError(String),
 
     // 401
     #[error("invalid credentials")]
@@ -60,8 +64,8 @@ pub enum Error {
     JwtCreationError,
     #[error("There has been an error encrypting / decrypting a password")]
     EncryptionError,
-    #[error("Failed to serialise data")]
-    SerialisationError,
+    #[error("Failed to serialise data: {0}")]
+    SerialisationError(String),
     #[error("An error occurred connecting to S3: {0}")]
     S3Error(String),
     #[error("Error occurred in hyper: {0}")]
@@ -76,6 +80,8 @@ pub enum Error {
     IoError(String),
     #[error("Invalid URL: {0}")]
     InvalidUrlError(String),
+    #[error("Reqwest error occurred: {0}")]
+    ReqwestError(String),
 
     #[error("Received error response code from S3: {0}")]
     S3ResponseError(u16),
@@ -102,20 +108,23 @@ impl Error {
             | Error::InvalidBucketError(_)
             | Error::InvalidFileError(_)
             | Error::InvalidEntityReferenceError(_)
-            | Error::QueryCompilationError(..) => StatusCode::BAD_REQUEST,
+            | Error::QueryCompilationError(..)
+            | Error::InvalidCaptchaError
+            | Error::CaptchaValidationError(_) => StatusCode::BAD_REQUEST,
             Error::DatabaseConnectionError
             | Error::QueryError(_)
             | Error::TransactionError(_)
             | Error::JwtCreationError
             | Error::EncryptionError
-            | Error::SerialisationError
+            | Error::SerialisationError(_)
             | Error::S3Error(_)
             | Error::HyperError(_)
             | Error::FfmpegProcessError(_)
             | Error::StdError(_)
             | Error::CancellationError
             | Error::IoError(_)
-            | Error::InvalidUrlError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | Error::InvalidUrlError(_)
+            | Error::ReqwestError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::IllegalRangeError(_) => StatusCode::RANGE_NOT_SATISFIABLE,
             Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => {
                 StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -135,6 +144,8 @@ impl Error {
             Self::InvalidFileError(_) => 400_008,
             Self::InvalidEntityReferenceError(_) => 400_009,
             Self::QueryCompilationError(..) => 400_010,
+            Self::InvalidCaptchaError => 400_011,
+            Self::CaptchaValidationError(_) => 400_012,
 
             Self::InvalidCredentialsError => 401_001,
             Self::MissingAuthHeaderError => 401_002,
@@ -151,7 +162,7 @@ impl Error {
             Self::TransactionError(_) => 500_003,
             Self::JwtCreationError => 500_004,
             Self::EncryptionError => 500_005,
-            Self::SerialisationError => 500_006,
+            Self::SerialisationError(_) => 500_006,
             Self::S3Error(_) => 500_007,
             Self::HyperError(_) => 500_008,
             Self::FfmpegProcessError(_) => 500_009,
@@ -159,6 +170,7 @@ impl Error {
             Self::CancellationError => 500_011,
             Self::IoError(_) => 500_012,
             Self::InvalidUrlError(_) => 500_013,
+            Self::ReqwestError(_) => 500_014,
 
             Self::S3ResponseError(_) => 600_001,
             Self::S3ResponseErrorMsg(..) => 600_002,
@@ -192,6 +204,12 @@ impl From<warp::hyper::Error> for Error {
 impl From<warp::hyper::header::ToStrError> for Error {
     fn from(e: warp::hyper::header::ToStrError) -> Self {
         Error::HyperError(e.to_string())
+    }
+}
+
+impl From<reqwest::Error> for Error {
+    fn from(value: reqwest::Error) -> Self {
+        Error::ReqwestError(value.without_url().to_string())
     }
 }
 

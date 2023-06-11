@@ -30,7 +30,10 @@ use crate::{
 lazy_static! {
     pub static ref TASK_POOL: ThreadPool = {
         let task_pool_worker_count = std::env::var("FILEBROKER_TASK_POOL_WORKER_COUNT")
-            .map(|s| s.parse::<usize>().expect("FILEBROKER_TASK_POOL_WORKER_COUNT invalid"))
+            .map(|s| {
+                s.parse::<usize>()
+                    .expect("FILEBROKER_TASK_POOL_WORKER_COUNT invalid")
+            })
             .unwrap_or(4);
         rusty_pool::Builder::new()
             .core_size(task_pool_worker_count)

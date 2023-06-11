@@ -208,7 +208,7 @@ pub async fn get_object_handler(
     Ok(response_builder
         .status(response_status)
         .body(body)
-        .map_err(|_| Error::SerialisationError)?)
+        .map_err(|e| Error::SerialisationError(e.to_string()))?)
 }
 
 pub async fn get_object_head_handler(
@@ -257,7 +257,7 @@ pub async fn get_object_head_handler(
     Ok(response_builder
         .status(response_status)
         .body(hyper::Body::empty())
-        .map_err(|_| Error::SerialisationError)?)
+        .map_err(|e| Error::SerialisationError(e.to_string()))?)
 }
 
 #[derive(Deserialize, Validate)]
@@ -321,7 +321,6 @@ pub async fn create_broker_handler(
             remove_duplicate_files: create_broker_request.remove_duplicate_files,
             fk_owner: user.pk,
             creation_timestamp: Utc::now(),
-            // TODO enable privleged users to create HLS enabled brokers
             hls_enabled: false,
         })
         .get_result::<Broker>(&mut connection)

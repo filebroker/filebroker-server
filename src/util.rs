@@ -1,4 +1,4 @@
-use std::{fmt, time::Duration};
+use std::{fmt, net::SocketAddr, time::Duration};
 
 use url::Url;
 
@@ -120,4 +120,11 @@ pub fn join_url<'a>(
         path_segments.push(segment);
     }
     Ok(())
+}
+
+pub fn addr_to_ip_string(addr: &SocketAddr) -> String {
+    match addr {
+        SocketAddr::V4(addr) => addr.ip().to_string(),
+        SocketAddr::V6(addr) => addr.ip().to_string(),
+    }
 }

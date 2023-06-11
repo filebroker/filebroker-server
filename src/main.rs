@@ -56,8 +56,8 @@ lazy_static! {
         u64::from_str(&secret_str).expect("FILEBROKER_JWT_SECRET var is not a valid u64 value")
     };
     pub static ref PORT: u16 = {
-        let port_str =
-            std::env::var("FILEBROKER_API_PORT").expect("Missing environment variable FILEBROKER_API_PORT must be set.");
+        let port_str = std::env::var("FILEBROKER_API_PORT")
+            .expect("Missing environment variable FILEBROKER_API_PORT must be set.");
         u16::from_str(&port_str).expect("FILEBROKER_API_PORT var is not a valid u16 value")
     };
     pub static ref CERT_PATH: Option<String> = std::env::var("FILEBROKER_CERT_PATH").ok();
@@ -228,6 +228,7 @@ async fn setup_tokio_runtime() {
     let register_route = warp::path("register")
         .and(warp::post())
         .and(warp::body::json())
+        .and(warp::filters::addr::remote())
         .and_then(auth::register_handler);
 
     let current_user_info_route = warp::path("current-user-info")
