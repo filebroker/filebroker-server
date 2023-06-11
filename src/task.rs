@@ -29,8 +29,8 @@ use crate::{
 
 lazy_static! {
     pub static ref TASK_POOL: ThreadPool = {
-        let task_pool_worker_count = std::env::var("TASK_POOL_WORKER_COUNT")
-            .map(|s| s.parse::<usize>().expect("TASK_POOL_WORKER_COUNT invalid"))
+        let task_pool_worker_count = std::env::var("FILEBROKER_TASK_POOL_WORKER_COUNT")
+            .map(|s| s.parse::<usize>().expect("FILEBROKER_TASK_POOL_WORKER_COUNT invalid"))
             .unwrap_or(4);
         rusty_pool::Builder::new()
             .core_size(task_pool_worker_count)
@@ -40,16 +40,16 @@ lazy_static! {
     };
     pub static ref RUNNING_TASK_IDS: flurry::HashSet<&'static str> = flurry::HashSet::new();
     pub static ref DISABLE_GENERATE_MISSING_HLS_STREAMS: bool =
-        std::env::var("DISABLE_GENERATE_MISSING_HLS_STREAMS")
+        std::env::var("FILEBROKER_DISABLE_GENERATE_MISSING_HLS_STREAMS")
             .map(|s| s
                 .parse::<bool>()
-                .expect("DISABLE_GENERATE_MISSING_HLS_STREAMS invalid"))
+                .expect("FILEBROKER_DISABLE_GENERATE_MISSING_HLS_STREAMS is invalid"))
             .unwrap_or(false);
     pub static ref DISABLE_GENERATE_MISSING_THUMBNAILS: bool =
-        std::env::var("DISABLE_GENERATE_MISSING_THUMBNAILS")
+        std::env::var("FILEBROKER_DISABLE_GENERATE_MISSING_THUMBNAILS")
             .map(|s| s
                 .parse::<bool>()
-                .expect("DISABLE_GENERATE_MISSING_THUMBNAILS invalid"))
+                .expect("FILEBROKER_DISABLE_GENERATE_MISSING_THUMBNAILS is invalid"))
             .unwrap_or(false);
 }
 

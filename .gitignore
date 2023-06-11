@@ -2,5 +2,6 @@
 /.idea/
 /logs/
 /Cargo.lock
-/.env
 /filebroker-server.iml
+/.env.local
+/.env.secret

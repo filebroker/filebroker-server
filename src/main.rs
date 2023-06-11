@@ -10,7 +10,7 @@ use diesel::{
     r2d2::{self, ConnectionManager, Pool, PooledConnection},
     PgConnection,
 };
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use error::{Error, TransactionRuntimeError};
 use lazy_static::lazy_static;
 use mime::Mime;
@@ -36,14 +36,14 @@ pub type DbConnection = PooledConnection<ConnectionManager<PgConnection>>;
 
 lazy_static! {
     pub static ref CONNECTION_POOL: Pool<ConnectionManager<PgConnection>> = {
-        let database_url = std::env::var("DATABASE_URL")
-            .expect("Missing environment variable DATABASE_URL must be set to connect to postgres");
+        let database_url = std::env::var("FILEBROKER_DATABASE_URL")
+            .expect("Missing environment variable FILEBROKER_DATABASE_URL must be set to connect to postgres");
         let database_connection_manager =
             r2d2::ConnectionManager::<PgConnection>::new(database_url);
-        let max_db_connections = std::env::var("MAX_DB_CONNECTIONS")
+        let max_db_connections = std::env::var("FILEBROKER_MAX_DB_CONNECTIONS")
             .unwrap_or_else(|_| String::from("25"))
             .parse::<u32>()
-            .expect("MAX_DB_CONNECTIONS is not a valid u32");
+            .expect("FILEBROKER_MAX_DB_CONNECTIONS is not a valid u32");
         r2d2::Builder::new()
             .min_idle(Some(5))
             .max_size(max_db_connections)
@@ -51,29 +51,29 @@ lazy_static! {
             .expect("Failed to initialise connection pool")
     };
     pub static ref JWT_SECRET: u64 = {
-        let secret_str = std::env::var("JWT_SECRET")
-            .expect("Missing environment variable JWT_SECRET must be set to generate JWT tokens.");
-        u64::from_str(&secret_str).expect("JWT_SECRET var is not a valid u64 value")
+        let secret_str = std::env::var("FILEBROKER_JWT_SECRET")
+            .expect("Missing environment variable FILEBROKER_JWT_SECRET must be set to generate JWT tokens.");
+        u64::from_str(&secret_str).expect("FILEBROKER_JWT_SECRET var is not a valid u64 value")
     };
     pub static ref PORT: u16 = {
         let port_str =
-            std::env::var("API_PORT").expect("Missing environment variable API_PORT must be set.");
-        u16::from_str(&port_str).expect("API_PORT var is not a valid u16 value")
+            std::env::var("FILEBROKER_API_PORT").expect("Missing environment variable FILEBROKER_API_PORT must be set.");
+        u16::from_str(&port_str).expect("FILEBROKER_API_PORT var is not a valid u16 value")
     };
-    pub static ref CERT_PATH: Option<String> = std::env::var("CERT_PATH").ok();
-    pub static ref KEY_PATH: Option<String> = std::env::var("KEY_PATH").ok();
-    pub static ref API_BASE_URL: Url = std::env::var("API_BASE_URL")
-        .map(|url| Url::parse(&url).expect("API_BASE_URL is not valid"))
+    pub static ref CERT_PATH: Option<String> = std::env::var("FILEBROKER_CERT_PATH").ok();
+    pub static ref KEY_PATH: Option<String> = std::env::var("FILEBROKER_KEY_PATH").ok();
+    pub static ref API_BASE_URL: Url = std::env::var("FILEBROKER_API_BASE_URL")
+        .map(|url| Url::parse(&url).expect("FILEBROKER_API_BASE_URL is not valid"))
         .unwrap_or_else(|_| {
             let protocol = if CERT_PATH.is_some() { "https" } else { "http" };
 
             Url::parse(&format!("{protocol}://localhost:{}/", *PORT)).unwrap()
         });
     pub static ref CONCURRENT_VIDEO_TRANSCODE_LIMIT: Option<usize> =
-        std::env::var("CONCURRENT_VIDEO_TRANSCODE_LIMIT")
+        std::env::var("FILEBROKER_CONCURRENT_VIDEO_TRANSCODE_LIMIT")
             .map(|v| v
                 .parse::<usize>()
-                .expect("CONCURRENT_VIDEO_TRANSCODE_LIMIT is not a valid usize"))
+                .expect("FILEBROKER_CONCURRENT_VIDEO_TRANSCODE_LIMIT is not a valid usize"))
             .ok();
 }
 
@@ -81,6 +81,18 @@ lazy_static! {
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 fn main() {
+    dotenvy::from_path(
+        std::env::current_dir()
+            .map(|wd| wd.join(".env.local"))
+            .unwrap(),
+    )
+    .ok();
+    dotenvy::from_path(
+        std::env::current_dir()
+            .map(|wd| wd.join(".env.secret"))
+            .unwrap(),
+    )
+    .ok();
     dotenv().ok();
 
     // initialise certain lazy statics on startup
