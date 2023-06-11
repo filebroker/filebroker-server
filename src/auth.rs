@@ -17,6 +17,7 @@ use warp::{
     },
     hyper, Filter, Rejection, Reply,
 };
+use zxcvbn::zxcvbn;
 
 use crate::{
     acquire_db_connection,
@@ -413,6 +414,16 @@ pub async fn register_handler(
             e
         )))
     })?;
+
+    let mut zxcvbn_user_data = vec![user_registration.user_name.as_str()];
+    if let Some(ref email) = user_registration.email {
+        zxcvbn_user_data.push(email.as_str());
+    }
+    let entropy = zxcvbn(&user_registration.password, &zxcvbn_user_data)
+        .map_err(|e| Error::InternalError(e.to_string()))?;
+    if entropy.score() < 3 {
+        return Err(warp::reject::custom(Error::WeakPasswordError));
+    }
 
     if let Some(ref captcha_secret) = *captcha::CAPTCHA_SECRET {
         let captcha_token = user_registration

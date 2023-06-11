@@ -32,6 +32,8 @@ pub enum Error {
     InvalidCaptchaError,
     #[error("Failed to validate captcha: {0}")]
     CaptchaValidationError(String),
+    #[error("Password is too weak")]
+    WeakPasswordError,
 
     // 401
     #[error("invalid credentials")]
@@ -73,7 +75,7 @@ pub enum Error {
     #[error("Error in ffmpeg process: {0}")]
     FfmpegProcessError(String),
     #[error("Internal error: {0}")]
-    StdError(String),
+    InternalError(String),
     #[error("Submitted task was aborted")]
     CancellationError,
     #[error("An IO Error occurred: {0}")]
@@ -110,7 +112,8 @@ impl Error {
             | Error::InvalidEntityReferenceError(_)
             | Error::QueryCompilationError(..)
             | Error::InvalidCaptchaError
-            | Error::CaptchaValidationError(_) => StatusCode::BAD_REQUEST,
+            | Error::CaptchaValidationError(_)
+            | Error::WeakPasswordError => StatusCode::BAD_REQUEST,
             Error::DatabaseConnectionError
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -120,7 +123,7 @@ impl Error {
             | Error::S3Error(_)
             | Error::HyperError(_)
             | Error::FfmpegProcessError(_)
-            | Error::StdError(_)
+            | Error::InternalError(_)
             | Error::CancellationError
             | Error::IoError(_)
             | Error::InvalidUrlError(_)
@@ -146,6 +149,7 @@ impl Error {
             Self::QueryCompilationError(..) => 400_010,
             Self::InvalidCaptchaError => 400_011,
             Self::CaptchaValidationError(_) => 400_012,
+            Self::WeakPasswordError => 400_013,
 
             Self::InvalidCredentialsError => 401_001,
             Self::MissingAuthHeaderError => 401_002,
@@ -166,7 +170,7 @@ impl Error {
             Self::S3Error(_) => 500_007,
             Self::HyperError(_) => 500_008,
             Self::FfmpegProcessError(_) => 500_009,
-            Self::StdError(_) => 500_010,
+            Self::InternalError(_) => 500_010,
             Self::CancellationError => 500_011,
             Self::IoError(_) => 500_012,
             Self::InvalidUrlError(_) => 500_013,
