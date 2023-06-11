@@ -8,12 +8,12 @@ UPDATE post SET thumbnail_url = NULL WHERE thumbnail_url = '';
 CREATE FUNCTION set_empty_post_strings_to_null() RETURNS TRIGGER AS
 $BODY$
 BEGIN
-    NEW.title := NULLIF(NEW.title, '');
-    NEW.description := NULLIF(NEW.description, '');
-    NEW.data_url := NULLIF(NEW.data_url, '');
-    NEW.source_url := NULLIF(NEW.source_url, '');
-    NEW.s3_object := NULLIF(NEW.s3_object, '');
-    NEW.thumbnail_url := NULLIF(NEW.thumbnail_url, '');
+    NEW.title := NULLIF(TRIM(regexp_replace(NEW.title, '\s+', ' ', 'g')), '');
+    NEW.description := NULLIF(TRIM(NEW.description), '');
+    NEW.data_url := NULLIF(TRIM(NEW.data_url), '');
+    NEW.source_url := NULLIF(TRIM(NEW.source_url), '');
+    NEW.s3_object := NULLIF(TRIM(NEW.s3_object), '');
+    NEW.thumbnail_url := NULLIF(TRIM(NEW.thumbnail_url), '');
     RETURN NEW;
 END;
 $BODY$
