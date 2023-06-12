@@ -54,7 +54,7 @@ pub struct LoginResponse {
 /// Struct received by the /register endpoint used to create a user.
 #[derive(Deserialize, Validate)]
 pub struct UserRegistration {
-    #[validate(length(min = 1, max = 50))]
+    #[validate(length(min = 1, max = 25))]
     pub user_name: String,
     #[validate(length(min = 1, max = 255))]
     pub password: String,
@@ -501,4 +501,39 @@ impl From<User> for UserInfo {
 
 pub async fn current_user_info_handler(user: User) -> Result<impl Reply, Rejection> {
     Ok(warp::reply::json(&UserInfo::from(user)))
+}
+
+#[derive(Serialize)]
+pub struct CheckUsernameResponse {
+    pub valid: bool,
+    pub available: bool,
+}
+
+pub async fn check_username_handler(user_name: String) -> Result<impl Reply, Rejection> {
+    let user_name = percent_encoding::percent_decode(user_name.as_bytes())
+        .decode_utf8()
+        .map_err(|_| Error::UtfEncodingError)?;
+    let valid = !user_name.is_empty()
+        && user_name.len() <= 25
+        && user_name
+            .chars()
+            .all(|c| !c.is_whitespace() && !c.is_control());
+    if !valid {
+        return Ok(warp::reply::json(&CheckUsernameResponse {
+            valid,
+            available: false,
+        }));
+    }
+
+    let mut connection = acquire_db_connection()?;
+    let existing_count: i64 = registered_user::table
+        .select(count(registered_user::pk))
+        .filter(registered_user::user_name.eq(&user_name))
+        .first(&mut connection)
+        .map_err(Error::from)?;
+
+    Ok(warp::reply::json(&CheckUsernameResponse {
+        valid,
+        available: existing_count == 0,
+    }))
 }

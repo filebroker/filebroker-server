@@ -332,6 +332,11 @@ async fn setup_tokio_runtime() {
         .and(warp::body::json())
         .and_then(query::analyze_query_handler);
 
+    let check_username_route = warp::path("check-username")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and_then(auth::check_username_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -356,6 +361,7 @@ async fn setup_tokio_runtime() {
         .or(get_current_user_groups_route)
         .or(edit_post_route)
         .or(analyze_query_route)
+        .or(check_username_route)
         .boxed();
 
     let filter = routes
