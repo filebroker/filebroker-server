@@ -2,7 +2,10 @@ use std::net::SocketAddr;
 
 use bcrypt::{hash, verify, DEFAULT_COST};
 use chrono::{offset::Utc, DateTime, Duration};
-use diesel::{dsl::count, expression_methods::BoolExpressionMethods, Connection};
+use diesel::{
+    connection::LoadConnection, dsl::count, expression_methods::BoolExpressionMethods, pg::Pg,
+    Connection,
+};
 use exec_rs::sync::MutexSync;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
@@ -22,11 +25,11 @@ use zxcvbn::zxcvbn;
 use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl},
-    error::Error,
+    error::{Error, TransactionRuntimeError},
     model::{NewRefreshToken, NewUser, RefreshToken, User},
     query::functions::lower,
+    retry_on_constraint_violation, run_retryable_transaction,
     schema::{refresh_token, registered_user},
-    DbConnection,
 };
 
 mod captcha;
@@ -169,9 +172,9 @@ struct RefreshTokenCookie {
 
 /// Create a HttpOnly Cookie that may be used to refresh logins by generating a UUID which is persisted
 /// to the database as a RefreshToken entity which links the UUID to the User.
-fn create_refresh_token_cookie(
+fn create_refresh_token_cookie<C: Connection<Backend = Pg> + LoadConnection>(
     registered_user: &User,
-    connection: &mut DbConnection,
+    connection: &mut C,
 ) -> Result<RefreshTokenCookie, Error> {
     let uuid = Uuid::new_v4();
     let current_utc = Utc::now();
@@ -426,6 +429,16 @@ pub async fn register_handler(
         return Err(warp::reject::custom(Error::WeakPasswordError));
     }
 
+    let check_user_name_response = check_username(&user_registration.user_name)?;
+    if !check_user_name_response.valid {
+        return Err(warp::reject::custom(Error::InvalidUserNameError));
+    }
+    if !check_user_name_response.available {
+        return Err(warp::reject::custom(Error::UniqueValueError(
+            user_registration.user_name,
+        )));
+    }
+
     if let Some(ref captcha_secret) = *captcha::CAPTCHA_SECRET {
         let captcha_token = user_registration
             .captcha_token
@@ -433,54 +446,60 @@ pub async fn register_handler(
         captcha::verify_captcha(captcha_secret.clone(), captcha_token, remote_addr).await?;
     }
 
-    // synchronise user creation based on user_name
+    // synchronise user creation based on user_name, limits the number of retried transactions
+    // when a user_named is spammed
     USER_NAME_SYNC.evaluate(user_registration.user_name.clone(), || {
+        let hashed_password = match hash(&user_registration.password, DEFAULT_COST) {
+            Ok(hashed_password) => hashed_password,
+            Err(_) => return Err(warp::reject::custom(Error::EncryptionError)),
+        };
+
+        let new_user = NewUser {
+            user_name: user_registration.user_name,
+            password: hashed_password,
+            email: user_registration.email,
+            avatar_url: user_registration.avatar_url,
+            creation_timestamp: Utc::now(),
+        };
         let mut connection = acquire_db_connection()?;
-        connection
-            .transaction(|connection| {
-                let existing_count: Result<i64, _> = registered_user::table
-                    .select(count(registered_user::pk))
-                    .filter(
-                        lower(registered_user::user_name)
-                            .eq(&user_registration.user_name.to_lowercase()),
-                    )
-                    .first(connection);
+        run_retryable_transaction(&mut connection, |connection| {
+            let existing_count: Result<i64, _> = registered_user::table
+                .select(count(registered_user::pk))
+                .filter(lower(registered_user::user_name).eq(&new_user.user_name.to_lowercase()))
+                .first(connection);
 
-                match existing_count {
-                    Ok(count) => {
-                        if count != 0 {
-                            return Err(Error::UniqueValueError(user_registration.user_name));
-                        }
+            match existing_count {
+                Ok(count) => {
+                    if count != 0 {
+                        return Err(TransactionRuntimeError::Rollback(Error::UniqueValueError(
+                            new_user.user_name.clone(),
+                        )));
                     }
-                    Err(e) => return Err(Error::QueryError(e.to_string())),
-                };
-
-                let hashed_password = match hash(&user_registration.password, DEFAULT_COST) {
-                    Ok(hashed_password) => hashed_password,
-                    Err(_) => return Err(Error::EncryptionError),
-                };
-
-                let new_user = NewUser {
-                    user_name: user_registration.user_name,
-                    password: hashed_password,
-                    email: user_registration.email,
-                    avatar_url: user_registration.avatar_url,
-                    creation_timestamp: Utc::now(),
-                };
-
-                match diesel::insert_into(registered_user::table)
-                    .values(&new_user)
-                    .get_result::<User>(connection)
-                {
-                    Ok(registered_user) => {
-                        let refresh_token_cookie =
-                            create_refresh_token_cookie(&registered_user, connection)?;
-                        create_login_response(registered_user, refresh_token_cookie)
-                    }
-                    Err(e) => Err(Error::QueryError(e.to_string())),
                 }
-            })
-            .map_err(warp::reject::custom)
+                Err(e) => {
+                    return Err(TransactionRuntimeError::Rollback(Error::QueryError(
+                        e.to_string(),
+                    )))
+                }
+            };
+
+            match diesel::insert_into(registered_user::table)
+                .values(&new_user)
+                .get_result::<User>(connection)
+                .map_err(retry_on_constraint_violation)
+            {
+                Ok(registered_user) => {
+                    let refresh_token_cookie =
+                        create_refresh_token_cookie(&registered_user, connection)?;
+                    create_login_response(registered_user, refresh_token_cookie)
+                        .map_err(TransactionRuntimeError::Rollback)
+                }
+                Err(e) => Err(TransactionRuntimeError::Rollback(Error::QueryError(
+                    e.to_string(),
+                ))),
+            }
+        })
+        .map_err(warp::reject::custom)
     })
 }
 
@@ -517,16 +536,22 @@ pub async fn check_username_handler(user_name: String) -> Result<impl Reply, Rej
     let user_name = percent_encoding::percent_decode(user_name.as_bytes())
         .decode_utf8()
         .map_err(|_| Error::UtfEncodingError)?;
+
+    let response = check_username(&user_name)?;
+    Ok(warp::reply::json(&response))
+}
+
+fn check_username(user_name: &str) -> Result<CheckUsernameResponse, Error> {
     let valid = !user_name.is_empty()
         && user_name.len() <= 25
         && user_name
             .chars()
             .all(|c| !c.is_whitespace() && !c.is_control());
     if !valid {
-        return Ok(warp::reply::json(&CheckUsernameResponse {
+        return Ok(CheckUsernameResponse {
             valid,
             available: false,
-        }));
+        });
     }
 
     let mut connection = acquire_db_connection()?;
@@ -536,8 +561,8 @@ pub async fn check_username_handler(user_name: String) -> Result<impl Reply, Rej
         .first(&mut connection)
         .map_err(Error::from)?;
 
-    Ok(warp::reply::json(&CheckUsernameResponse {
+    Ok(CheckUsernameResponse {
         valid,
         available: existing_count == 0,
-    }))
+    })
 }

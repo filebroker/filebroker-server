@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::Serialize;
 use thiserror::Error;
 use warp::{hyper::StatusCode, reject::Reject, Rejection, Reply};
@@ -34,6 +36,8 @@ pub enum Error {
     CaptchaValidationError(String),
     #[error("Password is too weak")]
     WeakPasswordError,
+    #[error("Invalid username")]
+    InvalidUserNameError,
 
     // 401
     #[error("invalid credentials")]
@@ -113,7 +117,8 @@ impl Error {
             | Error::QueryCompilationError(..)
             | Error::InvalidCaptchaError
             | Error::CaptchaValidationError(_)
-            | Error::WeakPasswordError => StatusCode::BAD_REQUEST,
+            | Error::WeakPasswordError
+            | Error::InvalidUserNameError => StatusCode::BAD_REQUEST,
             Error::DatabaseConnectionError
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -150,6 +155,7 @@ impl Error {
             Self::InvalidCaptchaError => 400_011,
             Self::CaptchaValidationError(_) => 400_012,
             Self::WeakPasswordError => 400_013,
+            Self::InvalidUserNameError => 400_014,
 
             Self::InvalidCredentialsError => 401_001,
             Self::MissingAuthHeaderError => 401_002,
@@ -217,9 +223,19 @@ impl From<reqwest::Error> for Error {
     }
 }
 
+#[derive(Debug)]
 pub enum TransactionRuntimeError {
     Retry(Error),
     Rollback(Error),
+}
+
+impl fmt::Display for TransactionRuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retry(e) => e.fmt(f),
+            Self::Rollback(e) => e.fmt(f),
+        }
+    }
 }
 
 impl From<Error> for TransactionRuntimeError {
