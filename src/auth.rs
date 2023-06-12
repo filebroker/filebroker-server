@@ -24,6 +24,7 @@ use crate::{
     diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl},
     error::Error,
     model::{NewRefreshToken, NewUser, RefreshToken, User},
+    query::functions::lower,
     schema::{refresh_token, registered_user},
     DbConnection,
 };
@@ -135,7 +136,7 @@ pub async fn login_handler(request: LoginRequest) -> Result<impl Reply, Rejectio
     connection
         .transaction(|connection| {
             let found_registered_user = registered_user::table
-                .filter(registered_user::user_name.eq(&request.user_name))
+                .filter(lower(registered_user::user_name).eq(&request.user_name.to_lowercase()))
                 .first::<User>(connection);
             let registered_user = match found_registered_user {
                 Ok(registered_user) => {
@@ -439,7 +440,10 @@ pub async fn register_handler(
             .transaction(|connection| {
                 let existing_count: Result<i64, _> = registered_user::table
                     .select(count(registered_user::pk))
-                    .filter(registered_user::user_name.eq(&user_registration.user_name))
+                    .filter(
+                        lower(registered_user::user_name)
+                            .eq(&user_registration.user_name.to_lowercase()),
+                    )
                     .first(connection);
 
                 match existing_count {
@@ -528,7 +532,7 @@ pub async fn check_username_handler(user_name: String) -> Result<impl Reply, Rej
     let mut connection = acquire_db_connection()?;
     let existing_count: i64 = registered_user::table
         .select(count(registered_user::pk))
-        .filter(registered_user::user_name.eq(&user_name))
+        .filter(lower(registered_user::user_name).eq(&user_name.to_lowercase()))
         .first(&mut connection)
         .map_err(Error::from)?;
 
