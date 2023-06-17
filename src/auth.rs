@@ -686,7 +686,7 @@ fn prepare_email_confirmation_context(
     let mut host = HOST_BASE_PATH
         .clone()
         .unwrap_or_else(|| authority.to_string());
-    if !host.starts_with("http://") || !host.starts_with("https://") {
+    if !host.starts_with("http://") && !host.starts_with("https://") {
         if CERT_PATH.is_some() {
             host.insert_str(0, "https://");
         } else {
