@@ -382,6 +382,7 @@ async fn setup_tokio_runtime() {
         .and_then(auth::reset_password_handler);
 
     let routes = login_route
+        .boxed()
         .or(refresh_login_route)
         .or(refresh_token_route)
         .or(try_refresh_login_route)
