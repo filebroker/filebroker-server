@@ -30,6 +30,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    email_confirmation_token (uuid) {
+        uuid -> Uuid,
+        expiry -> Timestamptz,
+        invalidated -> Bool,
+        fk_user -> Int4,
+    }
+}
+
+diesel::table! {
     hls_stream (stream_playlist) {
         stream_playlist -> Varchar,
         stream_file -> Varchar,
@@ -39,6 +48,15 @@ diesel::table! {
         target_bitrate -> Nullable<Varchar>,
         min_bitrate -> Nullable<Varchar>,
         max_bitrate -> Nullable<Varchar>,
+    }
+}
+
+diesel::table! {
+    one_time_password (fk_user) {
+        password -> Varchar,
+        expiry -> Timestamptz,
+        invalidated -> Bool,
+        fk_user -> Int4,
     }
 }
 
@@ -106,12 +124,11 @@ diesel::table! {
 }
 
 diesel::table! {
-    refresh_token (pk) {
-        pk -> Int4,
+    refresh_token (uuid) {
         uuid -> Uuid,
         expiry -> Timestamptz,
         invalidated -> Bool,
-        fk_registered_user -> Int4,
+        fk_user -> Int4,
     }
 }
 
@@ -123,6 +140,10 @@ diesel::table! {
         email -> Nullable<Varchar>,
         avatar_url -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
+        email_confirmed -> Bool,
+        display_name -> Nullable<Varchar>,
+        jwt_version -> Int4,
+        password_fail_count -> Int4,
     }
 }
 
@@ -204,6 +225,8 @@ diesel::joinable!(broker -> registered_user (fk_owner));
 diesel::joinable!(broker_access -> broker (fk_broker));
 diesel::joinable!(broker_access -> registered_user (fk_granted_by));
 diesel::joinable!(broker_access -> user_group (fk_granted_group));
+diesel::joinable!(email_confirmation_token -> registered_user (fk_user));
+diesel::joinable!(one_time_password -> registered_user (fk_user));
 diesel::joinable!(post -> registered_user (fk_create_user));
 diesel::joinable!(post -> s3_object (s3_object));
 diesel::joinable!(post_collection -> registered_user (fk_owner));
@@ -218,7 +241,7 @@ diesel::joinable!(post_group_access -> registered_user (fk_granted_by));
 diesel::joinable!(post_group_access -> user_group (fk_granted_group));
 diesel::joinable!(post_tag -> post (fk_post));
 diesel::joinable!(post_tag -> tag (fk_tag));
-diesel::joinable!(refresh_token -> registered_user (fk_registered_user));
+diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
 diesel::joinable!(s3_object -> registered_user (fk_uploader));
 diesel::joinable!(user_group -> registered_user (fk_owner));
@@ -227,7 +250,9 @@ diesel::joinable!(user_group_membership -> user_group (fk_group));
 diesel::allow_tables_to_appear_in_same_query!(
     broker,
     broker_access,
+    email_confirmation_token,
     hls_stream,
+    one_time_password,
     post,
     post_collection,
     post_collection_group_access,

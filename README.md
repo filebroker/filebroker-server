@@ -61,4 +61,25 @@ the background, thumbnails for objects uploaded to this server will still be cre
 
 `FILEBROKER_CAPTCHA_SECRET` (optional, string): The secret for hCaptcha. If empty then captchas are disabled.
 
+`FILEBROKER_HOST_BASE_PATH` (optional, string): Base path for the host, used to build links for email confirmation links etc. Uses the Host header of the request if absent.
+
+`FILEBROKER_MAIL_SENDER_NAME` (optional, string): The name for the mail sender address, defaults to "filebroker".
+
+`FILEBROKER_MAIL_SENDER_ADDRESS` (optional, string): Email address to send emails from, required to send mails.
+
+`FILEBROKER_SMTP_HOST` (optional, string): The host name for the SMTP service to send mails through, required to send mails.
+
+`FILEBROKER_SMTP_USER` (optional, string): The username to authenticate to the SMTP host with, required to send mails.
+
+`FILEBROKER_SMTP_PASSWORD` (optional, string): The password to authenticate to the SMTP host with, required to send mails.
+
+`FILEBROKER_MAILS_PER_HOUR_LIMIT` (optional, u32): The rate limit for maximum number of mails sent per hour, defaults to 120.
+
+`FILEBROKER_DKIM_KEY_PATH` (optional, string): Path to the DKIM private key to sign emails with. Only necessary if you manage DKIM yourself,
+if you send your mails through an SMTP relay that manages DKIM for you this is redundant.
+
+`FILEBROKER_DKIM_SELECTOR` (optional, string): the DKIM selector for the DNS entry, used in combination with `FILEBROKER_DKIM_KEY_PATH`.
+
+`FILEBROKER_DKIM_DOMAIN` (optional, string): The domain name verified through the DKIM entry, used in combination with `FILEBROKER_DKIM_KEY_PATH` and `FILEBROKER_DKIM_SELECTOR`.
+
 Note that CORS headers are only set when running debug binaries for development, for production you need to set up nginx.

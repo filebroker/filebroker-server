@@ -1,0 +1,7 @@
+{% macro display_user(user) %}
+    {%- if user.display_name -%}
+        {{ user.display_name }}
+    {%- else -%}
+        {{ user.user_name }}
+    {%- endif -%}
+{% endmacro display_user %}

@@ -17,6 +17,10 @@ pub struct User {
     pub email: Option<String>,
     pub avatar_url: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
+    pub email_confirmed: bool,
+    pub display_name: Option<String>,
+    pub jwt_version: i32,
+    pub password_fail_count: i32,
 }
 
 #[derive(Insertable)]
@@ -27,27 +31,19 @@ pub struct NewUser {
     pub email: Option<String>,
     pub avatar_url: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
+    pub email_confirmed: bool,
+    pub display_name: Option<String>,
 }
 
-#[derive(Associations, Identifiable, Queryable)]
-#[diesel(belongs_to(User, foreign_key = fk_registered_user))]
+#[derive(Associations, Identifiable, Insertable, Queryable)]
+#[diesel(belongs_to(User, foreign_key = fk_user))]
 #[diesel(table_name = refresh_token)]
-#[diesel(primary_key(pk))]
+#[diesel(primary_key(uuid))]
 pub struct RefreshToken {
-    pub pk: i32,
     pub uuid: uuid::Uuid,
     pub expiry: DateTime<Utc>,
     pub invalidated: bool,
-    pub fk_registered_user: i32,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = refresh_token)]
-pub struct NewRefreshToken {
-    pub uuid: uuid::Uuid,
-    pub expiry: DateTime<Utc>,
-    pub invalidated: bool,
-    pub fk_registered_user: i32,
+    pub fk_user: i32,
 }
 
 #[derive(Associations, Identifiable, Queryable, QueryableByName, Serialize)]
@@ -382,4 +378,26 @@ pub struct BrokerAccess {
     pub quota: Option<i64>,
     pub fk_granted_by: i32,
     pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(User, foreign_key = fk_user))]
+#[diesel(table_name = email_confirmation_token)]
+#[diesel(primary_key(uuid))]
+pub struct EmailConfirmationToken {
+    pub uuid: uuid::Uuid,
+    pub expiry: DateTime<Utc>,
+    pub invalidated: bool,
+    pub fk_user: i32,
+}
+
+#[derive(Associations, Identifiable, Insertable, Queryable)]
+#[diesel(belongs_to(User, foreign_key = fk_user))]
+#[diesel(table_name = one_time_password)]
+#[diesel(primary_key(fk_user))]
+pub struct OneTimePassword {
+    pub password: String,
+    pub expiry: DateTime<Utc>,
+    pub invalidated: bool,
+    pub fk_user: i32,
 }

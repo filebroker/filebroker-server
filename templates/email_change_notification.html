@@ -1,0 +1,3 @@
+{% import "macros.html" as macros %}
+<h2>Hi, {{ macros::display_user(user = recipient) }}</h2>
+<p>Your Email address has been changed {% if prev_email_address %}from {{prev_email_address}} {% endif %}to {{recipient.email}}. Click <a href="{{email_confirmation_link}}">this link</a> to verify your new email address.</p>

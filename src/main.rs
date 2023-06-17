@@ -17,13 +17,14 @@ use mime::Mime;
 use query::QueryParametersFilter;
 use std::{str::FromStr, thread::JoinHandle};
 use url::Url;
-use warp::Filter;
+use warp::{host::Authority, Filter};
 
 use crate::util::OptFmt;
 
 mod auth;
 mod data;
 mod error;
+mod mail;
 mod model;
 mod perms;
 mod post;
@@ -75,6 +76,7 @@ lazy_static! {
                 .parse::<usize>()
                 .expect("FILEBROKER_CONCURRENT_VIDEO_TRANSCODE_LIMIT is not a valid usize"))
             .ok();
+    pub static ref HOST_BASE_PATH: Option<String> = std::env::var("FILEBROKER_HOST_BASE_PATH").ok();
 }
 
 #[cfg(feature = "auto_migration")]
@@ -101,6 +103,9 @@ fn main() {
     lazy_static::initialize(&PORT);
     lazy_static::initialize(&API_BASE_URL);
     lazy_static::initialize(&CONCURRENT_VIDEO_TRANSCODE_LIMIT);
+    lazy_static::initialize(&mail::TEMPLATES);
+    lazy_static::initialize(&mail::MAILS_PER_HOUR_LIMIT);
+    lazy_static::initialize(&mail::RATE_LIMITER);
 
     setup_logger();
 
@@ -198,6 +203,7 @@ async fn setup_tokio_runtime() {
     let login_route = warp::path("login")
         .and(warp::post())
         .and(warp::body::json())
+        .and(warp::filters::addr::remote())
         .and_then(auth::login_handler);
 
     let refresh_login_route = warp::path("refresh-login")
@@ -229,6 +235,7 @@ async fn setup_tokio_runtime() {
         .and(warp::post())
         .and(warp::body::json())
         .and(warp::filters::addr::remote())
+        .and(warp::filters::header::header::<Authority>("Host"))
         .and_then(auth::register_handler);
 
     let current_user_info_route = warp::path("current-user-info")
@@ -337,6 +344,43 @@ async fn setup_tokio_runtime() {
         .and(warp::path::param())
         .and_then(auth::check_username_handler);
 
+    let confirm_email_route = warp::path("confirm-email")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(auth::confirm_email_handler);
+
+    let edit_user_route = warp::path("edit-user")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and(warp::filters::header::header::<Authority>("Host"))
+        .and_then(auth::edit_user_handler);
+
+    let send_email_confirmation_link_route = warp::path("send-email-confirmation-link")
+        .and(warp::post())
+        .and(auth::with_user())
+        .and(warp::filters::header::header::<Authority>("Host"))
+        .and_then(auth::send_email_confirmation_link_handler);
+
+    let change_password_route = warp::path("change-password")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and(warp::filters::addr::remote())
+        .and_then(auth::change_password_handler);
+
+    let send_password_reset_route = warp::path("send-password-reset")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(warp::filters::addr::remote())
+        .and_then(auth::send_password_reset_handler);
+
+    let reset_password_route = warp::path("reset-password")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and_then(auth::reset_password_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -362,6 +406,12 @@ async fn setup_tokio_runtime() {
         .or(edit_post_route)
         .or(analyze_query_route)
         .or(check_username_route)
+        .or(confirm_email_route)
+        .or(edit_user_route)
+        .or(send_email_confirmation_link_route)
+        .or(change_password_route)
+        .or(send_password_reset_route)
+        .or(reset_password_route)
         .boxed();
 
     let filter = routes
@@ -466,6 +516,9 @@ fn configure_scheduler() -> Scheduler<Utc> {
     });
     scheduler.every(clokwerk::Interval::Hours(1)).run(|| {
         task::submit_task("clear_old_object_locks", task::clear_old_object_locks);
+    });
+    scheduler.every(clokwerk::Interval::Minutes(30)).run(|| {
+        task::submit_task("clear_old_tokens", task::clear_old_tokens);
     });
 
     scheduler

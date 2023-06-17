@@ -1,0 +1,4 @@
+{% import "macros.html" as macros %}
+<h1>Welcome, {{ macros::display_user(user = recipient) }}</h1>
+<br/>
+<p>You have successfully signed up with filebroker. Click <a href="{{email_confirmation_link}}">this link</a> to verify your email address.</p>

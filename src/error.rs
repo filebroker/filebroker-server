@@ -38,6 +38,10 @@ pub enum Error {
     WeakPasswordError,
     #[error("Invalid username")]
     InvalidUserNameError,
+    #[error("The provided token is invalid: {0}")]
+    InvalidTokenError(String),
+    #[error("This email address is already confirmed for this user")]
+    EmailAlreadyConfirmedError,
 
     // 401
     #[error("invalid credentials")]
@@ -118,7 +122,9 @@ impl Error {
             | Error::InvalidCaptchaError
             | Error::CaptchaValidationError(_)
             | Error::WeakPasswordError
-            | Error::InvalidUserNameError => StatusCode::BAD_REQUEST,
+            | Error::InvalidUserNameError
+            | Error::InvalidTokenError(_)
+            | Error::EmailAlreadyConfirmedError => StatusCode::BAD_REQUEST,
             Error::DatabaseConnectionError
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -156,6 +162,8 @@ impl Error {
             Self::CaptchaValidationError(_) => 400_012,
             Self::WeakPasswordError => 400_013,
             Self::InvalidUserNameError => 400_014,
+            Self::InvalidTokenError(_) => 400_015,
+            Self::EmailAlreadyConfirmedError => 400_016,
 
             Self::InvalidCredentialsError => 401_001,
             Self::MissingAuthHeaderError => 401_002,

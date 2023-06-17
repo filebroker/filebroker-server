@@ -1,5 +1,6 @@
 use std::{path::Path, sync::Arc};
 
+use chrono::Utc;
 use diesel::{
     query_dsl::methods::FilterDsl,
     sql_types::{Array, VarChar},
@@ -19,11 +20,11 @@ use crate::{
         create_bucket,
         encode::{self, SUBMITTED_HLS_TRANSCODINGS, VIDEO_TRANSCODE_SEMAPHORE},
     },
-    diesel::ExpressionMethods,
+    diesel::{BoolExpressionMethods, ExpressionMethods},
     error::Error,
     model::{Broker, S3Object, User},
     retry_on_serialization_failure, run_serializable_transaction,
-    schema::{broker, registered_user},
+    schema::{broker, email_confirmation_token, refresh_token, registered_user},
     DbConnection,
 };
 
@@ -362,6 +363,29 @@ pub fn clear_old_object_locks(_tokio_handle: Handle) -> Result<(), Error> {
 
         Ok(())
     })?;
+
+    Ok(())
+}
+
+pub fn clear_old_tokens(_tokio_handle: Handle) -> Result<(), Error> {
+    let current_utc = Utc::now();
+    let mut connection = acquire_db_connection()?;
+
+    diesel::delete(refresh_token::table)
+        .filter(
+            refresh_token::expiry
+                .lt(&current_utc)
+                .or(refresh_token::invalidated),
+        )
+        .execute(&mut connection)?;
+
+    diesel::delete(email_confirmation_token::table)
+        .filter(
+            email_confirmation_token::expiry
+                .lt(&current_utc)
+                .or(email_confirmation_token::invalidated),
+        )
+        .execute(&mut connection)?;
 
     Ok(())
 }
