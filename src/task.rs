@@ -24,7 +24,7 @@ use crate::{
     error::Error,
     model::{Broker, S3Object, User},
     retry_on_serialization_failure, run_serializable_transaction,
-    schema::{broker, email_confirmation_token, refresh_token, registered_user},
+    schema::{broker, email_confirmation_token, one_time_password, refresh_token, registered_user},
     DbConnection,
 };
 
@@ -384,6 +384,14 @@ pub fn clear_old_tokens(_tokio_handle: Handle) -> Result<(), Error> {
             email_confirmation_token::expiry
                 .lt(&current_utc)
                 .or(email_confirmation_token::invalidated),
+        )
+        .execute(&mut connection)?;
+
+    diesel::delete(one_time_password::table)
+        .filter(
+            one_time_password::expiry
+                .lt(&current_utc)
+                .or(one_time_password::invalidated),
         )
         .execute(&mut connection)?;
 
