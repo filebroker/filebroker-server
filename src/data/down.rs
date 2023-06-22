@@ -1,3 +1,5 @@
+use std::cmp;
+
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use s3::Bucket;
 use warp::hyper;
@@ -24,8 +26,9 @@ pub fn get_object_response(
     let content_length;
     let content_range;
 
+    let size = object.size_bytes as u64;
     if let Some(range) = range {
-        let parsed_range = parse_range(&range, object.size_bytes as u64)?;
+        let parsed_range = parse_range(&range, size)?;
         // handle single range
         if parsed_range.len() == 1 {
             let parsed_range = parsed_range[0];
@@ -51,7 +54,7 @@ pub fn get_object_response(
             }
         } else {
             // handle multipart byteranges
-            check_range_overlap(&parsed_range)?;
+            check_range_overlap(&parsed_range, size)?;
             let mut rng = thread_rng();
             let boundary: String = (&mut rng)
                 .sample_iter(Alphanumeric)
@@ -127,10 +130,10 @@ fn parse_range(range: &str, size: u64) -> Result<Vec<(u64, u64)>, Error> {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
     if byte_ranges.len() != 1 {
-        return Err(Error::IllegalRangeError(format!(
-            "Invalid range header '{}'",
-            range
-        )));
+        return Err(Error::IllegalRangeError(
+            size,
+            format!("Invalid range header '{}'", range),
+        ));
     }
 
     let byte_ranges = byte_ranges[0];
@@ -145,34 +148,35 @@ fn parse_range(range: &str, size: u64) -> Result<Vec<(u64, u64)>, Error> {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>();
             if !(parts.len() == 1 || parts.len() == 2) {
-                return Err(Error::IllegalRangeError(format!(
-                    "Invalid range '{}'",
-                    byte_range
-                )));
+                return Err(Error::IllegalRangeError(
+                    size,
+                    format!("Invalid range '{}'", byte_range),
+                ));
             }
 
             let start = parts[0]
                 .parse::<u64>()
-                .map_err(|e| Error::IllegalRangeError(e.to_string()))?;
+                .map_err(|e| Error::IllegalRangeError(size, e.to_string()))?;
 
             let end = if parts.len() == 2 {
                 parts[1]
                     .parse::<u64>()
-                    .map_err(|e| Error::IllegalRangeError(e.to_string()))?
+                    .map(|end| cmp::min(end, size - 1))
+                    .map_err(|e| Error::IllegalRangeError(size, e.to_string()))?
             } else {
                 size - 1
             };
 
-            if start > size || end > size {
-                return Err(Error::IllegalRangeError(format!(
-                    "Range {} - {} invalid for size {}",
-                    start, end, size
-                )));
+            if start >= size || end >= size {
+                return Err(Error::IllegalRangeError(
+                    size,
+                    format!("Range {} - {} invalid for size {}", start, end, size),
+                ));
             } else if start > end {
-                return Err(Error::IllegalRangeError(format!(
-                    "Range {} - {} invalid",
-                    start, end
-                )));
+                return Err(Error::IllegalRangeError(
+                    size,
+                    format!("Range {} - {} invalid", start, end),
+                ));
             }
 
             Ok((start, end))
@@ -180,7 +184,7 @@ fn parse_range(range: &str, size: u64) -> Result<Vec<(u64, u64)>, Error> {
         .collect::<Result<Vec<_>, Error>>()
 }
 
-fn check_range_overlap(ranges: &[(u64, u64)]) -> Result<(), Error> {
+fn check_range_overlap(ranges: &[(u64, u64)], size: u64) -> Result<(), Error> {
     for i in 0..ranges.len() {
         for j in 0..ranges.len() {
             if i == j {
@@ -191,10 +195,10 @@ fn check_range_overlap(ranges: &[(u64, u64)]) -> Result<(), Error> {
             let range_j = ranges[j];
 
             if range_i.0 <= range_j.1 && range_i.1 >= range_j.0 {
-                return Err(Error::IllegalRangeError(format!(
-                    "Overlapping ranges {:?} and {:?}",
-                    range_i, range_j
-                )));
+                return Err(Error::IllegalRangeError(
+                    size,
+                    format!("Overlapping ranges {:?} and {:?}", range_i, range_j),
+                ));
             }
         }
     }

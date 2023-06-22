@@ -2,7 +2,12 @@ use std::fmt;
 
 use serde::Serialize;
 use thiserror::Error;
-use warp::{hyper::StatusCode, reject::Reject, Rejection, Reply};
+use warp::{
+    http::{header, response, Response},
+    hyper::StatusCode,
+    reject::Reject,
+    Rejection, Reply,
+};
 
 use crate::query::compiler;
 
@@ -60,8 +65,8 @@ pub enum Error {
     InaccessibleS3ObjectError(String),
 
     // 416
-    #[error("The provided byte range is invalid: {0}")]
-    IllegalRangeError(String),
+    #[error("The provided byte range is invalid: {1}")]
+    IllegalRangeError(u64, String),
 
     // 500
     #[error("Could not establish database connection")]
@@ -139,7 +144,7 @@ impl Error {
             | Error::IoError(_)
             | Error::InvalidUrlError(_)
             | Error::ReqwestError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Error::IllegalRangeError(_) => StatusCode::RANGE_NOT_SATISFIABLE,
+            Error::IllegalRangeError(..) => StatusCode::RANGE_NOT_SATISFIABLE,
             Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => {
                 StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
             }
@@ -173,7 +178,7 @@ impl Error {
             Self::InaccessibleObjectError(_) => 403_001,
             Self::InaccessibleS3ObjectError(_) => 403_002,
 
-            Self::IllegalRangeError(_) => 416_001,
+            Self::IllegalRangeError(..) => 416_001,
 
             Self::DatabaseConnectionError => 500_001,
             Self::QueryError(_) => 500_002,
@@ -192,6 +197,15 @@ impl Error {
 
             Self::S3ResponseError(_) => 600_001,
             Self::S3ResponseErrorMsg(..) => 600_002,
+        }
+    }
+
+    pub fn modify_response(&self, builder: response::Builder) -> response::Builder {
+        match self {
+            Self::IllegalRangeError(size, _) => {
+                builder.header(header::CONTENT_RANGE, format!("bytes */{size}"))
+            }
+            _ => builder,
         }
     }
 }
@@ -303,9 +317,18 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             compilation_errors,
         };
 
-        let json = warp::reply::json(&err_response);
+        let response_builder = Response::builder()
+            .status(status_code)
+            .header(header::CONTENT_TYPE, "application/json");
+        let response_builder = e.modify_response(response_builder);
+        let response = response_builder
+            .body(
+                serde_json::to_vec(&err_response)
+                    .map_err(|e| Error::SerialisationError(e.to_string()))?,
+            )
+            .map_err(|e| Error::SerialisationError(e.to_string()))?;
 
-        Ok(warp::reply::with_status(json, status_code))
+        Ok(response)
     } else {
         Err(err)
     }
