@@ -526,10 +526,11 @@ pub async fn generate_thumbnail(
 
     let content_type_is_video = content_type_is_video(&content_type);
     let content_type_is_image = content_type_is_image(&content_type);
+    let content_type_is_audio = content_type_is_audio(&content_type);
     let thumbnail_extension;
     let thumbnail_content_type;
 
-    if content_type_is_video || content_type_is_image {
+    if content_type_is_video || content_type_is_image || content_type_is_audio {
         let _locked_object_task_sentinel = if thumbnail_lock_acquired {
             None
         } else {
@@ -546,7 +547,7 @@ pub async fn generate_thumbnail(
             }
         };
 
-        let args = if content_type_is_video {
+        let args = if content_type_is_video || content_type_is_audio {
             thumbnail_extension = "webp";
             thumbnail_content_type = String::from("image/webp");
             vec![
@@ -696,6 +697,11 @@ fn content_type_is_video(content_type: &str) -> bool {
 #[inline]
 fn content_type_is_image(content_type: &str) -> bool {
     content_type.starts_with("image/")
+}
+
+#[inline]
+fn content_type_is_audio(content_type: &str) -> bool {
+    content_type.starts_with("audio/")
 }
 
 struct UploadedHlsStream {
