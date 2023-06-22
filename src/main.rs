@@ -453,13 +453,15 @@ async fn setup_tokio_runtime() {
             .allow_header("content-type")
             .allow_header("Authorization")
             .allow_header("Range")
+            .allow_header("if-modified-since")
             .allow_credentials(true)
             .allow_method(warp::http::Method::DELETE)
             .allow_method(warp::http::Method::GET)
             .allow_method(warp::http::Method::OPTIONS)
             .allow_method(warp::http::Method::PATCH)
             .allow_method(warp::http::Method::POST)
-            .allow_method(warp::http::Method::PATCH),
+            .allow_method(warp::http::Method::PATCH)
+            .allow_method(warp::http::Method::HEAD),
     );
 
     if CERT_PATH.is_some() && KEY_PATH.is_some() {
