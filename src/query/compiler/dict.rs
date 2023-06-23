@@ -190,6 +190,7 @@ lazy_static! {
                 write_expression_fn: |visitor, args, location, log| write_subquery_function_expr(
                     "registered_user",
                     "user_name",
+                    true,
                     visitor,
                     args,
                     location,
@@ -244,6 +245,7 @@ lazy_static! {
 fn write_subquery_function_expr(
     table: &str,
     column: &str,
+    is_string: bool,
     visitor: &mut QueryBuilderVisitor,
     args: &[Box<Node<dyn ExpressionNode>>],
     location: Location,
@@ -252,11 +254,23 @@ fn write_subquery_function_expr(
     visitor.write_buff("(SELECT pk FROM ");
     visitor.write_buff(table);
     visitor.write_buff(" WHERE ");
+    if is_string {
+        visitor.write_buff("LOWER(");
+    }
     visitor.write_buff(column);
+    if is_string {
+        visitor.write_buff(")");
+    }
     visitor.write_buff(" = ");
 
     if args.len() == 1 {
+        if is_string {
+            visitor.write_buff("LOWER(");
+        }
         args[0].accept(visitor, log);
+        if is_string {
+            visitor.write_buff(")");
+        }
     } else {
         log.errors.push(Error {
             location,
