@@ -36,13 +36,6 @@ lazy_static! {
             }
         ),
         (
-            "score",
-            Attribute {
-                selection_expression: String::from("post.score"),
-                return_type: Type::Number
-            }
-        ),
-        (
             "uploader",
             Attribute {
                 selection_expression: String::from("post.fk_create_user"),

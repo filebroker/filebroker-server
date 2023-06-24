@@ -553,7 +553,14 @@ impl QueryBuilderVisitor<'_> {
     ) {
         if !arguments.is_empty() {
             self.buffer = Some(String::new());
+            let is_string = arguments[0].node_type.get_return_type() == Type::String;
+            if is_string {
+                self.write_buff("LOWER(");
+            }
             arguments[0].accept(self, log);
+            if is_string {
+                self.write_buff(")");
+            }
             let expression = self.buffer.take().unwrap();
             let direction = if arguments.len() > 1 {
                 match arguments[1].node_type.downcast_ref::<StringLiteralNode>() {
