@@ -5,8 +5,8 @@ CREATE INDEX post_creation_timestamp_idx ON post(creation_timestamp);
 CREATE INDEX post_creation_timestamp_desc_idx ON post(creation_timestamp DESC NULLS LAST);
 CREATE INDEX post_title_idx ON post(LOWER(title));
 CREATE INDEX post_title_desc_idx ON post(LOWER(title) DESC NULLS LAST);
-CREATE INDEX post_description_idx ON post(LOWER(description));
-CREATE INDEX post_description_desc_idx ON post(LOWER(description) DESC NULLS LAST);
+CREATE INDEX post_description_idx ON post(LOWER(description)) WHERE LENGTH(description) < 2048;
+CREATE INDEX post_description_desc_idx ON post(LOWER(description) DESC NULLS LAST) WHERE LENGTH(description) < 2048;
 
 CREATE EXTENSION pg_trgm;
 
