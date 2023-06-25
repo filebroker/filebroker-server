@@ -39,6 +39,7 @@ pub struct QueryParametersFilter {
     pub page: Option<u32>,
     #[validate(length(min = 0, max = 1024))]
     pub query: Option<String>,
+    pub exclude_window: Option<bool>,
 }
 
 pub struct QueryParameters {
@@ -122,8 +123,8 @@ pub struct PostDetailed {
     pub score: i32,
     pub s3_object: Option<S3Object>,
     pub thumbnail_url: Option<String>,
-    pub prev_post_pk: Option<i32>,
-    pub next_post_pk: Option<i32>,
+    pub prev_post: Option<PostWindowObject>,
+    pub next_post: Option<PostWindowObject>,
     #[serde(rename = "is_public")]
     pub public: bool,
     pub public_edit: bool,
@@ -131,6 +132,12 @@ pub struct PostDetailed {
     pub is_editable: bool,
     pub tags: Vec<Tag>,
     pub group_access: Vec<PostGroupAccessDetailed>,
+}
+
+#[derive(Serialize)]
+pub struct PostWindowObject {
+    pk: i32,
+    page: u32,
 }
 
 pub async fn get_post_handler(
@@ -149,24 +156,58 @@ pub async fn get_post_handler(
 
     let (post, s3_object) = perms::load_post_secured(post_pk, &mut connection, user.as_ref())?;
 
+    let page = query_parameters_filter.page;
+    let exclude_window = query_parameters_filter.exclude_window;
     let query_parameters = prepare_query_parameters(&query_parameters_filter, &user);
-    let (prev_post_pk, next_post_pk) = match query_parameters_filter.query {
-        Some(query) => {
-            let sql_query =
-                compiler::compile_window_query(post.pk, query, query_parameters, &user)?;
-            let mut connection = acquire_db_connection()?;
-            let result = diesel::sql_query(sql_query)
-                .get_result::<PostWindowQueryObject>(&mut connection)
-                .optional()
-                .map_err(|e| Error::QueryError(e.to_string()))?;
+    let (prev_post, next_post) = if !exclude_window.unwrap_or(false) {
+        let sql_query = compiler::compile_window_query(
+            post.pk,
+            query_parameters_filter.query,
+            query_parameters,
+            &user,
+        )?;
+        let mut connection = acquire_db_connection()?;
+        let result = diesel::sql_query(sql_query)
+            .get_result::<PostWindowQueryObject>(&mut connection)
+            .optional()
+            .map_err(|e| Error::QueryError(e.to_string()))?;
 
-            if let Some(result) = result {
-                (result.prev, result.next)
-            } else {
-                (None, None)
+        if let Some(result) = result {
+            let limit = result.evaluated_limit;
+            if limit > MAX_LIMIT as i32 {
+                return Err(warp::reject::custom(Error::IllegalQueryInputError(
+                    format!("Limit '{}' exceeds maximum limit of {}.", limit, MAX_LIMIT),
+                )));
             }
+
+            let page = page.unwrap_or(0);
+            let row_number = result.row_number;
+            let offset = limit as i64 * page as i64;
+            let row_within_page = row_number - offset;
+
+            (
+                result.prev.map(|prev| PostWindowObject {
+                    pk: prev,
+                    page: if row_within_page == 1 {
+                        page.saturating_sub(1)
+                    } else {
+                        page
+                    },
+                }),
+                result.next.map(|next| PostWindowObject {
+                    pk: next,
+                    page: if row_within_page == limit as i64 {
+                        page + 1
+                    } else {
+                        page
+                    },
+                }),
+            )
+        } else {
+            (None, None)
         }
-        None => (None, None),
+    } else {
+        (None, None)
     };
 
     let is_editable = perms::is_post_editable(&mut connection, user.as_ref(), post_pk)?;
@@ -184,8 +225,8 @@ pub async fn get_post_handler(
         score: post.score,
         s3_object,
         thumbnail_url: post.thumbnail_url,
-        prev_post_pk,
-        next_post_pk,
+        prev_post,
+        next_post,
         public: post.public,
         public_edit: post.public_edit,
         description: post.description,

@@ -1,7 +1,7 @@
 #![allow(clippy::extra_unused_lifetimes)]
 
 use chrono::{offset::Utc, DateTime};
-use diesel::sql_types::{Bool, Int4, Int8, Nullable, Timestamptz, Varchar};
+use diesel::sql_types::{BigInt, Bool, Int4, Int8, Nullable, Timestamptz, Varchar};
 use diesel::{Associations, Identifiable, Insertable, Queryable};
 use serde::Serialize;
 
@@ -121,12 +121,16 @@ pub struct PostQueryObject {
 
 #[derive(Queryable, QueryableByName)]
 pub struct PostWindowQueryObject {
+    #[diesel(sql_type = BigInt)]
+    pub row_number: i64,
     #[diesel(sql_type = Nullable<Int4>)]
     pub prev: Option<i32>,
     #[diesel(sql_type = Int4)]
     pub pk: i32,
     #[diesel(sql_type = Nullable<Int4>)]
     pub next: Option<i32>,
+    #[diesel(sql_type = Int4)]
+    pub evaluated_limit: i32,
 }
 
 #[derive(AsChangeset)]

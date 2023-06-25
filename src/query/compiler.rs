@@ -104,29 +104,7 @@ pub fn compile_sql(
 
     apply_where_conditions(&mut sql_query, &mut where_expressions);
     apply_ordering(&mut sql_query, &mut query_parameters.ordering);
-
-    let page = query_parameters.page.unwrap_or(0);
-
-    // If the limit is not a valid u16 (e.g. if it's a binary expression '50 + 10'), the error is returned
-    // after the query has been evaluated, the limit is supplied to the LEAST function to protect agains large
-    // limits and enforce max limit
-    if let Ok(parsed_limit) = limit.parse::<u16>() {
-        if parsed_limit > MAX_LIMIT {
-            return Err(crate::Error::IllegalQueryInputError(format!(
-                "Limit '{}' exceeds maximum limit of {}.",
-                parsed_limit, MAX_LIMIT
-            )));
-        }
-    }
-
-    sql_query.push_str(" LIMIT LEAST(");
-    sql_query.push_str(limit);
-    sql_query.push_str(", ");
-    sql_query.push_str(MAX_LIMIT_STR);
-    sql_query.push_str(") OFFSET (");
-    sql_query.push_str(limit);
-    sql_query.push_str(") * ");
-    sql_query.push_str(&page.to_string());
+    apply_pagination(&mut sql_query, &query_parameters, limit, false)?;
 
     log::debug!(
         "Compiled query [{}] (in {} microseconds) to sql {}",
@@ -142,28 +120,49 @@ pub fn compile_sql(
 
 pub fn compile_window_query(
     post_pk: i32,
-    query: String,
+    query: Option<String>,
     mut query_parameters: QueryParameters,
     user: &Option<User>,
 ) -> Result<String, crate::Error> {
     let (source_query, instant) = if log::log_enabled!(log::Level::Debug) {
-        (Some(query.clone()), Some(std::time::Instant::now()))
+        (query.clone(), Some(std::time::Instant::now()))
     } else {
         (None, None)
     };
 
-    let (ctes, mut where_expressions) = compile_expressions(query, &mut query_parameters)?;
+    let (ctes, mut where_expressions) = if let Some(query) = query {
+        compile_expressions(query, &mut query_parameters)?
+    } else {
+        (HashMap::new(), Vec::new())
+    };
 
     let mut sql_query = String::new();
     apply_ctes(&mut sql_query, &ctes)?;
 
-    sql_query.push_str(" SELECT * FROM (SELECT lag(pk) OVER(");
+    sql_query.push_str("SELECT * FROM (SELECT ROW_NUMBER() OVER(");
     apply_ordering(&mut sql_query, &mut query_parameters.ordering);
-    sql_query.push_str(") AS prev, pk, lead(pk) OVER(");
+    sql_query.push_str(" ) AS row_number, lag(pk) OVER(");
     apply_ordering(&mut sql_query, &mut query_parameters.ordering);
-    sql_query.push_str(") AS next FROM post");
+    sql_query.push_str(" ) AS prev, pk, lead(pk) OVER(");
+    apply_ordering(&mut sql_query, &mut query_parameters.ordering);
+    sql_query.push_str(" ) AS next, ");
+
+    // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
+    // since the effective limit is needed to calculate the number of pages
+    let limit = query_parameters
+        .limit
+        .as_deref()
+        .unwrap_or(DEFAULT_LIMIT_STR);
+
+    sql_query.push_str(limit);
+    sql_query.push_str(" AS evaluated_limit FROM post");
+
     perms::append_secure_query_condition(&mut where_expressions, user);
     apply_where_conditions(&mut sql_query, &mut where_expressions);
+    apply_ordering(&mut sql_query, &mut query_parameters.ordering);
+
+    apply_pagination(&mut sql_query, &query_parameters, limit, true)?;
+
     sql_query.push_str(") sub WHERE pk = ");
     sql_query.push_str(&post_pk.to_string());
 
@@ -299,4 +298,56 @@ pub fn apply_ordering(sql_query: &mut String, ordering: &mut Vec<Ordering>) {
             }
         }
     }
+}
+
+pub fn apply_pagination(
+    sql_query: &mut String,
+    query_parameters: &QueryParameters,
+    limit: &str,
+    include_window: bool,
+) -> Result<(), crate::Error> {
+    let page = query_parameters.page.unwrap_or(0);
+
+    // If the limit is not a valid u16 (e.g. if it's a binary expression '50 + 10'), the error is returned
+    // after the query has been evaluated, the limit is supplied to the LEAST function to protect agains large
+    // limits and enforce max limit
+    if let Ok(parsed_limit) = limit.parse::<u16>() {
+        if parsed_limit > MAX_LIMIT {
+            return Err(crate::Error::IllegalQueryInputError(format!(
+                "Limit '{}' exceeds maximum limit of {}.",
+                parsed_limit, MAX_LIMIT
+            )));
+        }
+    }
+
+    // for window queries, increase the limit by 2 and subtract 1 from the offset
+    // to include the last post from the previous page and the first post from the next page
+    sql_query.push_str(" LIMIT LEAST(");
+    if include_window {
+        sql_query.push('(');
+        sql_query.push_str(limit);
+        sql_query.push_str(" + 2)");
+    } else {
+        sql_query.push_str(limit);
+    }
+    sql_query.push_str(", ");
+    if include_window {
+        sql_query.push('(');
+        sql_query.push_str(MAX_LIMIT_STR);
+        sql_query.push_str(" + 2)");
+    } else {
+        sql_query.push_str(MAX_LIMIT_STR);
+    }
+    sql_query.push_str(") OFFSET (");
+    if include_window {
+        sql_query.push_str("GREATEST(((");
+    }
+    sql_query.push_str(limit);
+    sql_query.push_str(") * ");
+    sql_query.push_str(&page.to_string());
+    if include_window {
+        sql_query.push_str(") - 1, 0))");
+    }
+
+    Ok(())
 }
