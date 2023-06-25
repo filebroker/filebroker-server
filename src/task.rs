@@ -119,6 +119,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
             AND hls_master_playlist IS NULL
             AND LOWER(mime_type) LIKE 'video/%'
             AND hls_locked_at IS NULL
+            AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)
             AND EXISTS(SELECT * FROM broker WHERE pk = obj.fk_broker AND hls_enabled)
             AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
             AND NOT EXISTS(SELECT * FROM hls_stream WHERE stream_playlist = obj.object_key OR stream_file = obj.object_key OR master_playlist = obj.object_key)
@@ -228,8 +229,10 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
             SELECT * FROM s3_object AS obj
             WHERE NOT thumbnail_disabled
             AND thumbnail_object_key IS NULL
-            AND (LOWER(mime_type) LIKE 'video/%' OR LOWER(mime_type) LIKE 'image/%')
+            AND (LOWER(mime_type) LIKE 'video/%' OR LOWER(mime_type) LIKE 'image/%' OR LOWER(mime_type) LIKE 'audio/%')
             AND thumbnail_locked_at IS NULL
+            AND NOT (object_key LIKE 'thumb_%')
+            AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)
             AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
             AND NOT EXISTS(SELECT * FROM hls_stream WHERE stream_playlist = obj.object_key OR stream_file = obj.object_key OR master_playlist = obj.object_key)
             AND (thumbnail_fail_count IS NULL OR thumbnail_fail_count < 3)
