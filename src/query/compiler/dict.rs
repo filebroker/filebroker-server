@@ -25,28 +25,36 @@ lazy_static! {
             "creation_timestamp",
             Attribute {
                 selection_expression: String::from("post.creation_timestamp"),
-                return_type: Type::DateTime
+                return_type: Type::DateTime,
+                allow_sorting: true,
+                nullable: false
             }
         ),
         (
             "title",
             Attribute {
                 selection_expression: String::from("post.title"),
-                return_type: Type::String
+                return_type: Type::String,
+                allow_sorting: true,
+                nullable: true,
             }
         ),
         (
             "uploader",
             Attribute {
                 selection_expression: String::from("post.fk_create_user"),
-                return_type: Type::Number
+                return_type: Type::Number,
+                allow_sorting: true,
+                nullable: false
             }
         ),
         (
             "description",
             Attribute {
                 selection_expression: String::from("post.description"),
-                return_type: Type::String
+                return_type: Type::String,
+                allow_sorting: false,
+                nullable: true
             }
         )
     ]);
@@ -55,6 +63,8 @@ lazy_static! {
 pub struct Attribute {
     pub selection_expression: String,
     pub return_type: Type,
+    pub allow_sorting: bool,
+    pub nullable: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -212,7 +222,7 @@ lazy_static! {
                     parameter_type: ParameterType::Object(Type::Number)
                 }],
                 accept_arguments,
-                visit_query_builder: |visitor, arguments, log| visitor
+                visit_query_builder: |visitor, arguments, log, _| visitor
                     .visit_limit_modifier(arguments, log)
             }
         ),
@@ -228,8 +238,16 @@ lazy_static! {
                     }
                 ],
                 accept_arguments: accept_sort_modifier_arguments,
-                visit_query_builder: |visitor, arguments, log| visitor
-                    .visit_sort_modifier(arguments, log)
+                visit_query_builder: |visitor, arguments, log, location| visitor
+                    .visit_sort_modifier(arguments, log, location)
+            }
+        ),
+        (
+            "randomise",
+            Modifier {
+                params: vec![],
+                accept_arguments,
+                visit_query_builder: |visitor, _, _, _| visitor.query_parameters.randomise = true
             }
         )
     ]);
@@ -302,7 +320,7 @@ pub struct Modifier {
     pub params: Vec<Parameter>,
     pub accept_arguments: fn(&[Parameter], &[Box<Node<dyn ExpressionNode>>], Location, &mut Log),
     pub visit_query_builder:
-        fn(&mut QueryBuilderVisitor, &[Box<Node<dyn ExpressionNode>>], &mut Log),
+        fn(&mut QueryBuilderVisitor, &[Box<Node<dyn ExpressionNode>>], &mut Log, Location),
 }
 
 fn accept_sort_modifier_arguments(
@@ -321,16 +339,26 @@ fn accept_sort_modifier_arguments(
 
     let attr_arg = &arguments[0];
     let attr_arg_location = attr_arg.location;
-    if attr_arg.node_type.downcast_ref::<AttributeNode>().is_none()
-        && attr_arg.node_type.get_return_type() != Type::Number
-    {
-        log.errors.push(Error {
-            location: attr_arg_location,
-            msg: format!(
-                "Expected argument to be an attribute or number but got expression {:?}",
-                attr_arg
-            ),
-        });
+    match attr_arg.node_type.downcast_ref::<AttributeNode>() {
+        Some(attribute_node) => {
+            if let Some(attribute) = ATTRIBUTES.get(attribute_node.identifier.as_str()) {
+                if !attribute.allow_sorting {
+                    log.errors.push(Error {
+                        location: attr_arg_location,
+                        msg: format!("Attribute {} is not sortable", &attribute_node.identifier),
+                    });
+                }
+            }
+        }
+        None => {
+            log.errors.push(Error {
+                location: attr_arg_location,
+                msg: format!(
+                    "Expected argument to be an attribute but got expression {:?}",
+                    &attr_arg.node_type
+                ),
+            });
+        }
     }
 
     if arguments.len() == 2 {

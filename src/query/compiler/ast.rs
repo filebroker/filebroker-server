@@ -518,7 +518,7 @@ impl Visitor for SemanticAnalysisVisitor {
 pub struct QueryBuilderVisitor<'p> {
     pub ctes: HashMap<String, Cte>,
     pub where_expressions: Vec<String>,
-    query_parameters: &'p mut QueryParameters,
+    pub query_parameters: &'p mut QueryParameters,
     buffer: Option<String>,
 }
 
@@ -550,10 +550,26 @@ impl QueryBuilderVisitor<'_> {
         &mut self,
         arguments: &[Box<Node<dyn ExpressionNode>>],
         log: &mut Log,
+        location: Location,
     ) {
         if !arguments.is_empty() {
+            if self.query_parameters.ordering.len() >= 2 {
+                log.errors.push(Error {
+                    location,
+                    msg: String::from("Cannot sort by more than two attributes"),
+                });
+            }
             self.buffer = Some(String::new());
-            let is_string = arguments[0].node_type.get_return_type() == Type::String;
+            let attr_arg = &arguments[0];
+            let is_string = attr_arg.node_type.get_return_type() == Type::String;
+            let nullable = match attr_arg.node_type.downcast_ref::<AttributeNode>() {
+                Some(attr_arg) => dict::ATTRIBUTES
+                    .get(attr_arg.identifier.as_str())
+                    .map(|attr| attr.nullable)
+                    .unwrap_or(true),
+                None => true,
+            };
+
             if is_string {
                 self.write_buff("LOWER(");
             }
@@ -579,6 +595,7 @@ impl QueryBuilderVisitor<'_> {
             self.query_parameters.ordering.push(Ordering {
                 expression,
                 direction,
+                nullable,
             });
         }
     }
@@ -682,6 +699,22 @@ impl Visitor for QueryBuilderVisitor<'_> {
             self.write_buff(" LOWER(");
             right.accept(self, log);
             self.write_buff(")");
+
+            // when using the equals operator on post.description, add the LENGTH(description) < 2048 condition in order to use index post_description_idx
+            // for fuzzy equals, the post_description_gin_idx GIN index may be used
+
+            fn is_description_attribute(node: &Node<dyn ExpressionNode>) -> bool {
+                match node.node_type.downcast_ref::<AttributeNode>() {
+                    Some(attribute_node) => attribute_node.identifier == "description",
+                    None => false,
+                }
+            }
+
+            if op == Operator::Equal
+                && (is_description_attribute(left) || is_description_attribute(right))
+            {
+                self.write_buff(" AND LENGTH(description) < 2048");
+            }
         } else {
             left.accept(self, log);
             self.write_buff(" ");
@@ -777,11 +810,11 @@ impl Visitor for QueryBuilderVisitor<'_> {
         &mut self,
         modifier_node: &ModifierNode,
         log: &mut Log,
-        _location: Location,
+        location: Location,
     ) {
         let identifier: &str = &modifier_node.identifier;
         if let Some(modifier) = dict::MODIFIERS.get(identifier) {
-            (modifier.visit_query_builder)(self, &modifier_node.arguments, log);
+            (modifier.visit_query_builder)(self, &modifier_node.arguments, log, location);
         }
     }
 

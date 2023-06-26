@@ -13,7 +13,9 @@ use super::QueryParameters;
 use crate::{
     model::User,
     perms,
-    query::{Direction, Ordering, DEFAULT_LIMIT_STR, MAX_LIMIT, MAX_LIMIT_STR},
+    query::{
+        Direction, Ordering, DEFAULT_LIMIT_STR, MAX_LIMIT, MAX_LIMIT_STR, MAX_RANDOMISE_LIMIT_STR,
+    },
 };
 
 pub mod ast;
@@ -78,19 +80,35 @@ pub fn compile_sql(
         sql_query.push_str(", ");
     }
 
-    // Only get a full count of the result set if the number of results is below 100000, the count query that
-    // checks if there are more than 100000 results does not apply the post permission conditions to speed up
-    // the query, that means the effective result size may be smaller.
-    sql_query.push_str("countCte AS (SELECT CASE WHEN (SELECT COUNT(*) FROM (SELECT pk FROM post");
-    apply_where_conditions(&mut sql_query, &mut where_expressions);
-    sql_query.push_str(
-        " LIMIT 100000) limitedPks) < 100000 THEN (SELECT COUNT(*) FROM (SELECT pk FROM post",
-    );
-    perms::append_secure_query_condition(&mut where_expressions, user);
-    apply_where_conditions(&mut sql_query, &mut where_expressions);
-    sql_query.push_str(") pks) END AS full_count)");
+    if !query_parameters.randomise {
+        // Only get a full count of the result set if the number of results is below 100000, the count query that
+        // checks if there are more than 100000 results does not apply the post permission conditions to speed up
+        // the query, that means the effective result size may be smaller.
+        sql_query
+            .push_str("countCte AS (SELECT CASE WHEN (SELECT COUNT(*) FROM (SELECT pk FROM post");
+        apply_where_conditions(&mut sql_query, &mut where_expressions);
+        sql_query.push_str(
+            " LIMIT 100000) limitedPks) < 100000 THEN (SELECT COUNT(*) FROM (SELECT pk FROM post",
+        );
+        perms::append_secure_query_condition(&mut where_expressions, user);
+        apply_where_conditions(&mut sql_query, &mut where_expressions);
+        sql_query.push_str(") pks) END AS full_count)");
+    } else {
+        sql_query.push_str("reducedRandomSet AS (SELECT pk FROM post");
+        perms::append_secure_query_condition(&mut where_expressions, user);
+        apply_where_conditions(&mut sql_query, &mut where_expressions);
+        apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
+        sql_query.push_str(" LIMIT ");
+        sql_query.push_str(MAX_RANDOMISE_LIMIT_STR);
+        sql_query.push(')');
+    }
 
-    sql_query.push_str(" SELECT *, obj.thumbnail_object_key, (SELECT full_count FROM countCte), ");
+    sql_query.push_str(" SELECT *, obj.thumbnail_object_key, ");
+    if !query_parameters.randomise {
+        sql_query.push_str("(SELECT full_count FROM countCte), ");
+    } else {
+        sql_query.push_str("NULL AS full_count, ");
+    }
     // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
     // since the effective limit is needed to calculate the number of pages
     let limit = query_parameters
@@ -102,8 +120,12 @@ pub fn compile_sql(
         " AS evaluated_limit FROM post LEFT JOIN s3_object obj ON obj.object_key = post.s3_object",
     );
 
-    apply_where_conditions(&mut sql_query, &mut where_expressions);
-    apply_ordering(&mut sql_query, &mut query_parameters.ordering);
+    if query_parameters.randomise {
+        sql_query.push_str(" WHERE pk in(SELECT pk FROM reducedRandomSet) ORDER BY RANDOM()");
+    } else {
+        apply_where_conditions(&mut sql_query, &mut where_expressions);
+        apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
+    }
     apply_pagination(&mut sql_query, &query_parameters, limit, false)?;
 
     log::debug!(
@@ -139,32 +161,54 @@ pub fn compile_window_query(
     let mut sql_query = String::new();
     apply_ctes(&mut sql_query, &ctes)?;
 
-    sql_query.push_str("SELECT * FROM (SELECT ROW_NUMBER() OVER(");
-    apply_ordering(&mut sql_query, &mut query_parameters.ordering);
-    sql_query.push_str(" ) AS row_number, lag(pk) OVER(");
-    apply_ordering(&mut sql_query, &mut query_parameters.ordering);
-    sql_query.push_str(" ) AS prev, pk, lead(pk) OVER(");
-    apply_ordering(&mut sql_query, &mut query_parameters.ordering);
-    sql_query.push_str(" ) AS next, ");
+    if !query_parameters.randomise {
+        sql_query.push_str("SELECT * FROM (SELECT ROW_NUMBER() OVER(");
+        apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
+        sql_query.push_str(" ) AS row_number, lag(pk) OVER(");
+        apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
+        sql_query.push_str(" ) AS prev, pk, lead(pk) OVER(");
+        apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
+        sql_query.push_str(" ) AS next, ");
 
-    // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
-    // since the effective limit is needed to calculate the number of pages
-    let limit = query_parameters
-        .limit
-        .as_deref()
-        .unwrap_or(DEFAULT_LIMIT_STR);
+        // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
+        // since the effective limit is needed to calculate the number of pages
+        let limit = query_parameters
+            .limit
+            .as_deref()
+            .unwrap_or(DEFAULT_LIMIT_STR);
 
-    sql_query.push_str(limit);
-    sql_query.push_str(" AS evaluated_limit FROM post");
+        sql_query.push_str(limit);
+        sql_query.push_str(" AS evaluated_limit FROM post");
 
-    perms::append_secure_query_condition(&mut where_expressions, user);
-    apply_where_conditions(&mut sql_query, &mut where_expressions);
-    apply_ordering(&mut sql_query, &mut query_parameters.ordering);
+        perms::append_secure_query_condition(&mut where_expressions, user);
+        apply_where_conditions(&mut sql_query, &mut where_expressions);
+        apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
 
-    apply_pagination(&mut sql_query, &query_parameters, limit, true)?;
+        apply_pagination(&mut sql_query, &query_parameters, limit, true)?;
 
-    sql_query.push_str(") sub WHERE pk = ");
-    sql_query.push_str(&post_pk.to_string());
+        sql_query.push_str(") sub WHERE pk = ");
+        sql_query.push_str(&post_pk.to_string());
+    } else {
+        if ctes.is_empty() {
+            sql_query.push_str("WITH ");
+        } else {
+            sql_query.push_str(", ");
+        }
+
+        sql_query.push_str("reducedRandomSet AS (SELECT pk FROM post");
+        perms::append_secure_query_condition(&mut where_expressions, user);
+        apply_where_conditions(&mut sql_query, &mut where_expressions);
+        apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
+        sql_query.push_str(" LIMIT ");
+        sql_query.push_str(MAX_RANDOMISE_LIMIT_STR);
+        sql_query.push(')');
+
+        sql_query.push_str(" SELECT 1::BIGINT AS row_number, NULL AS prev, ");
+        sql_query.push_str(&post_pk.to_string());
+        sql_query.push_str(" AS pk, pk AS next, 1 AS evaluated_limit FROM post WHERE pk != ");
+        sql_query.push_str(&post_pk.to_string());
+        sql_query.push_str(" AND pk IN(SELECT pk FROM reducedRandomSet) ORDER BY RANDOM() LIMIT 1");
+    }
 
     log::debug!(
         "Compiled window query for [{}] (in {} microseconds) to sql {}",
@@ -276,11 +320,27 @@ fn apply_where_conditions(sql_query: &mut String, where_expressions: &mut Vec<St
     }
 }
 
-pub fn apply_ordering(sql_query: &mut String, ordering: &mut Vec<Ordering>) {
-    ordering.push(Ordering {
-        expression: String::from("pk"),
-        direction: Direction::Descending,
-    });
+pub fn apply_ordering(
+    sql_query: &mut String,
+    ordering: &mut Vec<Ordering>,
+) -> Result<(), crate::Error> {
+    let ordered_by_pk = ordering
+        .last()
+        .map(|ord| ord.expression == "post.pk")
+        .unwrap_or(false);
+    if (ordered_by_pk && ordering.len() > 3) || (!ordered_by_pk && ordering.len() > 2) {
+        return Err(crate::Error::IllegalQueryInputError(String::from(
+            "Cannot sort by more than two attributes",
+        )));
+    }
+    // always sort by pk desc last for consistent sorting
+    if !ordered_by_pk {
+        ordering.push(Ordering {
+            expression: String::from("post.pk"),
+            direction: Direction::Descending,
+            nullable: false,
+        });
+    }
 
     let ordering_len = ordering.len();
     if ordering_len > 0 {
@@ -289,8 +349,20 @@ pub fn apply_ordering(sql_query: &mut String, ordering: &mut Vec<Ordering>) {
             sql_query.push_str(&ordering.expression);
 
             match ordering.direction {
-                Direction::Ascending => sql_query.push_str(" ASC NULLS LAST"),
-                Direction::Descending => sql_query.push_str(" DESC NULLS LAST"),
+                Direction::Ascending => {
+                    if ordering.nullable {
+                        sql_query.push_str(" ASC NULLS LAST")
+                    } else {
+                        sql_query.push_str(" ASC")
+                    }
+                }
+                Direction::Descending => {
+                    if ordering.nullable {
+                        sql_query.push_str(" DESC NULLS LAST")
+                    } else {
+                        sql_query.push_str(" DESC")
+                    }
+                }
             }
 
             if i < ordering_len - 1 {
@@ -298,6 +370,8 @@ pub fn apply_ordering(sql_query: &mut String, ordering: &mut Vec<Ordering>) {
             }
         }
     }
+
+    Ok(())
 }
 
 pub fn apply_pagination(

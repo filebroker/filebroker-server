@@ -1,12 +1,39 @@
-DROP INDEX post_pk_desc_idx;
 DROP INDEX post_fk_create_user_idx;
 DROP INDEX post_fk_create_user_desc_idx;
+
 DROP INDEX post_creation_timestamp_idx;
 DROP INDEX post_creation_timestamp_desc_idx;
+
+DROP INDEX post_fk_create_user_creation_timestamp_idx;
+DROP INDEX post_fk_create_user_desc_creation_timestamp_idx;
+DROP INDEX post_fk_create_user_creation_timestamp_desc_idx;
+DROP INDEX post_fk_create_user_desc_creation_timestamp_desc_idx;
+DROP INDEX post_creation_timestamp_fk_create_user_idx;
+DROP INDEX post_creation_timestamp_fk_create_user_desc_idx;
+DROP INDEX post_creation_timestamp_desc_fk_create_user_idx;
+DROP INDEX post_creation_timestamp_desc_fk_create_user_desc_idx;
+
 DROP INDEX post_title_idx;
 DROP INDEX post_title_desc_idx;
+
+DROP INDEX post_title_creation_timestamp_idx;
+DROP INDEX post_title_desc_creation_timestamp_idx;
+DROP INDEX post_title_creation_timestamp_desc_idx;
+DROP INDEX post_title_desc_creation_timestamp_desc_idx;
+DROP INDEX post_creation_timestamp_title_idx;
+DROP INDEX post_creation_timestamp_title_desc_idx;
+DROP INDEX post_creation_timestamp_desc_title_idx;
+DROP INDEX post_creation_timestamp_desc_title_desc_idx;
+DROP INDEX post_title_fk_create_user_idx;
+DROP INDEX post_title_fk_create_user_desc_idx;
+DROP INDEX post_title_desc_fk_create_user_idx;
+DROP INDEX post_title_desc_fk_create_user_desc_idx;
+DROP INDEX post_fk_create_user_title_idx;
+DROP INDEX post_fk_create_user_desc_title_idx;
+DROP INDEX post_fk_create_user_title_desc_idx;
+DROP INDEX post_fk_create_user_desc_title_desc_idx;
+
 DROP INDEX post_description_idx;
-DROP INDEX post_description_desc_idx;
 
 DROP INDEX post_title_gin_idx;
 DROP INDEX post_description_gin_idx;
