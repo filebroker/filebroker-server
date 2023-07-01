@@ -577,7 +577,16 @@ fn load_private_key() -> io::Result<PrivateKey> {
     let keyfile = fs::File::open(KEY_PATH.as_ref().unwrap())?;
     let mut reader = io::BufReader::new(keyfile);
 
-    let keys = rustls_pemfile::rsa_private_keys(&mut reader)?;
+    let mut keys = Vec::new();
+    loop {
+        match rustls_pemfile::read_one(&mut reader)? {
+            None => break,
+            Some(rustls_pemfile::Item::RSAKey(key)) => keys.push(key),
+            Some(rustls_pemfile::Item::PKCS8Key(key)) => keys.push(key),
+            Some(rustls_pemfile::Item::ECKey(key)) => keys.push(key),
+            _ => {}
+        }
+    }
     if keys.len() != 1 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
