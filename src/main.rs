@@ -12,12 +12,36 @@ use diesel::{
 };
 use dotenvy::dotenv;
 use error::{Error, TransactionRuntimeError};
+use futures::{Future, StreamExt, TryFuture};
 use lazy_static::lazy_static;
 use mime::Mime;
 use query::QueryParametersFilter;
-use std::{str::FromStr, thread::JoinHandle};
+use std::{
+    convert::Infallible, fs, future::ready, io, str::FromStr, sync::Arc, thread::JoinHandle,
+};
+use tls_listener::TlsListener;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    runtime::Runtime,
+};
+use tokio_rustls::{
+    rustls::{Certificate, PrivateKey, ServerConfig},
+    TlsAcceptor,
+};
 use url::Url;
-use warp::{host::Authority, Filter};
+use warp::{
+    host::Authority,
+    hyper::{
+        self,
+        server::{
+            accept::{self, Accept},
+            conn::AddrIncoming,
+        },
+        service::Service,
+        Body, Request, Server,
+    },
+    Filter, Reply,
+};
 
 use crate::util::OptFmt;
 
@@ -198,7 +222,7 @@ pub fn retry_on_serialization_failure(e: diesel::result::Error) -> TransactionRu
 }
 
 /// Start a tokio runtime that runs a warp server.
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn setup_tokio_runtime() {
     let login_route = warp::path("login")
         .and(warp::post())
@@ -464,16 +488,104 @@ async fn setup_tokio_runtime() {
             .allow_method(warp::http::Method::HEAD),
     );
 
+    let incoming =
+        AddrIncoming::bind(&([0, 0, 0, 0], *PORT).into()).expect("Failed to bind server to port");
     if CERT_PATH.is_some() && KEY_PATH.is_some() {
-        warp::serve(filter)
-            .tls()
-            .cert_path(CERT_PATH.as_ref().unwrap())
-            .key_path(KEY_PATH.as_ref().unwrap())
-            .run(([0, 0, 0, 0], *PORT))
-            .await;
+        let certs = load_certs().expect("Failed to load TLS cert");
+        let key = load_private_key().expect("Failed to load TLS private key");
+        let server_config = ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .expect("Failed to build TLS ServerConfig");
+        let acceptor: TlsAcceptor = Arc::new(server_config).into();
+        let incoming = TlsListener::new(acceptor, incoming).filter(|conn| {
+            if let Err(e) = conn {
+                log::error!("Failed to open TLS connection: {e}");
+                ready(false)
+            } else {
+                ready(true)
+            }
+        });
+        log::info!("Enabled TLS");
+        run_server(accept::from_stream(incoming), filter)
+            .await
+            .expect("Failed running server");
     } else {
-        warp::serve(filter).run(([0, 0, 0, 0], *PORT)).await;
+        run_server(incoming, filter)
+            .await
+            .expect("Failed running server");
     }
+}
+
+#[derive(Clone)]
+pub struct HttpRequestExecutor {
+    worker_rt: Arc<Runtime>,
+}
+
+impl<F> hyper::rt::Executor<F> for HttpRequestExecutor
+where
+    F: Future + Send + 'static,
+    <F as futures::Future>::Output: Send + 'static,
+{
+    fn execute(&self, fut: F) {
+        self.worker_rt.spawn(fut);
+    }
+}
+
+async fn run_server<I, F>(incoming: I, filter: F) -> Result<(), warp::hyper::Error>
+where
+    I: Accept,
+    I::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    I::Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    F: Filter + Clone + Send + 'static,
+    <F::Future as TryFuture>::Ok: Reply,
+{
+    let http_worker_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to start http server worker runtime");
+    let warp_service = warp::service(filter);
+    let service_fn = hyper::service::make_service_fn(move |_| {
+        let warp_service = warp_service.clone();
+        async move {
+            let service = hyper::service::service_fn(move |req: Request<Body>| {
+                let mut warp_service = warp_service.clone();
+                async move { warp_service.call(req).await }
+            });
+            Ok::<_, Infallible>(service)
+        }
+    });
+    let server = Server::builder(incoming)
+        .executor(HttpRequestExecutor {
+            worker_rt: Arc::new(http_worker_rt),
+        })
+        .serve(service_fn);
+    log::info!("Server listening on port {}", *PORT);
+    server.await
+}
+
+fn load_certs() -> io::Result<Vec<Certificate>> {
+    let certfile = fs::File::open(CERT_PATH.as_ref().unwrap())?;
+    let mut reader = io::BufReader::new(certfile);
+
+    let certs = rustls_pemfile::certs(&mut reader)?;
+    Ok(certs.into_iter().map(Certificate).collect())
+}
+
+fn load_private_key() -> io::Result<PrivateKey> {
+    let keyfile = fs::File::open(KEY_PATH.as_ref().unwrap())?;
+    let mut reader = io::BufReader::new(keyfile);
+
+    let keys = rustls_pemfile::rsa_private_keys(&mut reader)?;
+    if keys.len() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            String::from("Expected a single private key"),
+        ));
+    }
+
+    Ok(PrivateKey(keys[0].clone()))
 }
 
 fn setup_logger() {
