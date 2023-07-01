@@ -65,6 +65,8 @@ macro_rules! get_group_membership_condition {
     };
 }
 
+pub(crate) use get_group_membership_condition;
+
 macro_rules! get_group_access_condition {
     ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
         $fk.eq($target).and(
@@ -76,6 +78,8 @@ macro_rules! get_group_access_condition {
         )
     };
 }
+
+pub(crate) use get_group_access_condition;
 
 macro_rules! get_group_access_or_public_condition {
     ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
@@ -90,6 +94,8 @@ macro_rules! get_group_access_or_public_condition {
     };
 }
 
+pub(crate) use get_group_access_or_public_condition;
+
 macro_rules! get_group_access_write_condition {
     ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
         $fk.eq($target).and($table::write).and(
@@ -101,6 +107,8 @@ macro_rules! get_group_access_write_condition {
         )
     };
 }
+
+pub(crate) use get_group_access_write_condition;
 
 pub fn load_post_secured<C: Connection<Backend = Pg> + LoadConnection>(
     post_pk: i32,
@@ -211,15 +219,7 @@ pub fn get_user_groups_secured<C: Connection<Backend = Pg> + LoadConnection>(
 ) -> Result<Vec<UserGroup>, Error> {
     let user_pk = user.map(|u| u.pk);
     user_group::table
-        .filter(
-            not(user_group::hidden).or(user_group::fk_owner.nullable().eq(user_pk).or(exists(
-                user_group_membership::table.filter(
-                    user_group_membership::fk_group
-                        .eq(user_group::pk)
-                        .and(user_group_membership::fk_user.nullable().eq(user_pk)),
-                ),
-            ))),
-        )
+        .filter(not(user_group::hidden).or(get_group_membership_condition!(user_pk)))
         .load::<UserGroup>(connection)
         .map_err(|e| Error::QueryError(e.to_string()))
 }
@@ -229,15 +229,7 @@ pub fn get_current_user_groups<C: Connection<Backend = Pg> + LoadConnection>(
     user: &User,
 ) -> Result<Vec<UserGroup>, Error> {
     user_group::table
-        .filter(
-            user_group::fk_owner.nullable().eq(user.pk).or(exists(
-                user_group_membership::table.filter(
-                    user_group_membership::fk_group
-                        .eq(user_group::pk)
-                        .and(user_group_membership::fk_user.nullable().eq(user.pk)),
-                ),
-            )),
-        )
+        .filter(get_group_membership_condition!(user.pk))
         .load::<UserGroup>(connection)
         .map_err(|e| Error::QueryError(e.to_string()))
 }

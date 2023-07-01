@@ -218,8 +218,8 @@ pub async fn get_post_handler(
 
     let is_editable = perms::is_post_editable(&mut connection, user.as_ref(), post_pk)?;
     let tags = post::get_post_tags(post_pk, &mut connection).map_err(Error::from)?;
-    let group_access =
-        post::get_post_group_access(post_pk, &mut connection).map_err(Error::from)?;
+    let group_access = post::get_post_group_access(post_pk, user.as_ref(), &mut connection)
+        .map_err(Error::from)?;
 
     Ok(warp::reply::json(&PostDetailed {
         pk: post.pk,

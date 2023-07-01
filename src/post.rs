@@ -6,7 +6,7 @@ use diesel::{
     dsl::{exists, not},
     pg::Pg,
     sql_types::{Array, Integer},
-    BoolExpressionMethods, Connection, OptionalExtension,
+    BoolExpressionMethods, Connection, OptionalExtension, Table,
 };
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -27,7 +27,7 @@ use crate::{
     },
     perms,
     query::{functions::*, PostDetailed},
-    retry_on_constraint_violation, run_retryable_transaction,
+    retry_on_constraint_violation, run_retryable_transaction, run_serializable_transaction,
     schema::{
         post, post_group_access, post_tag, s3_object, tag, tag_alias, tag_closure_table, tag_edge,
         user_group, user_group_membership,
@@ -110,15 +110,9 @@ fn report_inaccessible_group_pks<C: Connection<Backend = Pg> + LoadConnection>(
     let accessible_group_pks = user_group::table
         .select(user_group::pk)
         .filter(
-            user_group::pk.eq_any(group_pks).and(
-                user_group::fk_owner.nullable().eq(user.pk).or(exists(
-                    user_group_membership::table.filter(
-                        user_group_membership::fk_group
-                            .eq(user_group::pk)
-                            .and(user_group_membership::fk_user.nullable().eq(user.pk)),
-                    ),
-                )),
-            ),
+            user_group::pk
+                .eq_any(group_pks)
+                .and(perms::get_group_membership_condition!(user.pk)),
         )
         .load::<i32>(connection)
         .map_err(|e| Error::QueryError(e.to_string()))?;
@@ -430,25 +424,7 @@ pub async fn edit_post_handler(
 
     let mut connection = acquire_db_connection()?;
 
-    if let Some(ref group_access) = request.group_access_overwrite {
-        if !group_access.is_empty() {
-            report_inaccessible_groups(group_access, &user, &mut connection)?;
-        }
-    }
-
-    if let Some(ref group_access) = request.added_group_access {
-        if !group_access.is_empty() {
-            report_inaccessible_groups(group_access, &user, &mut connection)?;
-        }
-    }
-
-    if let Some(ref removed_group_access) = request.removed_group_access {
-        if !removed_group_access.is_empty() {
-            report_inaccessible_group_pks(removed_group_access, &user, &mut connection)?;
-        }
-    }
-
-    let post = run_retryable_transaction(&mut connection, |connection| {
+    let post = run_serializable_transaction(&mut connection, |connection| {
         if !perms::is_post_editable(connection, Some(&user), post_pk)? {
             return Err(TransactionRuntimeError::Rollback(
                 Error::InaccessibleObjectError(post_pk),
@@ -573,73 +549,94 @@ pub async fn edit_post_handler(
             }
         }
 
-        if request.group_access_overwrite.is_some() || request.added_group_access.is_some() {
-            let curr_group_access = post_group_access::table
-                .filter(post_group_access::fk_post.eq(post_pk))
-                .load::<PostGroupAccess>(connection)?;
+        let added_groups =
+            if request.group_access_overwrite.is_some() || request.added_group_access.is_some() {
+                let curr_visible_group_access = post_group_access::table
+                    .inner_join(user_group::table)
+                    .select(post_group_access::table::all_columns())
+                    .filter(post_group_access::fk_post.eq(post_pk).and(
+                        not(user_group::hidden).or(perms::get_group_membership_condition!(user.pk)),
+                    ))
+                    .load::<PostGroupAccess>(connection)?;
 
-            let mut added_group_access = request.added_group_access.clone().unwrap_or_default();
+                let mut added_group_access = request.added_group_access.clone().unwrap_or_default();
 
-            if let Some(ref group_access_overwrite) = request.group_access_overwrite {
-                let group_access_overwrite_pks = group_access_overwrite
-                    .iter()
-                    .map(|group_access| group_access.group_pk)
-                    .collect::<Vec<_>>();
-                let relevant_group_access_overwrite = group_access_overwrite
-                    .iter()
-                    .filter(|group_access| {
-                        !curr_group_access.iter().any(|curr_group| {
-                            curr_group.fk_granted_group == group_access.group_pk
-                                && curr_group.write == group_access.write
+                if let Some(ref group_access_overwrite) = request.group_access_overwrite {
+                    let curr_visible_group_access_pks = curr_visible_group_access
+                        .iter()
+                        .map(|group_access| group_access.fk_granted_group)
+                        .collect::<Vec<_>>();
+                    let group_access_overwrite_pks = group_access_overwrite
+                        .iter()
+                        .map(|group_access| group_access.group_pk)
+                        .collect::<Vec<_>>();
+                    let relevant_group_access_overwrite = group_access_overwrite
+                        .iter()
+                        .filter(|group_access| {
+                            !curr_visible_group_access.iter().any(|curr_group| {
+                                curr_group.fk_granted_group == group_access.group_pk
+                                    && curr_group.write == group_access.write
+                            })
                         })
-                    })
-                    .map(|group_access| group_access.group_pk)
-                    .collect::<Vec<_>>();
+                        .map(|group_access| group_access.group_pk)
+                        .collect::<Vec<_>>();
 
-                diesel::delete(
-                    post_group_access::table.filter(
-                        post_group_access::fk_post.eq(post_pk).and(
-                            not(post_group_access::fk_granted_group
-                                .eq_any(&group_access_overwrite_pks))
-                            .or(post_group_access::fk_granted_group
-                                .eq_any(&relevant_group_access_overwrite)),
+                    diesel::delete(
+                        post_group_access::table.filter(
+                            post_group_access::fk_post
+                                .eq(post_pk)
+                                .and(
+                                    post_group_access::fk_granted_group
+                                        .eq_any(&curr_visible_group_access_pks),
+                                )
+                                .and(
+                                    not(post_group_access::fk_granted_group
+                                        .eq_any(&group_access_overwrite_pks))
+                                    .or(post_group_access::fk_granted_group
+                                        .eq_any(&relevant_group_access_overwrite)),
+                                ),
                         ),
-                    ),
-                )
-                .execute(connection)?;
-
-                group_access_overwrite
-                    .iter()
-                    .filter(|group_access| {
-                        relevant_group_access_overwrite.contains(&group_access.group_pk)
-                    })
-                    .for_each(|group_access| added_group_access.push(*group_access));
-            }
-
-            if !added_group_access.is_empty() {
-                let group_pks = added_group_access
-                    .iter()
-                    .map(|g| g.group_pk)
-                    .collect::<Vec<_>>();
-                report_missing_pks!(user_group, &group_pks, connection)??;
-
-                let new_post_group_access = added_group_access
-                    .iter()
-                    .map(|group_access| PostGroupAccess {
-                        fk_post: post_pk,
-                        fk_granted_group: group_access.group_pk,
-                        write: group_access.write,
-                        fk_granted_by: user.pk,
-                        creation_timestamp: Utc::now(),
-                    })
-                    .collect::<Vec<_>>();
-
-                diesel::insert_into(post_group_access::table)
-                    .values(&new_post_group_access)
-                    .on_conflict_do_nothing()
+                    )
                     .execute(connection)?;
-            }
-        }
+
+                    group_access_overwrite
+                        .iter()
+                        .filter(|group_access| {
+                            relevant_group_access_overwrite.contains(&group_access.group_pk)
+                        })
+                        .for_each(|group_access| added_group_access.push(*group_access));
+                }
+
+                if !added_group_access.is_empty() {
+                    let group_pks = added_group_access
+                        .iter()
+                        .map(|g| g.group_pk)
+                        .collect::<Vec<_>>();
+                    report_inaccessible_group_pks(&group_pks, &user, connection)?;
+
+                    let new_post_group_access = added_group_access
+                        .iter()
+                        .map(|group_access| PostGroupAccess {
+                            fk_post: post_pk,
+                            fk_granted_group: group_access.group_pk,
+                            write: group_access.write,
+                            fk_granted_by: user.pk,
+                            creation_timestamp: Utc::now(),
+                        })
+                        .collect::<Vec<_>>();
+
+                    let res = diesel::insert_into(post_group_access::table)
+                        .values(&new_post_group_access)
+                        .execute(connection)
+                        .map_err(retry_on_constraint_violation)?;
+
+                    res > 0
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
 
         if let Some(ref removed_group_access) = request.removed_group_access {
             if !removed_group_access.is_empty() {
@@ -651,6 +648,22 @@ pub async fn edit_post_handler(
                     ),
                 )
                 .execute(connection)?;
+            }
+        }
+
+        if added_groups {
+            let curr_group_count = post_group_access::table
+                .filter(post_group_access::fk_post.eq(post_pk))
+                .count()
+                .get_result::<i64>(connection)?;
+
+            if curr_group_count > 50 {
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::InvalidRequestInputError(format!(
+                        "Cannot supply more than 50 groups, supplied: {}",
+                        curr_group_count
+                    )),
+                ));
             }
         }
 
@@ -687,7 +700,8 @@ pub async fn edit_post_handler(
     })?;
 
     let tags = get_post_tags(post_pk, &mut connection).map_err(Error::from)?;
-    let group_access = get_post_group_access(post_pk, &mut connection).map_err(Error::from)?;
+    let group_access =
+        get_post_group_access(post_pk, Some(&user), &mut connection).map_err(Error::from)?;
     let s3_object = if let Some(ref s3_object_key) = post.s3_object {
         Some(
             s3_object::table
@@ -1164,22 +1178,38 @@ pub fn get_post_tags<C: Connection<Backend = Pg> + LoadConnection>(
 
 pub fn get_post_group_access<C: Connection<Backend = Pg> + LoadConnection>(
     post_pk: i32,
+    user: Option<&User>,
     connection: &mut C,
 ) -> Result<Vec<PostGroupAccessDetailed>, diesel::result::Error> {
-    post_group_access::table
-        .inner_join(user_group::table)
-        .filter(post_group_access::fk_post.eq(post_pk))
-        .load::<(PostGroupAccess, UserGroup)>(connection)
-        .map(|post_group_access_vec| {
-            post_group_access_vec
-                .into_iter()
-                .map(|post_group_access| PostGroupAccessDetailed {
-                    fk_post: post_group_access.0.fk_post,
-                    write: post_group_access.0.write,
-                    fk_granted_by: post_group_access.0.fk_granted_by,
-                    creation_timestamp: post_group_access.0.creation_timestamp,
-                    granted_group: post_group_access.1,
-                })
-                .collect::<Vec<_>>()
-        })
+    if let Some(user) = user {
+        post_group_access::table
+            .inner_join(user_group::table)
+            .filter(
+                post_group_access::fk_post.eq(post_pk).and(
+                    not(user_group::hidden).or(perms::get_group_membership_condition!(user.pk)),
+                ),
+            )
+            .load::<(PostGroupAccess, UserGroup)>(connection)
+    } else {
+        post_group_access::table
+            .inner_join(user_group::table)
+            .filter(
+                post_group_access::fk_post
+                    .eq(post_pk)
+                    .and(not(user_group::hidden)),
+            )
+            .load::<(PostGroupAccess, UserGroup)>(connection)
+    }
+    .map(|post_group_access_vec| {
+        post_group_access_vec
+            .into_iter()
+            .map(|post_group_access| PostGroupAccessDetailed {
+                fk_post: post_group_access.0.fk_post,
+                write: post_group_access.0.write,
+                fk_granted_by: post_group_access.0.fk_granted_by,
+                creation_timestamp: post_group_access.0.creation_timestamp,
+                granted_group: post_group_access.1,
+            })
+            .collect::<Vec<_>>()
+    })
 }

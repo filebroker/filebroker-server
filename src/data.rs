@@ -124,8 +124,9 @@ pub async fn upload_handler(
                         perms::is_post_editable(&mut connection, Some(&user), post.pk)?;
                     let tags =
                         post::get_post_tags(post.pk, &mut connection).map_err(Error::from)?;
-                    let group_access = post::get_post_group_access(post.pk, &mut connection)
-                        .map_err(Error::from)?;
+                    let group_access =
+                        post::get_post_group_access(post.pk, Some(&user), &mut connection)
+                            .map_err(Error::from)?;
 
                     posts_detailed.push(PostDetailed {
                         pk: post.pk,
