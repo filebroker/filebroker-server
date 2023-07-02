@@ -1,7 +1,8 @@
 use std::{cmp, collections::HashMap};
 
 use chrono::{DateTime, Utc};
-use diesel::{OptionalExtension, QueryDsl, RunQueryDsl};
+use diesel::{OptionalExtension, QueryDsl};
+use diesel_async::RunQueryDsl;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 use warp::{Rejection, Reply};
@@ -86,9 +87,10 @@ pub async fn search_handler(
     let query_parameters = prepare_query_parameters(&query_parameters_filter, &user);
 
     let sql_query = compiler::compile_sql(query_parameters_filter.query, query_parameters, &user)?;
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     let posts = diesel::sql_query(sql_query)
         .load::<PostQueryObject>(&mut connection)
+        .await
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
     let full_count = if posts.is_empty() {
@@ -158,9 +160,10 @@ pub async fn get_post_handler(
         ))
     })?;
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
 
-    let (post, s3_object) = perms::load_post_secured(post_pk, &mut connection, user.as_ref())?;
+    let (post, s3_object) =
+        perms::load_post_secured(post_pk, &mut connection, user.as_ref()).await?;
 
     let page = query_parameters_filter.page;
     let exclude_window = query_parameters_filter.exclude_window;
@@ -172,9 +175,9 @@ pub async fn get_post_handler(
             query_parameters,
             &user,
         )?;
-        let mut connection = acquire_db_connection()?;
         let result = diesel::sql_query(sql_query)
             .get_result::<PostWindowQueryObject>(&mut connection)
+            .await
             .optional()
             .map_err(|e| Error::QueryError(e.to_string()))?;
 
@@ -216,9 +219,12 @@ pub async fn get_post_handler(
         (None, None)
     };
 
-    let is_editable = perms::is_post_editable(&mut connection, user.as_ref(), post_pk)?;
-    let tags = post::get_post_tags(post_pk, &mut connection).map_err(Error::from)?;
+    let is_editable = perms::is_post_editable(&mut connection, user.as_ref(), post_pk).await?;
+    let tags = post::get_post_tags(post_pk, &mut connection)
+        .await
+        .map_err(Error::from)?;
     let group_access = post::get_post_group_access(post_pk, user.as_ref(), &mut connection)
+        .await
         .map_err(Error::from)?;
 
     Ok(warp::reply::json(&PostDetailed {
@@ -345,7 +351,7 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
         {
             let expression = find_nested_expression(pos, &expression_statement.expression_node);
 
-            find_expression_autocomplete_suggestions(expression)?
+            find_expression_autocomplete_suggestions(expression).await?
         } else if let Some(modifier_statement) =
             current_statement.node_type.downcast_ref::<ModifierNode>()
         {
@@ -355,7 +361,7 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
 
             if let Some(nested_expression) = nested_expression {
                 let expression = find_nested_expression(pos, nested_expression);
-                find_expression_autocomplete_suggestions(expression)?
+                find_expression_autocomplete_suggestions(expression).await?
             } else {
                 find_matching_map_keys(
                     &dict::MODIFIERS,
@@ -401,11 +407,11 @@ pub fn string_is_valid_ident(s: &str) -> bool {
         && chars.all(lexer::char_is_valid_identifier)
 }
 
-fn find_expression_autocomplete_suggestions(
+async fn find_expression_autocomplete_suggestions(
     expression: &Node<dyn ExpressionNode>,
 ) -> Result<Vec<QueryAutocompleteSuggestion>, Error> {
     if let Some(post_tag_node) = expression.node_type.downcast_ref::<PostTagNode>() {
-        let mut connection = acquire_db_connection()?;
+        let mut connection = acquire_db_connection().await?;
         let found_tags = tag::table
             .filter(
                 lower(tag::tag_name).like(format!("{}%", post_tag_node.identifier.to_lowercase())),
@@ -413,6 +419,7 @@ fn find_expression_autocomplete_suggestions(
             .order_by((char_length(tag::tag_name).asc(), tag::tag_name.asc()))
             .limit(10)
             .load::<Tag>(&mut connection)
+            .await
             .map_err(Error::from)?;
 
         let tag_suggestions = found_tags

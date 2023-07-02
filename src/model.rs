@@ -23,7 +23,7 @@ pub struct User {
     pub password_fail_count: i32,
 }
 
-#[derive(Insertable)]
+#[derive(Clone, Insertable)]
 #[diesel(table_name = registered_user)]
 pub struct NewUser {
     pub user_name: String,

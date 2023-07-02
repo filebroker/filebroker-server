@@ -2,12 +2,11 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use diesel::{
-    connection::LoadConnection,
     dsl::{exists, not},
-    pg::Pg,
     sql_types::{Array, Integer},
-    BoolExpressionMethods, Connection, OptionalExtension, Table,
+    BoolExpressionMethods, OptionalExtension, Table,
 };
+use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -17,9 +16,7 @@ use warp::{Rejection, Reply};
 
 use crate::{
     acquire_db_connection,
-    diesel::{
-        ExpressionMethods, NullableExpressionMethods, QueryDsl, RunQueryDsl, TextExpressionMethods,
-    },
+    diesel::{ExpressionMethods, NullableExpressionMethods, QueryDsl, TextExpressionMethods},
     error::{Error, TransactionRuntimeError},
     model::{
         NewPost, NewTag, Post, PostGroupAccess, PostTag, PostUpdateOptional, S3Object, Tag,
@@ -40,6 +37,7 @@ macro_rules! report_missing_pks {
             .select($tab::pk)
             .filter($tab::pk.eq_any($pks))
             .load::<i32>($connection)
+            .await
             .map(|found_pks| {
                 let missing_pks = $pks
                     .iter()
@@ -66,6 +64,7 @@ macro_rules! load_and_report_missing_pks {
         let found = $tab::table
             .filter($tab::pk.eq_any($pks))
             .load::<$return_type>($connection)
+            .await
             .map_err(crate::Error::from)?;
 
         let found_pks = found
@@ -90,22 +89,22 @@ macro_rules! load_and_report_missing_pks {
     }};
 }
 
-fn report_inaccessible_groups<C: Connection<Backend = Pg> + LoadConnection>(
+async fn report_inaccessible_groups(
     selected_group_access: &[GrantedPostGroupAccess],
     user: &User,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<(), Error> {
     let group_pks = selected_group_access
         .iter()
         .map(|group_access| group_access.group_pk)
         .collect::<Vec<_>>();
-    report_inaccessible_group_pks(&group_pks, user, connection)
+    report_inaccessible_group_pks(&group_pks, user, connection).await
 }
 
-fn report_inaccessible_group_pks<C: Connection<Backend = Pg> + LoadConnection>(
+async fn report_inaccessible_group_pks(
     group_pks: &[i32],
     user: &User,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<(), Error> {
     let accessible_group_pks = user_group::table
         .select(user_group::pk)
@@ -115,6 +114,7 @@ fn report_inaccessible_group_pks<C: Connection<Backend = Pg> + LoadConnection>(
                 .and(perms::get_group_membership_condition!(user.pk)),
         )
         .load::<i32>(connection)
+        .await
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
     let missing_pks = group_pks
@@ -268,101 +268,108 @@ pub async fn create_post_handler(
     // cannot use hashset because it is not supported as diesel expression
     let tags = create_post_request.entered_tags.map(sanitize_request_tags);
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
 
     if let Some(ref group_access) = create_post_request.group_access {
         if !group_access.is_empty() {
-            report_inaccessible_groups(group_access, &user, &mut connection)?;
+            report_inaccessible_groups(group_access, &user, &mut connection).await?;
         }
     }
 
     // run as repeatable read transaction and retry serialisation errors when a concurrent transaction
     // deletes or creates relevant tags
     run_retryable_transaction(&mut connection, |connection| {
-        if let Some(ref selected_tags) = create_post_request.selected_tags {
-            report_missing_pks!(tag, selected_tags, connection)??;
-        }
-
-        let mut set_tags = if let Some(ref tags) = tags {
-            let (mut set_tags, created_tags) = get_or_create_tags(connection, tags)?;
-            set_tags.extend(created_tags);
-            set_tags
-        } else {
-            Vec::new()
-        };
-
-        if let Some(ref selected_tags) = create_post_request.selected_tags {
-            let loaded_selected_tags =
-                load_and_report_missing_pks!(Tag, tag, selected_tags, connection)?;
-            set_tags.extend(loaded_selected_tags);
-        }
-
-        if !set_tags.is_empty() {
-            filter_redundant_tags(&mut set_tags, connection)?;
-            if set_tags.len() > 100 {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InvalidRequestInputError(format!(
-                        "Cannot supply more than 100 tags, supplied: {}",
-                        set_tags.len()
-                    )),
-                ));
+        async move {
+            if let Some(ref selected_tags) = create_post_request.selected_tags {
+                report_missing_pks!(tag, selected_tags, connection)??;
             }
-        }
 
-        let now = Utc::now();
-        let post = diesel::insert_into(post::table)
-            .values(NewPost {
-                data_url: create_post_request.data_url.clone(),
-                source_url: create_post_request.source_url.clone(),
-                title: create_post_request.title.clone(),
-                creation_timestamp: now,
-                fk_create_user: user.pk,
-                score: 0,
-                s3_object: create_post_request.s3_object.clone(),
-                thumbnail_url: create_post_request.thumbnail_url.clone(),
-                public: create_post_request.is_public.unwrap_or(false),
-                public_edit: create_post_request.public_edit.unwrap_or(false),
-                description: create_post_request.description.clone(),
-            })
-            .get_result::<Post>(connection)?;
+            let mut set_tags = if let Some(ref tags) = tags {
+                let (mut set_tags, created_tags) = get_or_create_tags(connection, tags).await?;
+                set_tags.extend(created_tags);
+                set_tags
+            } else {
+                Vec::new()
+            };
 
-        let post_tags = set_tags
-            .iter()
-            .map(|tag| PostTag {
-                fk_post: post.pk,
-                fk_tag: tag.pk,
-            })
-            .collect::<Vec<_>>();
-
-        if !post_tags.is_empty() {
-            diesel::insert_into(post_tag::table)
-                .values(&post_tags)
-                .execute(connection)?;
-        }
-
-        if let Some(ref group_access) = create_post_request.group_access {
-            if !group_access.is_empty() {
-                let group_pks = group_access.iter().map(|g| g.group_pk).collect::<Vec<_>>();
-                report_missing_pks!(user_group, &group_pks, connection)??;
-                let post_group_access = group_access
-                    .iter()
-                    .map(|g| PostGroupAccess {
-                        fk_post: post.pk,
-                        fk_granted_group: g.group_pk,
-                        write: g.write,
-                        fk_granted_by: user.pk,
-                        creation_timestamp: now,
-                    })
-                    .collect::<Vec<_>>();
-
-                diesel::insert_into(post_group_access::table)
-                    .values(&post_group_access)
-                    .execute(connection)?;
+            if let Some(ref selected_tags) = create_post_request.selected_tags {
+                let loaded_selected_tags =
+                    load_and_report_missing_pks!(Tag, tag, selected_tags, connection)?;
+                set_tags.extend(loaded_selected_tags);
             }
-        }
 
-        Ok(warp::reply::json(&post))
+            if !set_tags.is_empty() {
+                filter_redundant_tags(&mut set_tags, connection).await?;
+                if set_tags.len() > 100 {
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InvalidRequestInputError(format!(
+                            "Cannot supply more than 100 tags, supplied: {}",
+                            set_tags.len()
+                        )),
+                    ));
+                }
+            }
+
+            let now = Utc::now();
+            let post = diesel::insert_into(post::table)
+                .values(NewPost {
+                    data_url: create_post_request.data_url.clone(),
+                    source_url: create_post_request.source_url.clone(),
+                    title: create_post_request.title.clone(),
+                    creation_timestamp: now,
+                    fk_create_user: user.pk,
+                    score: 0,
+                    s3_object: create_post_request.s3_object.clone(),
+                    thumbnail_url: create_post_request.thumbnail_url.clone(),
+                    public: create_post_request.is_public.unwrap_or(false),
+                    public_edit: create_post_request.public_edit.unwrap_or(false),
+                    description: create_post_request.description.clone(),
+                })
+                .get_result::<Post>(connection)
+                .await?;
+
+            let post_tags = set_tags
+                .iter()
+                .map(|tag| PostTag {
+                    fk_post: post.pk,
+                    fk_tag: tag.pk,
+                })
+                .collect::<Vec<_>>();
+
+            if !post_tags.is_empty() {
+                diesel::insert_into(post_tag::table)
+                    .values(&post_tags)
+                    .execute(connection)
+                    .await?;
+            }
+
+            if let Some(ref group_access) = create_post_request.group_access {
+                if !group_access.is_empty() {
+                    let group_pks = group_access.iter().map(|g| g.group_pk).collect::<Vec<_>>();
+                    report_missing_pks!(user_group, &group_pks, connection)??;
+                    let post_group_access = group_access
+                        .iter()
+                        .map(|g| PostGroupAccess {
+                            fk_post: post.pk,
+                            fk_granted_group: g.group_pk,
+                            write: g.write,
+                            fk_granted_by: user.pk,
+                            creation_timestamp: now,
+                        })
+                        .collect::<Vec<_>>();
+
+                    diesel::insert_into(post_group_access::table)
+                        .values(&post_group_access)
+                        .execute(connection)
+                        .await?;
+                }
+            }
+
+            Ok(warp::reply::json(&post))
+        }
+        .scope_boxed()
     })
+    .await
     .map_err(warp::reject::custom)
 }
 
@@ -422,142 +429,150 @@ pub async fn edit_post_handler(
         &request.group_access_overwrite,
     );
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
 
     let post = run_serializable_transaction(&mut connection, |connection| {
-        if !perms::is_post_editable(connection, Some(&user), post_pk)? {
-            return Err(TransactionRuntimeError::Rollback(
-                Error::InaccessibleObjectError(post_pk),
-            ));
-        }
-
-        let mut added_tags = request.added_tags.clone();
-        let mut added_tag_pks = request.added_tag_pks.clone();
-        let mut removed_tag_pks = request.removed_tag_pks.clone();
-
-        if request.tags_overwrite.is_some() || request.tag_pks_overwrite.is_some() {
-            diesel::delete(post_tag::table.filter(post_tag::fk_post.eq(post_pk)))
-                .execute(connection)?;
-            if let Some(ref tags_overwrite) = request.tags_overwrite {
-                match added_tags {
-                    Some(ref mut added_tags) => added_tags.append(&mut tags_overwrite.clone()),
-                    None => added_tags = Some(tags_overwrite.clone()),
-                }
-            }
-            if let Some(ref tag_pks_overwrite) = request.tag_pks_overwrite {
-                match added_tag_pks {
-                    Some(ref mut added_tag_pks) => {
-                        added_tag_pks.append(&mut tag_pks_overwrite.clone())
-                    }
-                    None => added_tag_pks = Some(tag_pks_overwrite.clone()),
-                }
-            }
-        }
-
-        if let Some(ref added_tags) = added_tags {
-            let (existing_tags, created_tags) = get_or_create_tags(connection, added_tags)?;
-            match added_tag_pks {
-                Some(ref mut added_tag_pks) => {
-                    existing_tags
-                        .iter()
-                        .for_each(|tag| added_tag_pks.push(tag.pk));
-                    created_tags
-                        .iter()
-                        .for_each(|tag| added_tag_pks.push(tag.pk));
-                }
-                None => {
-                    let mut vec = Vec::with_capacity(existing_tags.len() + created_tags.len());
-                    existing_tags.iter().for_each(|tag| vec.push(tag.pk));
-                    created_tags.iter().for_each(|tag| vec.push(tag.pk));
-                    added_tag_pks = Some(vec);
-                }
-            }
-        }
-
-        if let Some(ref added_tag_pks) = added_tag_pks {
-            if !added_tag_pks.is_empty() {
-                let mut loaded_tags =
-                    load_and_report_missing_pks!(Tag, tag, added_tag_pks, connection)?;
-                let curr_tags = get_post_tags(post_pk, connection)?;
-                let curr_tag_pks = curr_tags.iter().map(|tag| tag.pk).collect::<Vec<_>>();
-                loaded_tags.extend(curr_tags);
-                filter_redundant_tags(&mut loaded_tags, connection)?;
-
-                // remove current tags that are now redundant, that means remove all currently set tags that have been removed by filter_redundant_tags
-                let mut curr_tag_pks_to_remove = curr_tag_pks
-                    .into_iter()
-                    .filter(|tag_pk| !loaded_tags.iter().any(|tag| tag.pk == *tag_pk))
-                    .collect::<Vec<_>>();
-
-                if !curr_tag_pks_to_remove.is_empty() {
-                    match removed_tag_pks {
-                        Some(ref mut removed_tag_pks) => {
-                            removed_tag_pks.append(&mut curr_tag_pks_to_remove)
-                        }
-                        None => removed_tag_pks = Some(curr_tag_pks_to_remove),
-                    }
-                }
-
-                let new_post_tags = added_tag_pks
-                    .iter()
-                    .filter(|tag_pk| loaded_tags.iter().any(|tag| tag.pk == **tag_pk))
-                    .map(|tag_pk| PostTag {
-                        fk_post: post_pk,
-                        fk_tag: *tag_pk,
-                    })
-                    .collect::<Vec<_>>();
-
-                if !new_post_tags.is_empty() {
-                    diesel::insert_into(post_tag::table)
-                        .values(&new_post_tags)
-                        .on_conflict_do_nothing()
-                        .execute(connection)?;
-                }
-            }
-        }
-
-        if let Some(ref removed_tag_pks) = removed_tag_pks {
-            if !removed_tag_pks.is_empty() {
-                diesel::delete(
-                    post_tag::table.filter(
-                        post_tag::fk_post
-                            .eq(post_pk)
-                            .and(post_tag::fk_tag.eq_any(removed_tag_pks)),
-                    ),
-                )
-                .execute(connection)?;
-            }
-        }
-
-        if added_tag_pks
-            .as_ref()
-            .map(|v| !v.is_empty())
-            .unwrap_or(false)
-        {
-            let curr_tag_count = post_tag::table
-                .filter(post_tag::fk_post.eq(post_pk))
-                .count()
-                .get_result::<i64>(connection)?;
-
-            if curr_tag_count > 100 {
+        async {
+            if !perms::is_post_editable(connection, Some(&user), post_pk).await? {
                 return Err(TransactionRuntimeError::Rollback(
-                    Error::InvalidRequestInputError(format!(
-                        "Cannot supply more than 100 tags, supplied: {}",
-                        curr_tag_count
-                    )),
+                    Error::InaccessibleObjectError(post_pk),
                 ));
             }
-        }
 
-        let added_groups =
-            if request.group_access_overwrite.is_some() || request.added_group_access.is_some() {
+            let mut added_tags = request.added_tags.clone();
+            let mut added_tag_pks = request.added_tag_pks.clone();
+            let mut removed_tag_pks = request.removed_tag_pks.clone();
+
+            if request.tags_overwrite.is_some() || request.tag_pks_overwrite.is_some() {
+                diesel::delete(post_tag::table.filter(post_tag::fk_post.eq(post_pk)))
+                    .execute(connection)
+                    .await?;
+                if let Some(ref tags_overwrite) = request.tags_overwrite {
+                    match added_tags {
+                        Some(ref mut added_tags) => added_tags.append(&mut tags_overwrite.clone()),
+                        None => added_tags = Some(tags_overwrite.clone()),
+                    }
+                }
+                if let Some(ref tag_pks_overwrite) = request.tag_pks_overwrite {
+                    match added_tag_pks {
+                        Some(ref mut added_tag_pks) => {
+                            added_tag_pks.append(&mut tag_pks_overwrite.clone())
+                        }
+                        None => added_tag_pks = Some(tag_pks_overwrite.clone()),
+                    }
+                }
+            }
+
+            if let Some(ref added_tags) = added_tags {
+                let (existing_tags, created_tags) =
+                    get_or_create_tags(connection, added_tags).await?;
+                match added_tag_pks {
+                    Some(ref mut added_tag_pks) => {
+                        existing_tags
+                            .iter()
+                            .for_each(|tag| added_tag_pks.push(tag.pk));
+                        created_tags
+                            .iter()
+                            .for_each(|tag| added_tag_pks.push(tag.pk));
+                    }
+                    None => {
+                        let mut vec = Vec::with_capacity(existing_tags.len() + created_tags.len());
+                        existing_tags.iter().for_each(|tag| vec.push(tag.pk));
+                        created_tags.iter().for_each(|tag| vec.push(tag.pk));
+                        added_tag_pks = Some(vec);
+                    }
+                }
+            }
+
+            if let Some(ref added_tag_pks) = added_tag_pks {
+                if !added_tag_pks.is_empty() {
+                    let mut loaded_tags =
+                        load_and_report_missing_pks!(Tag, tag, added_tag_pks, connection)?;
+                    let curr_tags = get_post_tags(post_pk, connection).await?;
+                    let curr_tag_pks = curr_tags.iter().map(|tag| tag.pk).collect::<Vec<_>>();
+                    loaded_tags.extend(curr_tags);
+                    filter_redundant_tags(&mut loaded_tags, connection).await?;
+
+                    // remove current tags that are now redundant, that means remove all currently set tags that have been removed by filter_redundant_tags
+                    let mut curr_tag_pks_to_remove = curr_tag_pks
+                        .into_iter()
+                        .filter(|tag_pk| !loaded_tags.iter().any(|tag| tag.pk == *tag_pk))
+                        .collect::<Vec<_>>();
+
+                    if !curr_tag_pks_to_remove.is_empty() {
+                        match removed_tag_pks {
+                            Some(ref mut removed_tag_pks) => {
+                                removed_tag_pks.append(&mut curr_tag_pks_to_remove)
+                            }
+                            None => removed_tag_pks = Some(curr_tag_pks_to_remove),
+                        }
+                    }
+
+                    let new_post_tags = added_tag_pks
+                        .iter()
+                        .filter(|tag_pk| loaded_tags.iter().any(|tag| tag.pk == **tag_pk))
+                        .map(|tag_pk| PostTag {
+                            fk_post: post_pk,
+                            fk_tag: *tag_pk,
+                        })
+                        .collect::<Vec<_>>();
+
+                    if !new_post_tags.is_empty() {
+                        diesel::insert_into(post_tag::table)
+                            .values(&new_post_tags)
+                            .on_conflict_do_nothing()
+                            .execute(connection)
+                            .await?;
+                    }
+                }
+            }
+
+            if let Some(ref removed_tag_pks) = removed_tag_pks {
+                if !removed_tag_pks.is_empty() {
+                    diesel::delete(
+                        post_tag::table.filter(
+                            post_tag::fk_post
+                                .eq(post_pk)
+                                .and(post_tag::fk_tag.eq_any(removed_tag_pks)),
+                        ),
+                    )
+                    .execute(connection)
+                    .await?;
+                }
+            }
+
+            if added_tag_pks
+                .as_ref()
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+            {
+                let curr_tag_count = post_tag::table
+                    .filter(post_tag::fk_post.eq(post_pk))
+                    .count()
+                    .get_result::<i64>(connection)
+                    .await?;
+
+                if curr_tag_count > 100 {
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InvalidRequestInputError(format!(
+                            "Cannot supply more than 100 tags, supplied: {}",
+                            curr_tag_count
+                        )),
+                    ));
+                }
+            }
+
+            let added_groups = if request.group_access_overwrite.is_some()
+                || request.added_group_access.is_some()
+            {
                 let curr_visible_group_access = post_group_access::table
                     .inner_join(user_group::table)
                     .select(post_group_access::table::all_columns())
                     .filter(post_group_access::fk_post.eq(post_pk).and(
                         not(user_group::hidden).or(perms::get_group_membership_condition!(user.pk)),
                     ))
-                    .load::<PostGroupAccess>(connection)?;
+                    .load::<PostGroupAccess>(connection)
+                    .await?;
 
                 let mut added_group_access = request.added_group_access.clone().unwrap_or_default();
 
@@ -597,7 +612,8 @@ pub async fn edit_post_handler(
                                 ),
                         ),
                     )
-                    .execute(connection)?;
+                    .execute(connection)
+                    .await?;
 
                     group_access_overwrite
                         .iter()
@@ -612,7 +628,7 @@ pub async fn edit_post_handler(
                         .iter()
                         .map(|g| g.group_pk)
                         .collect::<Vec<_>>();
-                    report_inaccessible_group_pks(&group_pks, &user, connection)?;
+                    report_inaccessible_group_pks(&group_pks, &user, connection).await?;
 
                     let new_post_group_access = added_group_access
                         .iter()
@@ -628,6 +644,7 @@ pub async fn edit_post_handler(
                     let res = diesel::insert_into(post_group_access::table)
                         .values(&new_post_group_access)
                         .execute(connection)
+                        .await
                         .map_err(retry_on_constraint_violation)?;
 
                     res > 0
@@ -638,75 +655,86 @@ pub async fn edit_post_handler(
                 false
             };
 
-        if let Some(ref removed_group_access) = request.removed_group_access {
-            if !removed_group_access.is_empty() {
-                diesel::delete(
-                    post_group_access::table.filter(
-                        post_group_access::fk_post
-                            .eq(post_pk)
-                            .and(post_group_access::fk_granted_group.eq_any(removed_group_access)),
-                    ),
-                )
-                .execute(connection)?;
+            if let Some(ref removed_group_access) = request.removed_group_access {
+                if !removed_group_access.is_empty() {
+                    diesel::delete(
+                        post_group_access::table.filter(
+                            post_group_access::fk_post.eq(post_pk).and(
+                                post_group_access::fk_granted_group.eq_any(removed_group_access),
+                            ),
+                        ),
+                    )
+                    .execute(connection)
+                    .await?;
+                }
+            }
+
+            if added_groups {
+                let curr_group_count = post_group_access::table
+                    .filter(post_group_access::fk_post.eq(post_pk))
+                    .count()
+                    .get_result::<i64>(connection)
+                    .await?;
+
+                if curr_group_count > 50 {
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InvalidRequestInputError(format!(
+                            "Cannot supply more than 50 groups, supplied: {}",
+                            curr_group_count
+                        )),
+                    ));
+                }
+            }
+
+            let update = PostUpdateOptional {
+                data_url: request.data_url.clone(),
+                source_url: request.source_url.clone(),
+                title: request.title.clone(),
+                public: request.is_public,
+                public_edit: request.public_edit,
+                description: request.description.clone(),
+            };
+
+            if update.has_changes() {
+                let updated_post = diesel::update(post::table)
+                    .filter(post::pk.eq(post_pk))
+                    .set(PostUpdateOptional {
+                        data_url: request.data_url.clone(),
+                        source_url: request.source_url.clone(),
+                        title: request.title.clone(),
+                        public: request.is_public,
+                        public_edit: request.public_edit,
+                        description: request.description.clone(),
+                    })
+                    .get_result::<Post>(connection)
+                    .await?;
+
+                Ok(updated_post)
+            } else {
+                let loaded_post = post::table
+                    .filter(post::pk.eq(post_pk))
+                    .get_result::<Post>(connection)
+                    .await?;
+
+                Ok(loaded_post)
             }
         }
+        .scope_boxed()
+    })
+    .await?;
 
-        if added_groups {
-            let curr_group_count = post_group_access::table
-                .filter(post_group_access::fk_post.eq(post_pk))
-                .count()
-                .get_result::<i64>(connection)?;
-
-            if curr_group_count > 50 {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InvalidRequestInputError(format!(
-                        "Cannot supply more than 50 groups, supplied: {}",
-                        curr_group_count
-                    )),
-                ));
-            }
-        }
-
-        let update = PostUpdateOptional {
-            data_url: request.data_url.clone(),
-            source_url: request.source_url.clone(),
-            title: request.title.clone(),
-            public: request.is_public,
-            public_edit: request.public_edit,
-            description: request.description.clone(),
-        };
-
-        if update.has_changes() {
-            let updated_post = diesel::update(post::table)
-                .filter(post::pk.eq(post_pk))
-                .set(PostUpdateOptional {
-                    data_url: request.data_url.clone(),
-                    source_url: request.source_url.clone(),
-                    title: request.title.clone(),
-                    public: request.is_public,
-                    public_edit: request.public_edit,
-                    description: request.description.clone(),
-                })
-                .get_result::<Post>(connection)?;
-
-            Ok(updated_post)
-        } else {
-            let loaded_post = post::table
-                .filter(post::pk.eq(post_pk))
-                .get_result::<Post>(connection)?;
-
-            Ok(loaded_post)
-        }
-    })?;
-
-    let tags = get_post_tags(post_pk, &mut connection).map_err(Error::from)?;
-    let group_access =
-        get_post_group_access(post_pk, Some(&user), &mut connection).map_err(Error::from)?;
+    let tags = get_post_tags(post_pk, &mut connection)
+        .await
+        .map_err(Error::from)?;
+    let group_access = get_post_group_access(post_pk, Some(&user), &mut connection)
+        .await
+        .map_err(Error::from)?;
     let s3_object = if let Some(ref s3_object_key) = post.s3_object {
         Some(
             s3_object::table
                 .filter(s3_object::object_key.eq(s3_object_key))
                 .get_result::<S3Object>(&mut connection)
+                .await
                 .map_err(Error::from)?,
         )
     } else {
@@ -758,26 +786,31 @@ pub async fn create_tags_handler(
     })?;
 
     let tag_names = sanitize_request_tags(create_tags_request.tag_names);
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     run_retryable_transaction(&mut connection, |connection| {
-        let (existing_tags, inserted_tags) = get_or_create_tags(connection, &tag_names)?;
-        Ok(warp::reply::json(&CreateTagsResponse {
-            existing_tags,
-            inserted_tags,
-        }))
+        async move {
+            let (existing_tags, inserted_tags) = get_or_create_tags(connection, &tag_names).await?;
+            Ok(warp::reply::json(&CreateTagsResponse {
+                existing_tags,
+                inserted_tags,
+            }))
+        }
+        .scope_boxed()
     })
+    .await
     .map_err(warp::reject::custom)
 }
 
 /// Get and create all tags for the supplied tag names, returning a tuple of all existing and all created tags.
-pub fn get_or_create_tags<C: Connection<Backend = Pg> + LoadConnection>(
-    connection: &mut C,
+pub async fn get_or_create_tags(
+    connection: &mut AsyncPgConnection,
     tags: &[String],
 ) -> Result<(Vec<Tag>, Vec<Tag>), TransactionRuntimeError> {
     let lower_tags = tags.iter().map(|s| s.to_lowercase()).collect::<Vec<_>>();
     let existing_tags = tag::table
         .filter(lower(tag::tag_name).eq_any(&lower_tags))
-        .load::<Tag>(connection)?;
+        .load::<Tag>(connection)
+        .await?;
 
     let mut existing_tag_map = HashMap::new();
     for existing_tag in existing_tags {
@@ -799,6 +832,7 @@ pub fn get_or_create_tags<C: Connection<Backend = Pg> + LoadConnection>(
     let created_tags = diesel::insert_into(tag::table)
         .values(&new_tags)
         .get_results::<Tag>(connection)
+        .await
         .map_err(retry_on_constraint_violation)?;
 
     Ok((set_tags, created_tags))
@@ -806,13 +840,13 @@ pub fn get_or_create_tags<C: Connection<Backend = Pg> + LoadConnection>(
 
 /// Filter redundant tags by removing tags that are a parent of another included tag or a shorter alias
 /// for another included tag.
-pub fn filter_redundant_tags<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn filter_redundant_tags(
     tags: &mut Vec<Tag>,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<(), Error> {
     let mut selected_tags = Vec::new();
     for tag in tags.iter() {
-        selected_tags.push(get_tag_hierarchy_information(tag, connection)?);
+        selected_tags.push(get_tag_hierarchy_information(tag, connection).await?);
     }
 
     tags.retain(|tag| {
@@ -843,9 +877,9 @@ pub struct TagHierarchyInformation {
     pub tag_aliases: Vec<Tag>,
 }
 
-pub fn get_tag_hierarchy_information<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn get_tag_hierarchy_information(
     tag: &Tag,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<TagHierarchyInformation, Error> {
     let tag_closure_table = tag_closure_table::table
         .filter(
@@ -853,14 +887,15 @@ pub fn get_tag_hierarchy_information<C: Connection<Backend = Pg> + LoadConnectio
                 .eq(tag.pk)
                 .and(tag_closure_table::depth.gt(0)),
         )
-        .load::<TagClosureTable>(connection)?;
+        .load::<TagClosureTable>(connection)
+        .await?;
 
     let mut parent_depth_map = HashMap::new();
     for tag_closure in tag_closure_table.iter() {
         parent_depth_map.insert(tag_closure.fk_parent, tag_closure.depth);
     }
 
-    let tag_aliases = get_tag_aliases(tag.pk, connection)?;
+    let tag_aliases = get_tag_aliases(tag.pk, connection).await?;
 
     Ok(TagHierarchyInformation {
         tag: tag.clone(),
@@ -912,7 +947,7 @@ pub async fn upsert_tag_handler(
         alias_pks.dedup();
     }
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
 
     if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
         report_missing_pks!(tag, parent_pks, &mut connection)??;
@@ -923,74 +958,78 @@ pub async fn upsert_tag_handler(
     }
 
     run_retryable_transaction(&mut connection, |connection| {
-        let (inserted, tag) = get_or_create_tag(&tag_name, connection)?;
+        async move {
+            let (inserted, tag) = get_or_create_tag(&tag_name, connection).await?;
 
-        if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
-            if parent_pks.iter().any(|parent_pk| *parent_pk == tag.pk) {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InvalidRequestInputError(format!(
-                        "Cannot set tag {} as its own parent",
-                        tag.pk
-                    )),
-                ));
-            }
-
-            let curr_parents = get_tag_parents_pks(tag.pk, connection)?;
-            let mut parents_to_set = parent_pks
-                .iter()
-                .cloned()
-                .filter(|parent_pk| !curr_parents.contains(parent_pk))
-                .collect::<Vec<_>>();
-
-            parents_to_set.sort_unstable();
-            parents_to_set.dedup();
-
-            if !parents_to_set.is_empty() {
-                let curr_parents = get_tag_parents_pks(tag.pk, connection)?;
-                if curr_parents.len() + parents_to_set.len() > 25 {
-                    return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                        String::from("Cannot set more than 25 parents"),
-                    )));
-                }
-                add_tag_parents(tag.pk, &parents_to_set, connection)?;
-            }
-        }
-
-        if let Some(ref alias_pks) = upsert_tag_request.alias_pks {
-            if !alias_pks.is_empty() {
-                if alias_pks.iter().any(|alias_pk| *alias_pk == tag.pk) {
+            if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
+                if parent_pks.iter().any(|parent_pk| *parent_pk == tag.pk) {
                     return Err(TransactionRuntimeError::Rollback(
                         Error::InvalidRequestInputError(format!(
-                            "Cannot set tag {} as an alias of itself",
+                            "Cannot set tag {} as its own parent",
                             tag.pk
                         )),
                     ));
                 }
 
-                let curr_aliases = get_tag_aliases_pks(tag.pk, connection)?;
-                let aliases_to_set = alias_pks
+                let curr_parents = get_tag_parents_pks(tag.pk, connection).await?;
+                let mut parents_to_set = parent_pks
                     .iter()
                     .cloned()
-                    .filter(|alias_pk| !curr_aliases.contains(alias_pk))
+                    .filter(|parent_pk| !curr_parents.contains(parent_pk))
                     .collect::<Vec<_>>();
 
-                if !aliases_to_set.is_empty() {
-                    if curr_aliases.len() + aliases_to_set.len() > 25 {
+                parents_to_set.sort_unstable();
+                parents_to_set.dedup();
+
+                if !parents_to_set.is_empty() {
+                    let curr_parents = get_tag_parents_pks(tag.pk, connection).await?;
+                    if curr_parents.len() + parents_to_set.len() > 25 {
                         return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                            String::from("Cannot set more than 25 aliases"),
+                            String::from("Cannot set more than 25 parents"),
                         )));
                     }
-
-                    add_tag_aliases(&tag, &aliases_to_set, connection)?;
+                    add_tag_parents(tag.pk, &parents_to_set, connection).await?;
                 }
             }
-        }
 
-        Ok(warp::reply::json(&UpsertTagResponse {
-            inserted,
-            tag_pk: tag.pk,
-        }))
+            if let Some(ref alias_pks) = upsert_tag_request.alias_pks {
+                if !alias_pks.is_empty() {
+                    if alias_pks.iter().any(|alias_pk| *alias_pk == tag.pk) {
+                        return Err(TransactionRuntimeError::Rollback(
+                            Error::InvalidRequestInputError(format!(
+                                "Cannot set tag {} as an alias of itself",
+                                tag.pk
+                            )),
+                        ));
+                    }
+
+                    let curr_aliases = get_tag_aliases_pks(tag.pk, connection).await?;
+                    let aliases_to_set = alias_pks
+                        .iter()
+                        .cloned()
+                        .filter(|alias_pk| !curr_aliases.contains(alias_pk))
+                        .collect::<Vec<_>>();
+
+                    if !aliases_to_set.is_empty() {
+                        if curr_aliases.len() + aliases_to_set.len() > 25 {
+                            return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                                String::from("Cannot set more than 25 aliases"),
+                            )));
+                        }
+
+                        add_tag_aliases(&tag, &aliases_to_set, connection).await?;
+                    }
+                }
+            }
+
+            Ok(warp::reply::json(&UpsertTagResponse {
+                inserted,
+                tag_pk: tag.pk,
+            }))
+        }
+        .scope_boxed()
     })
+    .await
     .map_err(warp::reject::custom)
 }
 
@@ -1014,12 +1053,13 @@ pub async fn find_tag_handler(tag_name: String) -> Result<impl Reply, Rejection>
         .decode_utf8()
         .map_err(|_| Error::UtfEncodingError)?;
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     let mut found_tags = tag::table
         .filter(lower(tag::tag_name).like(format!("{}%", tag_name.to_lowercase())))
         .order_by((char_length(tag::tag_name).asc(), tag::tag_name.asc()))
         .limit(10)
         .load::<Tag>(&mut connection)
+        .await
         .map_err(Error::from)?;
 
     if found_tags.is_empty() {
@@ -1040,13 +1080,14 @@ pub async fn find_tag_handler(tag_name: String) -> Result<impl Reply, Rejection>
     }
 }
 
-pub fn get_or_create_tag<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn get_or_create_tag(
     tag_name: &str,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<(bool, Tag), TransactionRuntimeError> {
     let existing_tag = tag::table
         .filter(lower(tag::tag_name).eq(tag_name.to_lowercase()))
         .first::<Tag>(connection)
+        .await
         .optional()?;
 
     let inserted = existing_tag.is_none();
@@ -1058,25 +1099,27 @@ pub fn get_or_create_tag<C: Connection<Backend = Pg> + LoadConnection>(
                 creation_timestamp: Utc::now(),
             })
             .get_result::<Tag>(connection)
+            .await
             .map_err(retry_on_constraint_violation)?,
     };
 
     Ok((inserted, tag))
 }
 
-pub fn get_tag_parents_pks<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn get_tag_parents_pks(
     tag_pk: i32,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<Vec<i32>, diesel::result::Error> {
     tag_edge::table
         .select(tag_edge::fk_parent)
         .filter(tag_edge::fk_child.eq(tag_pk))
         .load::<i32>(connection)
+        .await
 }
 
-pub fn get_tag_aliases_pks<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn get_tag_aliases_pks(
     tag_pk: i32,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<Vec<i32>, diesel::result::Error> {
     tag::table
         .select(tag::pk)
@@ -1091,11 +1134,12 @@ pub fn get_tag_aliases_pks<C: Connection<Backend = Pg> + LoadConnection>(
             ),
         ))
         .load::<i32>(connection)
+        .await
 }
 
-pub fn get_tag_aliases<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn get_tag_aliases(
     tag_pk: i32,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<Vec<Tag>, diesel::result::Error> {
     tag::table
         .filter(exists(
@@ -1109,12 +1153,13 @@ pub fn get_tag_aliases<C: Connection<Backend = Pg> + LoadConnection>(
             ),
         ))
         .load::<Tag>(connection)
+        .await
 }
 
-pub fn add_tag_aliases<C: Connection<Backend = Pg>>(
+pub async fn add_tag_aliases(
     tag: &Tag,
     alias_pks: &[i32],
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<(), TransactionRuntimeError> {
     diesel::sql_query(
         r#"
@@ -1135,15 +1180,16 @@ pub fn add_tag_aliases<C: Connection<Backend = Pg>>(
     .bind::<Integer, _>(tag.pk)
     .bind::<Array<Integer>, _>(alias_pks)
     .execute(connection)
+    .await
     .map_err(retry_on_constraint_violation)?;
 
     Ok(())
 }
 
-pub fn add_tag_parents<C: Connection<Backend = Pg>>(
+pub async fn add_tag_parents(
     tag_pk: i32,
     parent_pks: &[i32],
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<(), TransactionRuntimeError> {
     let edges_to_insert = parent_pks
         .iter()
@@ -1156,14 +1202,15 @@ pub fn add_tag_parents<C: Connection<Backend = Pg>>(
     diesel::insert_into(tag_edge::table)
         .values(edges_to_insert)
         .execute(connection)
+        .await
         .map_err(retry_on_constraint_violation)?;
 
     Ok(())
 }
 
-pub fn get_post_tags<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn get_post_tags(
     post_pk: i32,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<Vec<Tag>, diesel::result::Error> {
     tag::table
         .filter(exists(
@@ -1174,12 +1221,13 @@ pub fn get_post_tags<C: Connection<Backend = Pg> + LoadConnection>(
             ),
         ))
         .load::<Tag>(connection)
+        .await
 }
 
-pub fn get_post_group_access<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn get_post_group_access(
     post_pk: i32,
     user: Option<&User>,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<Vec<PostGroupAccessDetailed>, diesel::result::Error> {
     if let Some(user) = user {
         post_group_access::table
@@ -1190,6 +1238,7 @@ pub fn get_post_group_access<C: Connection<Backend = Pg> + LoadConnection>(
                 ),
             )
             .load::<(PostGroupAccess, UserGroup)>(connection)
+            .await
     } else {
         post_group_access::table
             .inner_join(user_group::table)
@@ -1199,6 +1248,7 @@ pub fn get_post_group_access<C: Connection<Backend = Pg> + LoadConnection>(
                     .and(not(user_group::hidden)),
             )
             .load::<(PostGroupAccess, UserGroup)>(connection)
+            .await
     }
     .map(|post_group_access_vec| {
         post_group_access_vec

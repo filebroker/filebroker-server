@@ -4,12 +4,11 @@ use chrono::Utc;
 use diesel::{
     query_dsl::methods::FilterDsl,
     sql_types::{Array, VarChar},
-    RunQueryDsl,
 };
-use parking_lot::Mutex;
+use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
 use rusty_pool::ThreadPool;
 use s3::Bucket;
-use tokio::{runtime::Handle, task::JoinHandle};
+use tokio::{runtime::Handle, sync::Mutex, task::JoinHandle};
 
 use lazy_static::lazy_static;
 use uuid::Uuid;
@@ -25,7 +24,6 @@ use crate::{
     model::{Broker, S3Object, User},
     retry_on_serialization_failure, run_serializable_transaction,
     schema::{broker, email_confirmation_token, one_time_password, refresh_token, registered_user},
-    DbConnection,
 };
 
 lazy_static! {
@@ -62,7 +60,7 @@ pub fn submit_task(
     task: impl Fn(Handle) -> Result<(), Error> + Send + 'static,
 ) {
     let tokio_handle = Handle::current();
-    TASK_POOL.execute(move || {
+    ThreadPool::execute(&TASK_POOL, move || {
         let running_task_ids = RUNNING_TASK_IDS.pin();
         // only run task if not already running
         if running_task_ids.insert(task_id) {
@@ -80,7 +78,7 @@ pub fn submit_task(
         } else {
             log::warn!("Skipping task {task_id} because it is already running")
         }
-    });
+    })
 }
 
 struct TaskSentinel<'a> {
@@ -94,6 +92,7 @@ impl Drop for TaskSentinel<'_> {
     }
 }
 
+#[allow(clippy::await_holding_lock)] // allow SUBMITTED_HLS_TRANSCODINGS to be held while waiting for query to load relevant objects
 pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
     if *DISABLE_GENERATE_MISSING_HLS_STREAMS {
         log::info!("generate_missing_hls_streams disabled");
@@ -103,14 +102,15 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         log::warn!("Skipping generate_missing_hls_streams because it is unsupported on the current platform");
         return Ok(());
     }
-    log::debug!("Waiting to acquire permit to start HLS transcoding");
-    let _semaphore = tokio_handle
-        .block_on(VIDEO_TRANSCODE_SEMAPHORE.acquire())
+    tokio_handle.block_on(async {
+        log::debug!("Waiting to acquire permit to start HLS transcoding");
+    let _semaphore = VIDEO_TRANSCODE_SEMAPHORE.acquire().await
         .map_err(|_| Error::CancellationError)?;
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
 
-    let relevant_objects = run_serializable_transaction(&mut connection, |connection| {
-        let submitted_hls_transcodings = SUBMITTED_HLS_TRANSCODINGS.lock();
+    let submitted_hls_transcodings_guard = SUBMITTED_HLS_TRANSCODINGS.lock();
+    let submitted_hls_transcodings = submitted_hls_transcodings_guard.iter().collect::<Vec<_>>();
+    let relevant_objects = run_serializable_transaction(&mut connection, |connection| async move {
         diesel::sql_query("
         WITH relevant_s3objects AS(
             SELECT * FROM s3_object AS obj
@@ -129,10 +129,12 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         )
         UPDATE s3_object SET hls_locked_at = NOW() WHERE hls_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
     ")
-    .bind::<Array<VarChar>, _>(submitted_hls_transcodings.iter().collect::<Vec<_>>())
+    .bind::<Array<VarChar>, _>(submitted_hls_transcodings)
     .load::<S3Object>(connection)
+    .await
     .map_err(retry_on_serialization_failure)
-    })?;
+    }.scope_boxed()).await?;
+    drop(submitted_hls_transcodings_guard);
     drop(connection);
 
     let _sentinel = LockedObjectsTaskSentinel::new(
@@ -149,10 +151,10 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         relevant_objects.len()
     );
     for object in relevant_objects {
-        let mut connection = acquire_db_connection()?;
+        let mut connection = acquire_db_connection().await?;
 
         let (bucket, broker, user) =
-            match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection) {
+            match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection).await {
                 Ok(res) => res,
                 Err(e) => {
                     log::error!("Failed to load data for {}: {}", &object.object_key, e);
@@ -198,10 +200,10 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                 &object.object_key,
                 e
             );
-            if let Ok(mut connection) = acquire_db_connection() {
+            if let Ok(mut connection) = acquire_db_connection().await {
                 if let Err(e) = diesel::sql_query("UPDATE s3_object SET hls_fail_count = coalesce(hls_fail_count, 0) + 1 WHERE object_key = $1")
                     .bind::<VarChar, _>(&object.object_key)
-                    .execute(&mut connection) {
+                    .execute(&mut connection).await {
                         log::error!("Failed to increment hls_fail_count: {e}");
                     }
             }
@@ -214,6 +216,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
     }
 
     Ok(())
+    })
 }
 
 pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
@@ -221,9 +224,10 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
         log::info!("generate_missing_thumbnails disabled");
         return Ok(());
     }
-    let mut connection = acquire_db_connection()?;
+    tokio_handle.block_on(async {
+        let mut connection = acquire_db_connection().await?;
 
-    let relevant_objects = run_serializable_transaction(&mut connection, |connection| {
+    let relevant_objects = run_serializable_transaction(&mut connection, |connection| async move {
         diesel::sql_query("
         WITH relevant_s3objects AS(
             SELECT * FROM s3_object AS obj
@@ -242,8 +246,9 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
         UPDATE s3_object SET thumbnail_locked_at = NOW() WHERE thumbnail_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
     ")
     .load::<S3Object>(connection)
+    .await
     .map_err(retry_on_serialization_failure)
-    })?;
+    }.scope_boxed()).await?;
     drop(connection);
 
     let _sentinel = LockedObjectsTaskSentinel::new(
@@ -260,10 +265,10 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
         relevant_objects.len()
     );
     for object in relevant_objects {
-        let mut connection = acquire_db_connection()?;
+        let mut connection = acquire_db_connection().await?;
 
         let (bucket, broker, user) =
-            match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection) {
+            match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection).await {
                 Ok(res) => res,
                 Err(e) => {
                     log::error!("Failed to load data for {}: {}", &object.object_key, e);
@@ -310,10 +315,10 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                 &object.object_key,
                 e
             );
-            if let Ok(mut connection) = acquire_db_connection() {
+            if let Ok(mut connection) = acquire_db_connection().await {
                 if let Err(e) = diesel::sql_query("UPDATE s3_object SET thumbnail_fail_count = coalesce(thumbnail_fail_count, 0) + 1 WHERE object_key = $1")
                     .bind::<VarChar, _>(&object.object_key)
-                    .execute(&mut connection) {
+                    .execute(&mut connection).await {
                         log::error!("Failed to increment thumbnail_fail_count: {e}");
                     }
             }
@@ -326,16 +331,18 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
     }
 
     Ok(())
+    })
 }
 
-fn load_object_relations(
+async fn load_object_relations(
     broker_pk: i32,
     user_pk: i32,
-    connection: &mut DbConnection,
+    connection: &mut AsyncPgConnection,
 ) -> Result<(Bucket, Broker, User), Error> {
     let broker = broker::table
         .filter(broker::pk.eq(broker_pk))
-        .get_result::<Broker>(connection)?;
+        .get_result::<Broker>(connection)
+        .await?;
 
     let bucket = create_bucket(
         &broker.bucket,
@@ -347,58 +354,66 @@ fn load_object_relations(
 
     let user = registered_user::table
         .filter(registered_user::pk.eq(user_pk))
-        .get_result::<User>(connection)?;
+        .get_result::<User>(connection)
+        .await?;
 
     Ok((bucket, broker, user))
 }
 
-pub fn clear_old_object_locks(_tokio_handle: Handle) -> Result<(), Error> {
-    let mut connection = acquire_db_connection()?;
+pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
+    tokio_handle.block_on(async {
+        let mut connection = acquire_db_connection().await?;
 
-    run_serializable_transaction(&mut connection, |connection| {
+    run_serializable_transaction(&mut connection, |connection| async {
         diesel::sql_query("UPDATE s3_object SET hls_locked_at = NULL WHERE hls_locked_at < NOW() - interval '1 day'")
             .execute(connection)
+            .await
             .map_err(retry_on_serialization_failure)?;
 
         diesel::sql_query("UPDATE s3_object SET thumbnail_locked_at = NULL WHERE thumbnail_locked_at < NOW() - interval '1 day'")
             .execute(connection)
+            .await
             .map_err(retry_on_serialization_failure)?;
 
         Ok(())
-    })?;
-
-    Ok(())
+    }.scope_boxed()).await
+    })
 }
 
-pub fn clear_old_tokens(_tokio_handle: Handle) -> Result<(), Error> {
-    let current_utc = Utc::now();
-    let mut connection = acquire_db_connection()?;
+pub fn clear_old_tokens(tokio_handle: Handle) -> Result<(), Error> {
+    tokio_handle.block_on(async {
+        let current_utc = Utc::now();
+        let mut connection = acquire_db_connection().await?;
 
-    diesel::delete(refresh_token::table)
-        .filter(
-            refresh_token::expiry
-                .lt(&current_utc)
-                .or(refresh_token::invalidated),
-        )
-        .execute(&mut connection)?;
+        diesel::delete(refresh_token::table)
+            .filter(
+                refresh_token::expiry
+                    .lt(&current_utc)
+                    .or(refresh_token::invalidated),
+            )
+            .execute(&mut connection)
+            .await?;
 
-    diesel::delete(email_confirmation_token::table)
-        .filter(
-            email_confirmation_token::expiry
-                .lt(&current_utc)
-                .or(email_confirmation_token::invalidated),
-        )
-        .execute(&mut connection)?;
+        diesel::delete(email_confirmation_token::table)
+            .filter(
+                email_confirmation_token::expiry
+                    .lt(&current_utc)
+                    .or(email_confirmation_token::invalidated),
+            )
+            .execute(&mut connection)
+            .await?;
 
-    diesel::delete(one_time_password::table)
-        .filter(
-            one_time_password::expiry
-                .lt(&current_utc)
-                .or(one_time_password::invalidated),
-        )
-        .execute(&mut connection)?;
+        diesel::delete(one_time_password::table)
+            .filter(
+                one_time_password::expiry
+                    .lt(&current_utc)
+                    .or(one_time_password::invalidated),
+            )
+            .execute(&mut connection)
+            .await?;
 
-    Ok(())
+        Ok(())
+    })
 }
 
 struct LockedObjectsTaskSentinel {
@@ -409,7 +424,11 @@ struct LockedObjectsTaskSentinel {
 }
 
 impl LockedObjectsTaskSentinel {
-    fn new(lock_column: &'static str, object_keys: Vec<String>, tokio_handle: &Handle) -> Self {
+    async fn new(
+        lock_column: &'static str,
+        object_keys: Vec<String>,
+        tokio_handle: &Handle,
+    ) -> Self {
         let keys_to_refresh = object_keys.clone();
         let update_mutex = Arc::new(Mutex::new(()));
         let background_mutex = update_mutex.clone();
@@ -417,8 +436,8 @@ impl LockedObjectsTaskSentinel {
             // refresh lock every 15 minutes
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60 * 15)).await;
-                let _mutex_guard = background_mutex.lock();
-                match acquire_db_connection() {
+                let _mutex_guard = background_mutex.lock().await;
+                match acquire_db_connection().await {
                     Ok(mut connection) => {
                         if let Err(e) = diesel::sql_query(format!(
                             "UPDATE s3_object SET {} = NOW() WHERE object_key = ANY($1)",
@@ -426,6 +445,7 @@ impl LockedObjectsTaskSentinel {
                         ))
                         .bind::<Array<VarChar>, _>(&keys_to_refresh)
                         .execute(&mut connection)
+                        .await
                         {
                             log::error!("Failed to refresh {lock_column} for objects: {e}");
                         }
@@ -447,24 +467,30 @@ impl LockedObjectsTaskSentinel {
 impl Drop for LockedObjectsTaskSentinel {
     fn drop(&mut self) {
         self.refresh_task_join_handle.abort();
-        let _update_mutex = self.update_mutex.lock();
-        let mut connection = match acquire_db_connection() {
-            Ok(connection) => connection,
-            Err(e) => {
+        let update_mutex = self.update_mutex.clone();
+        let object_keys = std::mem::take(&mut self.object_keys);
+        let lock_column = self.lock_column;
+        tokio::spawn(async move {
+            let _update_mutex = update_mutex.lock().await;
+            let mut connection = match acquire_db_connection().await {
+                Ok(connection) => connection,
+                Err(e) => {
+                    log::error!("Could not unlock objects: {}", e);
+                    return;
+                }
+            };
+
+            let res = diesel::sql_query(format!(
+                "UPDATE s3_object SET {} = NULL WHERE object_key = ANY($1)",
+                lock_column
+            ))
+            .bind::<Array<VarChar>, _>(&object_keys)
+            .execute(&mut connection)
+            .await;
+
+            if let Err(e) = res {
                 log::error!("Could not unlock objects: {}", e);
-                return;
             }
-        };
-
-        let res = diesel::sql_query(format!(
-            "UPDATE s3_object SET {} = NULL WHERE object_key = ANY($1)",
-            self.lock_column
-        ))
-        .bind::<Array<VarChar>, _>(&self.object_keys)
-        .execute(&mut connection);
-
-        if let Err(e) = res {
-            log::error!("Could not unlock objects: {}", e);
-        }
+        });
     }
 }

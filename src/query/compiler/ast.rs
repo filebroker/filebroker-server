@@ -841,12 +841,12 @@ pub fn sanitize_string_literal(val: &str) -> String {
 }
 
 #[derive(Debug)]
-pub struct Node<T: NodeType + ?Sized> {
+pub struct Node<T: NodeType + Send + ?Sized> {
     pub location: Location,
     pub node_type: T,
 }
 
-impl<T: NodeType + ?Sized> Node<T> {
+impl<T: NodeType + Send + ?Sized> Node<T> {
     pub fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log) {
         self.node_type.accept(visitor, log, self.location);
     }
@@ -869,7 +869,7 @@ impl NodeType for QueryNode {
     }
 }
 
-pub trait StatementNode: NodeType + Downcast {
+pub trait StatementNode: NodeType + Downcast + Send + Sync {
     /// Return an iterator over the nested expressions inside this expression (e.g. left and right expression in binary expression).
     fn unnest(&self) -> UnnestIter<'_> {
         UnnestIter::Empty
@@ -919,7 +919,7 @@ impl StatementNode for ModifierNode {
     }
 }
 
-pub trait ExpressionNode: NodeType + Downcast {
+pub trait ExpressionNode: NodeType + Downcast + Send + Sync {
     fn get_return_type(&self) -> Type;
 
     /// Return an iterator over the nested expressions inside this expression (e.g. left and right expression in binary expression).

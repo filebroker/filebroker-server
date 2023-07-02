@@ -69,8 +69,8 @@ pub enum Error {
     IllegalRangeError(u64, String),
 
     // 500
-    #[error("Could not establish database connection")]
-    DatabaseConnectionError,
+    #[error("Could not establish database connection: {0}")]
+    DatabaseConnectionError(String),
     #[error("There has been an error executing a query: '{0}'")]
     QueryError(String),
     #[error("There has been an error running a transaction: '{0}'")]
@@ -130,7 +130,7 @@ impl Error {
             | Error::InvalidUserNameError
             | Error::InvalidTokenError(_)
             | Error::EmailAlreadyConfirmedError => StatusCode::BAD_REQUEST,
-            Error::DatabaseConnectionError
+            Error::DatabaseConnectionError(_)
             | Error::QueryError(_)
             | Error::TransactionError(_)
             | Error::JwtCreationError
@@ -180,7 +180,7 @@ impl Error {
 
             Self::IllegalRangeError(..) => 416_001,
 
-            Self::DatabaseConnectionError => 500_001,
+            Self::DatabaseConnectionError(_) => 500_001,
             Self::QueryError(_) => 500_002,
             Self::TransactionError(_) => 500_003,
             Self::JwtCreationError => 500_004,

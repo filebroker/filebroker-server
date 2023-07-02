@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::QueryDsl;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{Stream, TryStreamExt};
 use mime::Mime;
 use mpart_async::server::MultipartStream;
@@ -16,13 +17,12 @@ use warp::{
 
 use crate::{
     acquire_db_connection,
-    diesel::{ExpressionMethods, OptionalExtension, RunQueryDsl},
+    diesel::{ExpressionMethods, OptionalExtension},
     error::Error,
     model::{Broker, NewBroker, S3Object, User},
     perms, post,
     query::PostDetailed,
     schema::{broker, s3_object},
-    DbConnection,
 };
 
 pub mod down;
@@ -48,8 +48,8 @@ pub async fn upload_handler(
         .map(|v| v.to_string())
         .ok_or_else(|| Error::InvalidFileError(String::from("No mime boundary")))?;
 
-    let mut connection = acquire_db_connection()?;
-    let broker = perms::load_broker_secured(broker_pk, &mut connection, Some(&user))?;
+    let mut connection = acquire_db_connection().await?;
+    let broker = perms::load_broker_secured(broker_pk, &mut connection, Some(&user)).await?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -115,17 +115,20 @@ pub async fn upload_handler(
 
             let mut posts_detailed = Vec::new();
             if is_existing {
-                let mut connection = acquire_db_connection()?;
+                let mut connection = acquire_db_connection().await?;
                 let posts =
-                    perms::load_s3_object_posts(&s3_object.object_key, user.pk, &mut connection)?;
+                    perms::load_s3_object_posts(&s3_object.object_key, user.pk, &mut connection)
+                        .await?;
 
                 for (post, s3_object) in posts {
                     let is_editable =
-                        perms::is_post_editable(&mut connection, Some(&user), post.pk)?;
-                    let tags =
-                        post::get_post_tags(post.pk, &mut connection).map_err(Error::from)?;
+                        perms::is_post_editable(&mut connection, Some(&user), post.pk).await?;
+                    let tags = post::get_post_tags(post.pk, &mut connection)
+                        .await
+                        .map_err(Error::from)?;
                     let group_access =
                         post::get_post_group_access(post.pk, Some(&user), &mut connection)
+                            .await
                             .map_err(Error::from)?;
 
                     posts_detailed.push(PostDetailed {
@@ -167,8 +170,8 @@ pub async fn get_object_handler(
     range: Option<String>,
 ) -> Result<impl Reply, Rejection> {
     let object_key = requested_path.as_str();
-    let mut connection = acquire_db_connection()?;
-    let (object, broker) = load_object(object_key, &mut connection)?;
+    let mut connection = acquire_db_connection().await?;
+    let (object, broker) = load_object(object_key, &mut connection).await?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -217,8 +220,8 @@ pub async fn get_object_head_handler(
     range: Option<String>,
 ) -> Result<impl Reply, Rejection> {
     let object_key = requested_path.as_str();
-    let mut connection = acquire_db_connection()?;
-    let (object, broker) = load_object(object_key, &mut connection)?;
+    let mut connection = acquire_db_connection().await?;
+    let (object, broker) = load_object(object_key, &mut connection).await?;
     drop(connection);
 
     let bucket = create_bucket(
@@ -310,7 +313,7 @@ pub async fn create_broker_handler(
         )));
     }
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     let created_broker = diesel::insert_into(broker::table)
         .values(&NewBroker {
             name: create_broker_request.name,
@@ -325,27 +328,28 @@ pub async fn create_broker_handler(
             hls_enabled: false,
         })
         .get_result::<Broker>(&mut connection)
+        .await
         .map_err(Error::from)?;
 
     Ok(warp::reply::json(&created_broker))
 }
 
 pub async fn get_brokers_handler(user: Option<User>) -> Result<impl Reply, Rejection> {
-    let mut connection = acquire_db_connection()?;
-    Ok(warp::reply::json(&perms::get_brokers_secured(
-        &mut connection,
-        user.as_ref(),
-    )?))
+    let mut connection = acquire_db_connection().await?;
+    Ok(warp::reply::json(
+        &perms::get_brokers_secured(&mut connection, user.as_ref()).await?,
+    ))
 }
 
-pub fn load_object(
+pub async fn load_object(
     object_key: &str,
-    connection: &mut DbConnection,
+    connection: &mut AsyncPgConnection,
 ) -> Result<(S3Object, Broker), Error> {
     s3_object::table
         .inner_join(broker::table)
         .filter(s3_object::object_key.eq(object_key))
         .get_result::<(S3Object, Broker)>(connection)
+        .await
         .optional()
         .map_err(Error::from)?
         .ok_or_else(|| Error::InaccessibleS3ObjectError(String::from(object_key)))

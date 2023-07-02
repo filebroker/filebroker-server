@@ -1,18 +1,18 @@
 use chrono::Utc;
 use diesel::{
-    connection::LoadConnection,
     dsl::{exists, not},
-    pg::Pg,
-    Connection, NullableExpressionMethods, QueryDsl,
+    NullableExpressionMethods, QueryDsl,
 };
+use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
 use serde::Deserialize;
 use warp::{Rejection, Reply};
 
 use crate::{
     acquire_db_connection,
-    diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension, RunQueryDsl},
-    error::Error,
+    diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension},
+    error::{Error, TransactionRuntimeError},
     model::{Broker, NewUserGroup, Post, S3Object, User, UserGroup},
+    run_retryable_transaction,
     schema::{
         broker, broker_access, post, post_group_access, s3_object, user_group,
         user_group_membership,
@@ -110,9 +110,9 @@ macro_rules! get_group_access_write_condition {
 
 pub(crate) use get_group_access_write_condition;
 
-pub fn load_post_secured<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn load_post_secured(
     post_pk: i32,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
     user: Option<&User>,
 ) -> Result<(Post, Option<S3Object>), Error> {
     let user_pk = user.map(|u| u.pk);
@@ -135,14 +135,15 @@ pub fn load_post_secured<C: Connection<Backend = Pg> + LoadConnection>(
             ),
         )
         .get_result::<(Post, Option<S3Object>)>(connection)
+        .await
         .optional()?
         .ok_or(Error::InaccessibleObjectError(post_pk))
 }
 
-pub fn load_s3_object_posts<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn load_s3_object_posts(
     s3_object_key: &str,
     user_pk: i32,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<Vec<(Post, S3Object)>, Error> {
     post::table
         .inner_join(s3_object::table)
@@ -163,12 +164,13 @@ pub fn load_s3_object_posts<C: Connection<Backend = Pg> + LoadConnection>(
             ),
         )
         .load::<(Post, S3Object)>(connection)
+        .await
         .map_err(|e| Error::QueryError(e.to_string()))
 }
 
-pub fn load_broker_secured<C: Connection<Backend = Pg> + LoadConnection>(
+pub async fn load_broker_secured(
     broker_pk: i32,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
     user: Option<&User>,
 ) -> Result<Broker, Error> {
     let user_pk = user.map(|u| u.pk);
@@ -186,12 +188,13 @@ pub fn load_broker_secured<C: Connection<Backend = Pg> + LoadConnection>(
                 ))),
         )
         .get_result::<Broker>(connection)
+        .await
         .optional()?
         .ok_or(Error::InaccessibleObjectError(broker_pk))
 }
 
-pub fn get_brokers_secured<C: Connection<Backend = Pg> + LoadConnection>(
-    connection: &mut C,
+pub async fn get_brokers_secured(
+    connection: &mut AsyncPgConnection,
     user: Option<&User>,
 ) -> Result<Vec<Broker>, Error> {
     let user_pk = user.map(|u| u.pk);
@@ -210,32 +213,35 @@ pub fn get_brokers_secured<C: Connection<Backend = Pg> + LoadConnection>(
                 ))),
         )
         .load::<Broker>(connection)
+        .await
         .map_err(|e| Error::QueryError(e.to_string()))
 }
 
-pub fn get_user_groups_secured<C: Connection<Backend = Pg> + LoadConnection>(
-    connection: &mut C,
+pub async fn get_user_groups_secured(
+    connection: &mut AsyncPgConnection,
     user: Option<&User>,
 ) -> Result<Vec<UserGroup>, Error> {
     let user_pk = user.map(|u| u.pk);
     user_group::table
         .filter(not(user_group::hidden).or(get_group_membership_condition!(user_pk)))
         .load::<UserGroup>(connection)
+        .await
         .map_err(|e| Error::QueryError(e.to_string()))
 }
 
-pub fn get_current_user_groups<C: Connection<Backend = Pg> + LoadConnection>(
-    connection: &mut C,
+pub async fn get_current_user_groups(
+    connection: &mut AsyncPgConnection,
     user: &User,
 ) -> Result<Vec<UserGroup>, Error> {
     user_group::table
         .filter(get_group_membership_condition!(user.pk))
         .load::<UserGroup>(connection)
+        .await
         .map_err(|e| Error::QueryError(e.to_string()))
 }
 
-pub fn is_post_editable<C: Connection<Backend = Pg> + LoadConnection>(
-    connection: &mut C,
+pub async fn is_post_editable(
+    connection: &mut AsyncPgConnection,
     user: Option<&User>,
     post_pk: i32,
 ) -> Result<bool, Error> {
@@ -256,6 +262,7 @@ pub fn is_post_editable<C: Connection<Backend = Pg> + LoadConnection>(
             ),
         )
         .get_result::<Post>(connection)
+        .await
         .optional()
         .map_err(|e| Error::QueryError(e.to_string()))
         .map(|result| result.is_some())
@@ -272,15 +279,13 @@ pub async fn create_user_group_handler(
     request: CreateUserGroupRequest,
     user: User,
 ) -> Result<impl Reply, Rejection> {
-    let mut connection = acquire_db_connection()?;
-
-    let user_group = connection
-        .build_transaction()
-        .run(|connection| {
-            let current_groups = get_current_user_groups(connection, &user)?;
+    let mut connection = acquire_db_connection().await?;
+    let user_group = run_retryable_transaction(&mut connection, |connection| {
+        async move {
+            let current_groups = get_current_user_groups(connection, &user).await?;
             if current_groups.len() >= 250 {
-                return Err(Error::BadRequestError(String::from(
-                    "Cannot be a member of more than 250 groups",
+                return Err(TransactionRuntimeError::from(Error::BadRequestError(
+                    String::from("Cannot be a member of more than 250 groups"),
                 )));
             }
 
@@ -292,25 +297,27 @@ pub async fn create_user_group_handler(
                     fk_owner: user.pk,
                     creation_timestamp: Utc::now(),
                 })
-                .get_result::<UserGroup>(connection)?)
-        })
-        .map_err(Error::from)?;
+                .get_result::<UserGroup>(connection)
+                .await?)
+        }
+        .scope_boxed()
+    })
+    .await
+    .map_err(Error::from)?;
 
     Ok(warp::reply::json(&user_group))
 }
 
 pub async fn get_user_groups_handler(user: Option<User>) -> Result<impl Reply, Rejection> {
-    let mut connection = acquire_db_connection()?;
-    Ok(warp::reply::json(&get_user_groups_secured(
-        &mut connection,
-        user.as_ref(),
-    )?))
+    let mut connection = acquire_db_connection().await?;
+    Ok(warp::reply::json(
+        &get_user_groups_secured(&mut connection, user.as_ref()).await?,
+    ))
 }
 
 pub async fn get_current_user_groups_handler(user: User) -> Result<impl Reply, Rejection> {
-    let mut connection = acquire_db_connection()?;
-    Ok(warp::reply::json(&get_current_user_groups(
-        &mut connection,
-        &user,
-    )?))
+    let mut connection = acquire_db_connection().await?;
+    Ok(warp::reply::json(
+        &get_current_user_groups(&mut connection, &user).await?,
+    ))
 }

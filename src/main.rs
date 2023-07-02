@@ -2,14 +2,18 @@
 extern crate diesel;
 use chrono::Utc;
 use clokwerk::Scheduler;
+use diesel_async::{
+    pg::TransactionBuilder,
+    pooled_connection::{
+        deadpool::{Object, Pool},
+        AsyncDieselConnectionManager,
+    },
+    scoped_futures::ScopedBoxFuture,
+    AsyncPgConnection,
+};
 #[cfg(feature = "auto_migration")]
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
-use diesel::{
-    pg::TransactionBuilder,
-    r2d2::{self, ConnectionManager, Pool, PooledConnection},
-    PgConnection,
-};
 use dotenvy::dotenv;
 use error::{Error, TransactionRuntimeError};
 use futures::{Future, StreamExt, TryFuture};
@@ -57,22 +61,21 @@ mod schema;
 mod task;
 mod util;
 
-pub type DbConnection = PooledConnection<ConnectionManager<PgConnection>>;
+pub type DbConnection = Object<AsyncPgConnection>;
 
 lazy_static! {
-    pub static ref CONNECTION_POOL: Pool<ConnectionManager<PgConnection>> = {
+    pub static ref CONNECTION_POOL: Pool<AsyncPgConnection> = {
         let database_url = std::env::var("FILEBROKER_DATABASE_URL")
             .expect("Missing environment variable FILEBROKER_DATABASE_URL must be set to connect to postgres");
         let database_connection_manager =
-            r2d2::ConnectionManager::<PgConnection>::new(database_url);
+            AsyncDieselConnectionManager::<AsyncPgConnection>::new(database_url);
         let max_db_connections = std::env::var("FILEBROKER_MAX_DB_CONNECTIONS")
             .unwrap_or_else(|_| String::from("25"))
-            .parse::<u32>()
-            .expect("FILEBROKER_MAX_DB_CONNECTIONS is not a valid u32");
-        r2d2::Builder::new()
-            .min_idle(Some(5))
+            .parse::<usize>()
+            .expect("FILEBROKER_MAX_DB_CONNECTIONS is not a valid usize");
+        Pool::builder(database_connection_manager)
             .max_size(max_db_connections)
-            .build(database_connection_manager)
+            .build()
             .expect("Failed to initialise connection pool")
     };
     pub static ref JWT_SECRET: u64 = {
@@ -149,44 +152,64 @@ fn main() {
     setup_tokio_runtime();
 }
 
-pub fn acquire_db_connection() -> Result<DbConnection, Error> {
+pub async fn acquire_db_connection() -> Result<DbConnection, Error> {
     CONNECTION_POOL
         .get()
-        .map_err(|_| Error::DatabaseConnectionError)
+        .await
+        .map_err(|e| Error::DatabaseConnectionError(e.to_string()))
 }
 
-pub fn run_retryable_transaction<
-    T,
-    F: Fn(&mut PgConnection) -> Result<T, TransactionRuntimeError>,
->(
-    connection: &mut DbConnection,
+pub async fn run_retryable_transaction<'b, 'c, T: 'b, F>(
+    connection: &mut AsyncPgConnection,
     function: F,
-) -> Result<T, Error> {
+) -> Result<T, Error>
+where
+    F: for<'r> FnOnce(
+            &'r mut AsyncPgConnection,
+        ) -> ScopedBoxFuture<'b, 'r, Result<T, TransactionRuntimeError>>
+        + Clone
+        + Send
+        + 'c,
+{
     run_retryable_transaction_with_level(connection.build_transaction().read_committed(), function)
+        .await
 }
 
-pub fn run_serializable_transaction<
-    T,
-    F: Fn(&mut PgConnection) -> Result<T, TransactionRuntimeError>,
->(
-    connection: &mut DbConnection,
+pub async fn run_serializable_transaction<'b, 'c, T: 'b, F>(
+    connection: &mut AsyncPgConnection,
     function: F,
-) -> Result<T, Error> {
+) -> Result<T, Error>
+where
+    F: for<'r> FnOnce(
+            &'r mut AsyncPgConnection,
+        ) -> ScopedBoxFuture<'b, 'r, Result<T, TransactionRuntimeError>>
+        + Clone
+        + Send
+        + 'c,
+{
     run_retryable_transaction_with_level(connection.build_transaction().serializable(), function)
+        .await
 }
 
-fn run_retryable_transaction_with_level<
-    T,
-    F: Fn(&mut PgConnection) -> Result<T, TransactionRuntimeError>,
->(
-    mut transaction_builder: TransactionBuilder<PgConnection>,
+async fn run_retryable_transaction_with_level<'b, 'c, T, F>(
+    mut transaction_builder: TransactionBuilder<'c, AsyncPgConnection>,
     function: F,
-) -> Result<T, Error> {
+) -> Result<T, Error>
+where
+    T: 'b,
+    F: for<'r> FnOnce(
+            &'r mut AsyncPgConnection,
+        ) -> ScopedBoxFuture<'b, 'r, Result<T, TransactionRuntimeError>>
+        + Clone
+        + Send
+        + 'c,
+{
     let mut retry_count: usize = 0;
     loop {
         retry_count += 1;
-        let transaction_result =
-            transaction_builder.run::<_, TransactionRuntimeError, _>(&function);
+        let transaction_result = transaction_builder
+            .run::<_, TransactionRuntimeError, _>(function.clone())
+            .await;
 
         match transaction_result {
             Err(TransactionRuntimeError::Retry(_)) if retry_count <= 10 => { /* retry max 10 attempts */

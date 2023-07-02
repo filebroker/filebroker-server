@@ -2,6 +2,7 @@ use std::{ffi::OsStr, path::Path};
 
 use chrono::Utc;
 use diesel::{OptionalExtension, QueryDsl};
+use diesel_async::RunQueryDsl;
 use futures::{stream::IntoAsyncRead, TryStream};
 use s3::Bucket;
 use uuid::Uuid;
@@ -9,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     acquire_db_connection,
     data::encode::{generate_hls_playlist, generate_thumbnail},
-    diesel::{BoolExpressionMethods, ExpressionMethods, RunQueryDsl},
+    diesel::{BoolExpressionMethods, ExpressionMethods},
     error::Error,
     model::{Broker, S3Object, User},
     schema::s3_object,
@@ -50,7 +51,7 @@ where
     let digest = reader.hasher.finish();
     let hash = data_encoding::HEXUPPER.encode(digest.as_ref());
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
 
     if broker.remove_duplicate_files {
         let existing_object = s3_object::table
@@ -61,6 +62,7 @@ where
             )
             .limit(1)
             .get_result::<S3Object>(&mut connection)
+            .await
             .optional()
             .map_err(|e| Error::QueryError(e.to_string()))?;
 
@@ -93,7 +95,7 @@ where
                 }
             }
 
-            connection = acquire_db_connection()?;
+            connection = acquire_db_connection().await?;
         }
     }
 
@@ -128,6 +130,7 @@ where
             thumbnail_disabled: false,
         })
         .get_result::<S3Object>(&mut connection)
+        .await
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
     let path = s3_object.object_key.clone();

@@ -2,10 +2,8 @@ use std::net::SocketAddr;
 
 use bcrypt::{hash, verify, DEFAULT_COST};
 use chrono::{offset::Utc, DateTime, Duration};
-use diesel::{
-    connection::LoadConnection, dsl::count, expression_methods::BoolExpressionMethods, pg::Pg,
-    Connection,
-};
+use diesel::{dsl::count, expression_methods::BoolExpressionMethods};
+use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
 use exec_rs::sync::MutexSync;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use lazy_static::lazy_static;
@@ -26,7 +24,7 @@ use zxcvbn::zxcvbn;
 
 use crate::{
     acquire_db_connection,
-    diesel::{ExpressionMethods, OptionalExtension, QueryDsl, RunQueryDsl},
+    diesel::{ExpressionMethods, OptionalExtension, QueryDsl},
     error::{Error, TransactionRuntimeError},
     mail,
     model::{EmailConfirmationToken, NewUser, OneTimePassword, RefreshToken, User},
@@ -132,10 +130,11 @@ async fn get_user_from_auth_header(header_map: HeaderMap) -> Result<Option<User>
     .map_err(|_| warp::reject::custom(Error::InvalidJwtError))?;
     let claims = &token_data.claims;
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     match registered_user::table
         .filter(registered_user::user_name.eq(&claims.sub))
         .get_result::<User>(&mut connection)
+        .await
         .optional()
     {
         Ok(Some(registered_user)) if registered_user.jwt_version == claims.ver => {
@@ -166,10 +165,11 @@ pub async fn login_handler(
         None => true,
     };
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     let found_registered_user = registered_user::table
         .filter(lower(registered_user::user_name).eq(&request.user_name.to_lowercase()))
-        .get_result::<User>(&mut connection);
+        .get_result::<User>(&mut connection)
+        .await;
     let registered_user = match found_registered_user {
         Ok(registered_user) => {
             if registered_user.password_fail_count >= 10 && !captcha_verified {
@@ -183,6 +183,7 @@ pub async fn login_handler(
                             .filter(registered_user::pk.eq(&registered_user.pk))
                             .set(registered_user::password_fail_count.eq(0))
                             .execute(&mut connection)
+                            .await
                             .map_err(Error::from)?;
                         registered_user
                     } else {
@@ -193,6 +194,7 @@ pub async fn login_handler(
                                     .eq(registered_user::password_fail_count + 1),
                             )
                             .execute(&mut connection)
+                            .await
                             .map_err(Error::from)?;
                         return Err(warp::reject::custom(Error::InvalidCredentialsError));
                     }
@@ -204,7 +206,8 @@ pub async fn login_handler(
         Err(e) => return Err(warp::reject::custom(Error::QueryError(e.to_string()))),
     };
 
-    let refresh_token_cookie = create_refresh_token_cookie(&registered_user, &mut connection)?;
+    let refresh_token_cookie =
+        create_refresh_token_cookie(&registered_user, &mut connection).await?;
     create_login_response(registered_user, refresh_token_cookie).map_err(warp::reject::custom)
 }
 
@@ -215,9 +218,9 @@ struct RefreshTokenCookie {
 
 /// Create a HttpOnly Cookie that may be used to refresh logins by generating a UUID which is persisted
 /// to the database as a RefreshToken entity which links the UUID to the User.
-fn create_refresh_token_cookie<C: Connection<Backend = Pg> + LoadConnection>(
+async fn create_refresh_token_cookie(
     registered_user: &User,
-    connection: &mut C,
+    connection: &mut AsyncPgConnection,
 ) -> Result<RefreshTokenCookie, Error> {
     let uuid = Uuid::new_v4();
     let current_utc = Utc::now();
@@ -233,6 +236,7 @@ fn create_refresh_token_cookie<C: Connection<Backend = Pg> + LoadConnection>(
     let refresh_token = match diesel::insert_into(refresh_token::table)
         .values(&new_refresh_token)
         .get_result::<RefreshToken>(connection)
+        .await
     {
         Ok(refresh_token) => refresh_token,
         Err(e) => return Err(Error::QueryError(e.to_string())),
@@ -323,7 +327,7 @@ fn create_login_response_struct(
 /// Returns a [`LoginResponse`] with the new JWT if the refresh token is valid (the UUID exists and
 /// the refresh token is not expired) or else returns a InvalidRefreshTokenError which results in a 401.
 pub async fn refresh_login_handler(refresh_token: String) -> Result<impl Reply, Rejection> {
-    let (user, refresh_token_cookie) = refresh_user_login_data(refresh_token)?;
+    let (user, refresh_token_cookie) = refresh_user_login_data(refresh_token).await?;
     create_login_response(user, refresh_token_cookie).map_err(warp::reject::custom)
 }
 
@@ -332,12 +336,13 @@ pub async fn try_refresh_login_handler(
 ) -> Result<impl Reply, Rejection> {
     let (login_response, refresh_token_cookie) = match refresh_token {
         Some(refresh_token) if !refresh_token.is_empty() => {
-            if let Some((user, refresh_token_cookie)) = match refresh_user_login_data(refresh_token)
+            if let Some((user, refresh_token_cookie)) =
+                match refresh_user_login_data(refresh_token).await {
+                    Ok(res) => Some(res),
+                    Err(Error::InvalidRefreshTokenError) => None,
+                    Err(e) => return Err(warp::reject::custom(e)),
+                }
             {
-                Ok(res) => Some(res),
-                Err(Error::InvalidRefreshTokenError) => None,
-                Err(e) => return Err(warp::reject::custom(e)),
-            } {
                 (
                     Some(create_login_response_struct(
                         user,
@@ -374,9 +379,10 @@ pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply,
     if let Some(refresh_token) = refresh_token {
         let curr_token_uuid = Uuid::parse_str(&refresh_token)
             .map_err(|_| Error::BadRequestError(String::from("Invalid refresh token")))?;
-        let mut connection = acquire_db_connection()?;
+        let mut connection = acquire_db_connection().await?;
         diesel::delete(refresh_token::table.filter(refresh_token::uuid.eq(&curr_token_uuid)))
             .execute(&mut connection)
+            .await
             .map_err(Error::from)?;
 
         let refresh_token_cookie = format_refresh_token_cookie("", &Utc::now().to_rfc2822());
@@ -386,49 +392,57 @@ pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply,
     Ok(response_builder.body(hyper::Body::empty()))
 }
 
-fn refresh_user_login_data(refresh_token: String) -> Result<(User, RefreshTokenCookie), Error> {
-    let mut connection = acquire_db_connection()?;
-    connection.transaction(|connection| {
-        let curr_token_uuid = Uuid::parse_str(&refresh_token)
-            .map_err(|_| Error::BadRequestError(String::from("Invalid refresh token")))?;
-        let current_utc = Utc::now();
+async fn refresh_user_login_data(
+    refresh_token: String,
+) -> Result<(User, RefreshTokenCookie), Error> {
+    let mut connection = acquire_db_connection().await?;
+    run_retryable_transaction(&mut connection, |connection| {
+        async move {
+            let curr_token_uuid = Uuid::parse_str(&refresh_token)
+                .map_err(|_| Error::BadRequestError(String::from("Invalid refresh token")))?;
+            let current_utc = Utc::now();
 
-        let expiry = current_utc + *REFRESH_TOKEN_EXPIRATION;
-        let new_token = Uuid::new_v4();
+            let expiry = current_utc + *REFRESH_TOKEN_EXPIRATION;
+            let new_token = Uuid::new_v4();
 
-        let updated_token = diesel::update(refresh_token::table)
-            .filter(
-                refresh_token::uuid
-                    .eq(&curr_token_uuid)
-                    .and(refresh_token::expiry.ge(&current_utc))
-                    .and(refresh_token::invalidated.eq(false)),
-            )
-            .set((
-                refresh_token::uuid.eq(new_token),
-                refresh_token::expiry.eq(expiry),
+            let updated_token = diesel::update(refresh_token::table)
+                .filter(
+                    refresh_token::uuid
+                        .eq(&curr_token_uuid)
+                        .and(refresh_token::expiry.ge(&current_utc))
+                        .and(refresh_token::invalidated.eq(false)),
+                )
+                .set((
+                    refresh_token::uuid.eq(new_token),
+                    refresh_token::expiry.eq(expiry),
+                ))
+                .get_result::<RefreshToken>(connection)
+                .await
+                .optional()
+                .map_err(|e| Error::QueryError(e.to_string()))?
+                .ok_or(Error::InvalidRefreshTokenError)?;
+
+            let user = registered_user::table
+                .filter(registered_user::pk.eq(updated_token.fk_user))
+                .get_result::<User>(connection)
+                .await
+                .map_err(|e| Error::QueryError(e.to_string()))?;
+
+            let uuid = updated_token.uuid.to_string();
+            let expiry = updated_token.expiry.to_rfc2822();
+
+            let cookie = format_refresh_token_cookie(&uuid, &expiry);
+            Ok((
+                user,
+                RefreshTokenCookie {
+                    token: uuid,
+                    cookie,
+                },
             ))
-            .get_result::<RefreshToken>(connection)
-            .optional()
-            .map_err(|e| Error::QueryError(e.to_string()))?
-            .ok_or(Error::InvalidRefreshTokenError)?;
-
-        let user = registered_user::table
-            .filter(registered_user::pk.eq(updated_token.fk_user))
-            .get_result::<User>(connection)
-            .map_err(|e| Error::QueryError(e.to_string()))?;
-
-        let uuid = updated_token.uuid.to_string();
-        let expiry = updated_token.expiry.to_rfc2822();
-
-        let cookie = format_refresh_token_cookie(&uuid, &expiry);
-        Ok((
-            user,
-            RefreshTokenCookie {
-                token: uuid,
-                cookie,
-            },
-        ))
+        }
+        .scope_boxed()
     })
+    .await
 }
 
 lazy_static! {
@@ -478,7 +492,7 @@ pub async fn register_handler(
         return Err(warp::reject::custom(Error::WeakPasswordError));
     }
 
-    let check_user_name_response = check_username(&user_registration.user_name)?;
+    let check_user_name_response = check_username(&user_registration.user_name).await?;
     if !check_user_name_response.valid {
         return Err(warp::reject::custom(Error::InvalidUserNameError));
     }
@@ -494,68 +508,66 @@ pub async fn register_handler(
             .ok_or(Error::InvalidCaptchaError)?;
         captcha::verify_captcha(captcha_secret.clone(), captcha_token, remote_addr).await?;
     }
+    let hashed_password = match hash(&user_registration.password, DEFAULT_COST) {
+        Ok(hashed_password) => hashed_password,
+        Err(_) => return Err(warp::reject::custom(Error::EncryptionError)),
+    };
 
-    // synchronise user creation based on user_name, limits the number of retried transactions
-    // when a user_named is spammed
-    let (created_user, login_response) =
-        USER_NAME_SYNC.evaluate(user_registration.user_name.clone(), || {
-            let hashed_password = match hash(&user_registration.password, DEFAULT_COST) {
-                Ok(hashed_password) => hashed_password,
-                Err(_) => return Err(Error::EncryptionError),
-            };
+    let new_user = NewUser {
+        user_name: user_registration.user_name,
+        password: hashed_password,
+        email: user_registration.email,
+        avatar_url: user_registration.avatar_url,
+        creation_timestamp: Utc::now(),
+        email_confirmed: false,
+        display_name: user_registration.display_name,
+    };
+    let mut connection = acquire_db_connection().await?;
+    let (created_user, login_response) = run_retryable_transaction(&mut connection, |connection| {
+        async move {
+            let existing_count: Result<i64, _> = registered_user::table
+                .select(count(registered_user::pk))
+                .filter(lower(registered_user::user_name).eq(&new_user.user_name.to_lowercase()))
+                .get_result(connection)
+                .await;
 
-            let new_user = NewUser {
-                user_name: user_registration.user_name,
-                password: hashed_password,
-                email: user_registration.email,
-                avatar_url: user_registration.avatar_url,
-                creation_timestamp: Utc::now(),
-                email_confirmed: false,
-                display_name: user_registration.display_name,
-            };
-            let mut connection = acquire_db_connection()?;
-            run_retryable_transaction(&mut connection, |connection| {
-                let existing_count: Result<i64, _> = registered_user::table
-                    .select(count(registered_user::pk))
-                    .filter(
-                        lower(registered_user::user_name).eq(&new_user.user_name.to_lowercase()),
-                    )
-                    .get_result(connection);
-
-                match existing_count {
-                    Ok(count) => {
-                        if count != 0 {
-                            return Err(TransactionRuntimeError::Rollback(
-                                Error::UniqueValueError(new_user.user_name.clone()),
-                            ));
-                        }
+            match existing_count {
+                Ok(count) => {
+                    if count != 0 {
+                        return Err(TransactionRuntimeError::Rollback(Error::UniqueValueError(
+                            new_user.user_name.clone(),
+                        )));
                     }
-                    Err(e) => {
-                        return Err(TransactionRuntimeError::Rollback(Error::QueryError(
-                            e.to_string(),
-                        )))
-                    }
-                };
-
-                match diesel::insert_into(registered_user::table)
-                    .values(&new_user)
-                    .get_result::<User>(connection)
-                    .map_err(retry_on_constraint_violation)
-                {
-                    Ok(registered_user) => {
-                        let refresh_token_cookie =
-                            create_refresh_token_cookie(&registered_user, connection)?;
-                        let login_response =
-                            create_login_response(registered_user.clone(), refresh_token_cookie)
-                                .map_err(TransactionRuntimeError::Rollback)?;
-                        Ok((registered_user, login_response))
-                    }
-                    Err(e) => Err(TransactionRuntimeError::Rollback(Error::QueryError(
-                        e.to_string(),
-                    ))),
                 }
-            })
-        })?;
+                Err(e) => {
+                    return Err(TransactionRuntimeError::Rollback(Error::QueryError(
+                        e.to_string(),
+                    )))
+                }
+            };
+
+            match diesel::insert_into(registered_user::table)
+                .values(&new_user)
+                .get_result::<User>(connection)
+                .await
+                .map_err(retry_on_constraint_violation)
+            {
+                Ok(registered_user) => {
+                    let refresh_token_cookie =
+                        create_refresh_token_cookie(&registered_user, connection).await?;
+                    let login_response =
+                        create_login_response(registered_user.clone(), refresh_token_cookie)
+                            .map_err(TransactionRuntimeError::Rollback)?;
+                    Ok((registered_user, login_response))
+                }
+                Err(e) => Err(TransactionRuntimeError::Rollback(Error::QueryError(
+                    e.to_string(),
+                ))),
+            }
+        }
+        .scope_boxed()
+    })
+    .await?;
 
     if mail::mail_enabled() {
         if created_user
@@ -565,7 +577,7 @@ pub async fn register_handler(
             .unwrap_or(false)
         {
             tokio::spawn(async move {
-                match prepare_email_confirmation_token(created_user.pk) {
+                match prepare_email_confirmation_token(created_user.pk).await {
                     Ok(email_confirmation_token) => {
                         let mut context = tera::Context::new();
                         prepare_email_confirmation_context(
@@ -632,11 +644,11 @@ pub async fn check_username_handler(user_name: String) -> Result<impl Reply, Rej
         .decode_utf8()
         .map_err(|_| Error::UtfEncodingError)?;
 
-    let response = check_username(&user_name)?;
+    let response = check_username(&user_name).await?;
     Ok(warp::reply::json(&response))
 }
 
-fn check_username(user_name: &str) -> Result<CheckUsernameResponse, Error> {
+async fn check_username(user_name: &str) -> Result<CheckUsernameResponse, Error> {
     let valid = !user_name.is_empty()
         && user_name.len() <= 25
         && user_name
@@ -649,11 +661,12 @@ fn check_username(user_name: &str) -> Result<CheckUsernameResponse, Error> {
         });
     }
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     let existing_count: i64 = registered_user::table
         .select(count(registered_user::pk))
         .filter(lower(registered_user::user_name).eq(&user_name.to_lowercase()))
         .get_result(&mut connection)
+        .await
         .map_err(Error::from)?;
 
     Ok(CheckUsernameResponse {
@@ -662,10 +675,10 @@ fn check_username(user_name: &str) -> Result<CheckUsernameResponse, Error> {
     })
 }
 
-fn prepare_email_confirmation_token(user_pk: i32) -> Result<EmailConfirmationToken, Error> {
+async fn prepare_email_confirmation_token(user_pk: i32) -> Result<EmailConfirmationToken, Error> {
     let current_utc = Utc::now();
     let expiry = current_utc + *EMAIL_CONFIRMATION_TOKEN_EXPIRATION;
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     diesel::insert_into(email_confirmation_token::table)
         .values(&EmailConfirmationToken {
             uuid: Uuid::new_v4(),
@@ -674,6 +687,7 @@ fn prepare_email_confirmation_token(user_pk: i32) -> Result<EmailConfirmationTok
             fk_user: user_pk,
         })
         .get_result::<EmailConfirmationToken>(&mut connection)
+        .await
         .map_err(Error::from)
 }
 
@@ -706,30 +720,36 @@ pub async fn confirm_email_handler(
     email_confirmation_token: Uuid,
     user: User,
 ) -> Result<impl Reply, Rejection> {
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     let deleted_token = run_retryable_transaction(&mut connection, |connection| {
-        let current_utc = Utc::now();
-        let deleted_token = diesel::delete(email_confirmation_token::table)
-            .filter(
-                email_confirmation_token::uuid
-                    .eq(&email_confirmation_token)
-                    .and(email_confirmation_token::fk_user.eq(user.pk))
-                    .and(email_confirmation_token::expiry.ge(&current_utc))
-                    .and(email_confirmation_token::invalidated.eq(false)),
-            )
-            .returning(email_confirmation_token::uuid)
-            .get_result::<Uuid>(connection)
-            .optional()?;
+        async move {
+            let current_utc = Utc::now();
+            let deleted_token = diesel::delete(email_confirmation_token::table)
+                .filter(
+                    email_confirmation_token::uuid
+                        .eq(&email_confirmation_token)
+                        .and(email_confirmation_token::fk_user.eq(user.pk))
+                        .and(email_confirmation_token::expiry.ge(&current_utc))
+                        .and(email_confirmation_token::invalidated.eq(false)),
+                )
+                .returning(email_confirmation_token::uuid)
+                .get_result::<Uuid>(connection)
+                .await
+                .optional()?;
 
-        if deleted_token.is_some() {
-            diesel::update(registered_user::table)
-                .filter(registered_user::pk.eq(user.pk))
-                .set(registered_user::email_confirmed.eq(true))
-                .execute(connection)?;
+            if deleted_token.is_some() {
+                diesel::update(registered_user::table)
+                    .filter(registered_user::pk.eq(user.pk))
+                    .set(registered_user::email_confirmed.eq(true))
+                    .execute(connection)
+                    .await?;
+            }
+
+            Ok(deleted_token)
         }
-
-        Ok(deleted_token)
-    })?;
+        .scope_boxed()
+    })
+    .await?;
 
     if deleted_token.is_none() {
         Err(warp::reject::custom(Error::InvalidTokenError(
@@ -780,17 +800,19 @@ pub async fn edit_user_handler(
         request.email = Some(String::from(""));
     }
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     let updated_user = if request.has_changes() {
         diesel::update(registered_user::table)
             .filter(registered_user::pk.eq(user.pk))
             .set(&request)
             .get_result::<User>(&mut connection)
+            .await
             .map_err(Error::from)?
     } else {
         registered_user::table
             .filter(registered_user::pk.eq(user.pk))
             .get_result::<User>(&mut connection)
+            .await
             .map_err(Error::from)?
     };
 
@@ -807,7 +829,7 @@ pub async fn edit_user_handler(
             removed_context.insert("new_email_address", request.email.as_ref().unwrap());
 
             let mut confirmation_context = tera::Context::new();
-            let email_confirmation_token = match prepare_email_confirmation_token(user.pk) {
+            let email_confirmation_token = match prepare_email_confirmation_token(user.pk).await {
                 Ok(email_confirmation_token) => email_confirmation_token,
                 Err(e) => {
                     log::error!(
@@ -867,7 +889,7 @@ pub async fn send_email_confirmation_link_handler(
         ))));
     }
 
-    let email_confirmation_token = prepare_email_confirmation_token(user.pk)?;
+    let email_confirmation_token = prepare_email_confirmation_token(user.pk).await?;
     let mut context = tera::Context::new();
     prepare_email_confirmation_context(&mut context, &email_confirmation_token, &authority);
     mail::send_mail(
@@ -906,12 +928,13 @@ pub async fn change_password_handler(
 
     let current_password = &user.password;
     let valid = verify(&request.password, current_password).map_err(|_| Error::EncryptionError)?;
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     if !valid {
         diesel::update(registered_user::table)
             .filter(registered_user::pk.eq(&user.pk))
             .set(registered_user::password_fail_count.eq(registered_user::password_fail_count + 1))
             .execute(&mut connection)
+            .await
             .map_err(Error::from)?;
         return Err(warp::reject::custom(Error::InvalidCredentialsError));
     } else {
@@ -919,6 +942,7 @@ pub async fn change_password_handler(
             .filter(registered_user::pk.eq(&user.pk))
             .set(registered_user::password_fail_count.eq(0))
             .execute(&mut connection)
+            .await
             .map_err(Error::from)?;
     }
 
@@ -938,22 +962,27 @@ pub async fn change_password_handler(
     let hashed_password =
         hash(&request.new_password, DEFAULT_COST).map_err(|_| Error::EncryptionError)?;
 
-    connection
-        .transaction(|connection| {
+    run_retryable_transaction(&mut connection, |connection| {
+        async move {
             let user = diesel::update(registered_user::table)
                 .filter(registered_user::pk.eq(user.pk))
                 .set(registered_user::password.eq(&hashed_password))
-                .get_result::<User>(connection)?;
+                .get_result::<User>(connection)
+                .await?;
 
             diesel::update(refresh_token::table)
                 .filter(refresh_token::fk_user.eq(user.pk))
                 .set(refresh_token::invalidated.eq(true))
-                .execute(connection)?;
+                .execute(connection)
+                .await?;
 
-            let refresh_token_cookie = create_refresh_token_cookie(&user, connection)?;
-            create_login_response(user, refresh_token_cookie)
-        })
-        .map_err(warp::reject::custom)
+            let refresh_token_cookie = create_refresh_token_cookie(&user, connection).await?;
+            create_login_response(user, refresh_token_cookie).map_err(|e| e.into())
+        }
+        .scope_boxed()
+    })
+    .await
+    .map_err(warp::reject::custom)
 }
 
 #[derive(Deserialize, Validate)]
@@ -981,7 +1010,7 @@ pub async fn send_password_reset_handler(
         captcha::verify_captcha(captcha_secret.clone(), captcha_token, remote_addr).await?;
     }
 
-    let mut connection = acquire_db_connection()?;
+    let mut connection = acquire_db_connection().await?;
     let matching_user = registered_user::table
         .filter(
             lower(registered_user::user_name)
@@ -990,6 +1019,7 @@ pub async fn send_password_reset_handler(
                 .and(registered_user::email_confirmed),
         )
         .get_result::<User>(&mut connection)
+        .await
         .optional()
         .map_err(Error::from)?;
 
@@ -1029,6 +1059,7 @@ pub async fn send_password_reset_handler(
                 one_time_password::invalidated.eq(false),
             ))
             .execute(&mut connection)
+            .await
             .map_err(Error::from)?;
 
         let mut tera_context = tera::Context::new();
@@ -1064,9 +1095,9 @@ pub async fn reset_password_handler(
         )))
     })?;
 
-    let mut connection = acquire_db_connection()?;
-    connection
-        .transaction(|connection| {
+    let mut connection = acquire_db_connection().await?;
+    run_retryable_transaction(&mut connection, |connection| {
+        async move {
             let user = registered_user::table
                 .filter(
                     lower(registered_user::user_name)
@@ -1075,24 +1106,31 @@ pub async fn reset_password_handler(
                         .and(registered_user::email_confirmed),
                 )
                 .get_result::<User>(connection)
+                .await
                 .optional()
                 .map_err(Error::from)?
-                .ok_or(Error::InvalidCredentialsError)?;
+                .ok_or(TransactionRuntimeError::from(
+                    Error::InvalidCredentialsError,
+                ))?;
 
             let opt = one_time_password::table
                 .filter(one_time_password::fk_user.eq(user.pk))
                 .get_result::<OneTimePassword>(connection)
-                .optional()
-                .map_err(Error::from)?
-                .ok_or(Error::InvalidCredentialsError)?;
+                .await
+                .optional()?
+                .ok_or(TransactionRuntimeError::from(
+                    Error::InvalidCredentialsError,
+                ))?;
 
             match verify(&request.otp, &opt.password) {
                 Ok(valid) => {
                     if !valid {
-                        return Err(Error::InvalidCredentialsError);
+                        return Err(TransactionRuntimeError::from(
+                            Error::InvalidCredentialsError,
+                        ));
                     }
                 }
-                Err(_) => return Err(Error::EncryptionError),
+                Err(_) => return Err(TransactionRuntimeError::from(Error::EncryptionError)),
             }
 
             let mut zxcvbn_user_data = vec![user.user_name.as_str()];
@@ -1103,33 +1141,37 @@ pub async fn reset_password_handler(
                 zxcvbn_user_data.push(display_name.as_str());
             }
             let entropy = zxcvbn(&request.new_password, &zxcvbn_user_data)
-                .map_err(|e| Error::InternalError(e.to_string()))?;
+                .map_err(|e| TransactionRuntimeError::from(Error::InternalError(e.to_string())))?;
             if entropy.score() < 3 {
-                return Err(Error::WeakPasswordError);
+                return Err(TransactionRuntimeError::from(Error::WeakPasswordError));
             }
 
-            let hashed_password =
-                hash(&request.new_password, DEFAULT_COST).map_err(|_| Error::EncryptionError)?;
+            let hashed_password = hash(&request.new_password, DEFAULT_COST)
+                .map_err(|_| TransactionRuntimeError::from(Error::EncryptionError))?;
 
             // changing password will increment jwt_version, updated user needs to be loaded to create valid JWT
             let user = diesel::update(registered_user::table)
                 .filter(registered_user::pk.eq(user.pk))
                 .set(registered_user::password.eq(&hashed_password))
                 .get_result::<User>(connection)
-                .map_err(Error::from)?;
+                .await?;
 
             diesel::update(refresh_token::table)
                 .filter(refresh_token::fk_user.eq(user.pk))
                 .set(refresh_token::invalidated.eq(true))
-                .execute(connection)?;
+                .execute(connection)
+                .await?;
 
             diesel::delete(one_time_password::table)
                 .filter(one_time_password::fk_user.eq(user.pk))
                 .execute(connection)
-                .map_err(Error::from)?;
+                .await?;
 
-            let refresh_token_cookie = create_refresh_token_cookie(&user, connection)?;
-            create_login_response(user, refresh_token_cookie)
-        })
-        .map_err(warp::reject::custom)
+            let refresh_token_cookie = create_refresh_token_cookie(&user, connection).await?;
+            create_login_response(user, refresh_token_cookie).map_err(|e| e.into())
+        }
+        .scope_boxed()
+    })
+    .await
+    .map_err(warp::reject::custom)
 }

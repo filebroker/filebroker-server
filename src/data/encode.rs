@@ -7,20 +7,23 @@ use std::{
 
 use chrono::Utc;
 use diesel::{sql_types::VarChar, OptionalExtension};
+use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
 use futures::{future::try_join_all, ready};
 use itertools::Itertools;
-use parking_lot::Mutex;
 use pin_project_lite::pin_project;
 use rusty_pool::ThreadPool;
 use s3::Bucket;
-use tokio::{sync::Semaphore, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, Semaphore},
+    task::JoinHandle,
+};
 use uuid::Uuid;
 
 use lazy_static::lazy_static;
 
 use crate::{
     acquire_db_connection,
-    diesel::{ExpressionMethods, RunQueryDsl},
+    diesel::ExpressionMethods,
     error::Error,
     model::{Broker, HlsStream, S3Object, User},
     retry_on_serialization_failure, run_retryable_transaction,
@@ -91,7 +94,8 @@ lazy_static! {
         log::info!("CONCURRENT_VIDEO_TRANSCODE_LIMIT set to {limit}");
         Semaphore::new(limit)
     };
-    pub static ref SUBMITTED_HLS_TRANSCODINGS: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+    pub static ref SUBMITTED_HLS_TRANSCODINGS: parking_lot::Mutex<HashSet<String>> =
+        parking_lot::Mutex::new(HashSet::new());
 }
 
 async fn spawn_blocking<R: Send + 'static>(
@@ -136,7 +140,9 @@ pub async fn generate_hls_playlist(
             "hls_locked_at",
             source_object_key.clone(),
             |s3_object| &s3_object.hls_master_playlist,
-        )? {
+        )
+        .await?
+        {
             Some(sentinel) => (Some(sentinel), Some(semaphore)),
             None => {
                 log::info!(
@@ -538,7 +544,9 @@ pub async fn generate_thumbnail(
                 "thumbnail_locked_at",
                 source_object_key.clone(),
                 |s3_object| &s3_object.thumbnail_object_key,
-            )? {
+            )
+            .await?
+            {
                 Some(sentinel) => Some(sentinel),
                 None => {
                     log::info!("Aborting thumbnail generation for object {} because it has already been locked", &source_object_key);
@@ -646,38 +654,44 @@ pub async fn generate_thumbnail(
             .put_object_with_content_type(&thumb_path, &thumb_bytes, &thumbnail_content_type)
             .await?;
 
-        let mut connection = acquire_db_connection()?;
+        let mut connection = acquire_db_connection().await?;
         run_retryable_transaction(&mut connection, |connection| {
-            let s3_object = diesel::insert_into(s3_object::table)
-                .values(&S3Object {
-                    object_key: thumb_path.clone(),
-                    sha256_hash: None,
-                    size_bytes: thumb_bytes.len() as i64,
-                    mime_type: thumbnail_content_type.clone(),
-                    fk_broker: broker.pk,
-                    fk_uploader: user.pk,
-                    thumbnail_object_key: None,
-                    creation_timestamp: Utc::now(),
-                    filename: None,
-                    hls_master_playlist: None,
-                    hls_disabled: true,
-                    hls_locked_at: None,
-                    thumbnail_locked_at: None,
-                    hls_fail_count: None,
-                    thumbnail_fail_count: None,
-                    thumbnail_disabled: true,
-                })
-                .get_result::<S3Object>(connection)
-                .map_err(retry_on_serialization_failure)?;
+            async move {
+                let s3_object = diesel::insert_into(s3_object::table)
+                    .values(&S3Object {
+                        object_key: thumb_path.clone(),
+                        sha256_hash: None,
+                        size_bytes: thumb_bytes.len() as i64,
+                        mime_type: thumbnail_content_type.clone(),
+                        fk_broker: broker.pk,
+                        fk_uploader: user.pk,
+                        thumbnail_object_key: None,
+                        creation_timestamp: Utc::now(),
+                        filename: None,
+                        hls_master_playlist: None,
+                        hls_disabled: true,
+                        hls_locked_at: None,
+                        thumbnail_locked_at: None,
+                        hls_fail_count: None,
+                        thumbnail_fail_count: None,
+                        thumbnail_disabled: true,
+                    })
+                    .get_result::<S3Object>(connection)
+                    .await
+                    .map_err(retry_on_serialization_failure)?;
 
-            diesel::update(s3_object::table)
-                .filter(s3_object::object_key.eq(&source_object_key))
-                .set(s3_object::thumbnail_object_key.eq(&s3_object.object_key))
-                .execute(connection)
-                .map_err(retry_on_serialization_failure)?;
+                diesel::update(s3_object::table)
+                    .filter(s3_object::object_key.eq(&source_object_key))
+                    .set(s3_object::thumbnail_object_key.eq(&s3_object.object_key))
+                    .execute(connection)
+                    .await
+                    .map_err(retry_on_serialization_failure)?;
 
-            Ok(())
-        })?;
+                Ok(())
+            }
+            .scope_boxed()
+        })
+        .await?;
 
         Ok(())
     } else {
@@ -829,25 +843,29 @@ async fn persist_hls_transcode_results(
         });
     }
 
-    let mut conn = acquire_db_connection()?;
+    let mut conn = acquire_db_connection().await?;
     run_retryable_transaction(&mut conn, |conn| {
-        diesel::insert_into(s3_object::table)
-            .values(&s3_objects)
-            .execute(conn)
-            .map_err(retry_on_serialization_failure)?;
-        diesel::insert_into(hls_stream::table)
-            .values(&hls_streams)
-            .execute(conn)
-            .map_err(retry_on_serialization_failure)?;
+        async {
+            diesel::insert_into(s3_object::table)
+                .values(&s3_objects)
+                .execute(conn)
+                .await?;
+            diesel::insert_into(hls_stream::table)
+                .values(&hls_streams)
+                .execute(conn)
+                .await?;
 
-        diesel::update(s3_object::table)
-            .set(s3_object::hls_master_playlist.eq(&master_playlist_result.path))
-            .filter(s3_object::object_key.eq(source_object_key))
-            .execute(conn)
-            .map_err(retry_on_serialization_failure)?;
+            diesel::update(s3_object::table)
+                .set(s3_object::hls_master_playlist.eq(&master_playlist_result.path))
+                .filter(s3_object::object_key.eq(source_object_key))
+                .execute(conn)
+                .await?;
 
-        Ok(())
-    })?;
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await?;
     drop(conn);
 
     if !process_output.stderr.is_empty() {
@@ -867,37 +885,40 @@ async fn persist_hls_transcode_results(
             .abs_diff(hls_duration.duration_sec)
             > 1
         {
-            fn delete_created_objects(
+            async fn delete_created_objects(
                 source_object_key: &str,
                 s3_objects: &[S3Object],
                 hls_master_playlist: &str,
             ) -> Result<(), Error> {
                 log::debug!("Deleting created db objects for HLS transcode of {source_object_key}");
-                let mut conn = acquire_db_connection()?;
+                let mut conn = acquire_db_connection().await?;
                 run_retryable_transaction(&mut conn, |conn| {
-                    diesel::update(s3_object::table)
-                        .set(s3_object::hls_master_playlist.eq(Option::<String>::None))
-                        .filter(s3_object::object_key.eq(source_object_key))
-                        .execute(conn)
-                        .map_err(retry_on_serialization_failure)?;
-                    diesel::delete(hls_stream::table)
-                        .filter(hls_stream::master_playlist.eq(hls_master_playlist))
-                        .execute(conn)
-                        .map_err(retry_on_serialization_failure)?;
-                    diesel::delete(s3_object::table)
-                        .filter(
-                            s3_object::object_key.eq_any(
+                    async move {
+                        diesel::update(s3_object::table)
+                            .set(s3_object::hls_master_playlist.eq(Option::<String>::None))
+                            .filter(s3_object::object_key.eq(source_object_key))
+                            .execute(conn)
+                            .await?;
+                        diesel::delete(hls_stream::table)
+                            .filter(hls_stream::master_playlist.eq(hls_master_playlist))
+                            .execute(conn)
+                            .await?;
+                        diesel::delete(s3_object::table)
+                            .filter(s3_object::object_key.eq_any(
                                 s3_objects.iter().map(|o| &o.object_key).collect::<Vec<_>>(),
-                            ),
-                        )
-                        .execute(conn)
-                        .map_err(retry_on_serialization_failure)?;
+                            ))
+                            .execute(conn)
+                            .await?;
 
-                    Ok(())
+                        Ok(())
+                    }
+                    .scope_boxed()
                 })
+                .await
             }
             if let Err(e) =
                 delete_created_objects(source_object_key, &s3_objects, &master_playlist_result.path)
+                    .await
             {
                 log::error!("Failed to delete created database objects after determining that HLS stream for '{source_object_key}' is invalid: {e}");
             }
@@ -1126,17 +1147,18 @@ struct LockedObjectTaskSentinel {
 
 impl LockedObjectTaskSentinel {
     /// Try to acquire a hls_lock or thumbnail_lock, returning `None` if already locked
-    fn new(
+    async fn new(
         lock_column: &'static str,
         object_key: String,
         property_accessor: fn(&S3Object) -> &Option<String>,
     ) -> Result<Option<Self>, Error> {
-        let mut connection = acquire_db_connection()?;
+        let mut connection = acquire_db_connection().await?;
         let update_result = diesel::sql_query(format!(
             "UPDATE s3_object SET {lock_column} = NOW() WHERE object_key = $1 AND {lock_column} IS NULL RETURNING *",
         ))
         .bind::<VarChar, _>(&object_key)
         .get_result::<S3Object>(&mut connection)
+        .await
         .optional()?;
 
         match update_result {
@@ -1155,8 +1177,8 @@ impl LockedObjectTaskSentinel {
             // refresh lock every 15 minutes
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60 * 15)).await;
-                let _mutex_guard = background_mutex.lock();
-                match acquire_db_connection() {
+                let _mutex_guard = background_mutex.lock().await;
+                match acquire_db_connection().await {
                     Ok(mut connection) => {
                         if let Err(e) = diesel::sql_query(format!(
                             "UPDATE s3_object SET {} = NOW() WHERE object_key = $1",
@@ -1164,6 +1186,7 @@ impl LockedObjectTaskSentinel {
                         ))
                         .bind::<VarChar, _>(&key_to_refresh)
                         .execute(&mut connection)
+                        .await
                         {
                             log::error!(
                                 "Failed to refresh {lock_column} for object {}: {e}",
@@ -1191,25 +1214,31 @@ impl LockedObjectTaskSentinel {
 impl Drop for LockedObjectTaskSentinel {
     fn drop(&mut self) {
         self.refresh_task_join_handle.abort();
-        let _update_mutex = self.update_mutex.lock();
-        let mut connection = match acquire_db_connection() {
-            Ok(connection) => connection,
-            Err(e) => {
-                log::error!("Could not unlock object {}: {e}", &self.object_key);
-                return;
+        let update_mutex = self.update_mutex.clone();
+        let object_key = std::mem::take(&mut self.object_key);
+        let lock_column = self.lock_column;
+        tokio::spawn(async move {
+            let _update_mutex = update_mutex.lock().await;
+            let mut connection = match acquire_db_connection().await {
+                Ok(connection) => connection,
+                Err(e) => {
+                    log::error!("Could not unlock object {}: {e}", &object_key);
+                    return;
+                }
+            };
+
+            let res = diesel::sql_query(format!(
+                "UPDATE s3_object SET {} = NULL WHERE object_key = $1",
+                lock_column
+            ))
+            .bind::<VarChar, _>(&object_key)
+            .execute(&mut connection)
+            .await;
+
+            if let Err(e) = res {
+                log::error!("Could not unlock object {}: {e}", &object_key);
             }
-        };
-
-        let res = diesel::sql_query(format!(
-            "UPDATE s3_object SET {} = NULL WHERE object_key = $1",
-            self.lock_column
-        ))
-        .bind::<VarChar, _>(&self.object_key)
-        .execute(&mut connection);
-
-        if let Err(e) = res {
-            log::error!("Could not unlock object {}: {e}", &self.object_key);
-        }
+        });
     }
 }
 
