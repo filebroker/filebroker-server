@@ -64,11 +64,12 @@ mod util;
 pub type DbConnection = Object<AsyncPgConnection>;
 
 lazy_static! {
+    pub static ref DATABASE_URL: String = std::env::var("FILEBROKER_DATABASE_URL").expect(
+        "Missing environment variable FILEBROKER_DATABASE_URL must be set to connect to postgres"
+    );
     pub static ref CONNECTION_POOL: Pool<AsyncPgConnection> = {
-        let database_url = std::env::var("FILEBROKER_DATABASE_URL")
-            .expect("Missing environment variable FILEBROKER_DATABASE_URL must be set to connect to postgres");
         let database_connection_manager =
-            AsyncDieselConnectionManager::<AsyncPgConnection>::new(database_url);
+            AsyncDieselConnectionManager::<AsyncPgConnection>::new(DATABASE_URL.clone());
         let max_db_connections = std::env::var("FILEBROKER_MAX_DB_CONNECTIONS")
             .unwrap_or_else(|_| String::from("25"))
             .parse::<usize>()
@@ -138,9 +139,10 @@ fn main() {
 
     #[cfg(feature = "auto_migration")]
     {
+        use crate::diesel::Connection;
         log::info!("Running diesel migrations");
-        let mut connection =
-            acquire_db_connection().expect("Failed to acquire database connection");
+        let mut connection = diesel::pg::PgConnection::establish(&DATABASE_URL)
+            .expect("Failed to acquire database connection");
         if let Err(e) = connection.run_pending_migrations(MIGRATIONS) {
             panic!("Failed running db migrations: {}", e);
         }
