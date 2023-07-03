@@ -243,11 +243,11 @@ lazy_static! {
             }
         ),
         (
-            "randomise",
+            "shuffle",
             Modifier {
                 params: vec![],
                 accept_arguments,
-                visit_query_builder: |visitor, _, _, _| visitor.query_parameters.randomise = true
+                visit_query_builder: |visitor, _, _, _| visitor.query_parameters.shuffle = true
             }
         )
     ]);

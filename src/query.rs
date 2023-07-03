@@ -33,7 +33,7 @@ pub mod compiler;
 const DEFAULT_LIMIT_STR: &str = "50";
 const MAX_LIMIT: u16 = 100;
 const MAX_LIMIT_STR: &str = "100";
-const MAX_RANDOMISE_LIMIT_STR: &str = "10000";
+const MAX_SHUFFLE_LIMIT_STR: &str = "10000";
 
 #[derive(Deserialize, Validate)]
 pub struct QueryParametersFilter {
@@ -42,7 +42,7 @@ pub struct QueryParametersFilter {
     #[validate(length(min = 0, max = 1024))]
     pub query: Option<String>,
     pub exclude_window: Option<bool>,
-    pub randomise: Option<bool>,
+    pub shuffle: Option<bool>,
 }
 
 pub struct QueryParameters {
@@ -50,7 +50,7 @@ pub struct QueryParameters {
     pub page: Option<u32>,
     pub ordering: Vec<Ordering>,
     pub variables: HashMap<String, String>,
-    pub randomise: bool,
+    pub shuffle: bool,
 }
 
 #[derive(Debug)]
@@ -271,7 +271,7 @@ fn prepare_query_parameters(
         page: query_parameters_filter.page,
         ordering: Vec::new(),
         variables,
-        randomise: query_parameters_filter.randomise.unwrap_or(false),
+        shuffle: query_parameters_filter.shuffle.unwrap_or(false),
     }
 }
 

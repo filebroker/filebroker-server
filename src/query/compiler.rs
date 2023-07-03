@@ -14,7 +14,7 @@ use crate::{
     model::User,
     perms,
     query::{
-        Direction, Ordering, DEFAULT_LIMIT_STR, MAX_LIMIT, MAX_LIMIT_STR, MAX_RANDOMISE_LIMIT_STR,
+        Direction, Ordering, DEFAULT_LIMIT_STR, MAX_LIMIT, MAX_LIMIT_STR, MAX_SHUFFLE_LIMIT_STR,
     },
 };
 
@@ -80,7 +80,7 @@ pub fn compile_sql(
         sql_query.push_str(", ");
     }
 
-    if !query_parameters.randomise {
+    if !query_parameters.shuffle {
         // Only get a full count of the result set if the number of results is below 100000, the count query that
         // checks if there are more than 100000 results does not apply the post permission conditions to speed up
         // the query, that means the effective result size may be smaller.
@@ -99,12 +99,12 @@ pub fn compile_sql(
         apply_where_conditions(&mut sql_query, &mut where_expressions);
         apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
         sql_query.push_str(" LIMIT ");
-        sql_query.push_str(MAX_RANDOMISE_LIMIT_STR);
+        sql_query.push_str(MAX_SHUFFLE_LIMIT_STR);
         sql_query.push(')');
     }
 
     sql_query.push_str(" SELECT *, obj.thumbnail_object_key, ");
-    if !query_parameters.randomise {
+    if !query_parameters.shuffle {
         sql_query.push_str("(SELECT full_count FROM countCte), ");
     } else {
         sql_query.push_str("NULL AS full_count, ");
@@ -120,7 +120,7 @@ pub fn compile_sql(
         " AS evaluated_limit FROM post LEFT JOIN s3_object obj ON obj.object_key = post.s3_object",
     );
 
-    if query_parameters.randomise {
+    if query_parameters.shuffle {
         sql_query.push_str(" WHERE pk in(SELECT pk FROM reducedRandomSet) ORDER BY RANDOM()");
     } else {
         apply_where_conditions(&mut sql_query, &mut where_expressions);
@@ -161,7 +161,7 @@ pub fn compile_window_query(
     let mut sql_query = String::new();
     apply_ctes(&mut sql_query, &ctes)?;
 
-    if !query_parameters.randomise {
+    if !query_parameters.shuffle {
         sql_query.push_str("SELECT * FROM (SELECT ROW_NUMBER() OVER(");
         apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
         sql_query.push_str(" ) AS row_number, lag(pk) OVER(");
@@ -200,7 +200,7 @@ pub fn compile_window_query(
         apply_where_conditions(&mut sql_query, &mut where_expressions);
         apply_ordering(&mut sql_query, &mut query_parameters.ordering)?;
         sql_query.push_str(" LIMIT ");
-        sql_query.push_str(MAX_RANDOMISE_LIMIT_STR);
+        sql_query.push_str(MAX_SHUFFLE_LIMIT_STR);
         sql_query.push(')');
 
         sql_query.push_str(" SELECT 1::BIGINT AS row_number, NULL AS prev, ");
