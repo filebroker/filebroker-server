@@ -2,6 +2,7 @@
 extern crate diesel;
 use chrono::Utc;
 use clokwerk::Scheduler;
+use diesel::{ConnectionError, ConnectionResult};
 use diesel_async::{
     pg::TransactionBuilder,
     pooled_connection::{
@@ -16,7 +17,7 @@ use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 use dotenvy::dotenv;
 use error::{Error, TransactionRuntimeError};
-use futures::{Future, StreamExt, TryFuture};
+use futures::{future::BoxFuture, Future, FutureExt, StreamExt, TryFuture};
 use lazy_static::lazy_static;
 use mime::Mime;
 use query::QueryParametersFilter;
@@ -69,7 +70,10 @@ lazy_static! {
     );
     pub static ref CONNECTION_POOL: Pool<AsyncPgConnection> = {
         let database_connection_manager =
-            AsyncDieselConnectionManager::<AsyncPgConnection>::new(DATABASE_URL.clone());
+            AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_setup(
+                DATABASE_URL.clone(),
+                establish_connection,
+            );
         let max_db_connections = std::env::var("FILEBROKER_MAX_DB_CONNECTIONS")
             .unwrap_or_else(|_| String::from("25"))
             .parse::<usize>()
@@ -620,6 +624,37 @@ fn load_private_key() -> io::Result<PrivateKey> {
     }
 
     Ok(PrivateKey(keys[0].clone()))
+}
+
+// enable TLS for AsyncPgConnection, see https://github.com/weiznich/diesel_async/blob/main/examples/postgres/pooled-with-rustls
+
+fn establish_connection(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
+    let fut = async {
+        // We first set up the way we want rustls to work.
+        let rustls_config = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_root_certificates(root_certs())
+            .with_no_client_auth();
+        let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
+        let (client, conn) = tokio_postgres::connect(config, tls)
+            .await
+            .map_err(|e| ConnectionError::BadConnection(e.to_string()))?;
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                eprintln!("Database connection: {e}");
+            }
+        });
+        AsyncPgConnection::try_from(client).await
+    };
+    fut.boxed()
+}
+
+fn root_certs() -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore::empty();
+    let certs = rustls_native_certs::load_native_certs().expect("Certs not loadable!");
+    let certs: Vec<_> = certs.into_iter().map(|cert| cert.0).collect();
+    roots.add_parsable_certificates(&certs);
+    roots
 }
 
 fn setup_logger() {
