@@ -109,6 +109,8 @@ lazy_static! {
                 .expect("FILEBROKER_CONCURRENT_VIDEO_TRANSCODE_LIMIT is not a valid usize"))
             .ok();
     pub static ref HOST_BASE_PATH: Option<String> = std::env::var("FILEBROKER_HOST_BASE_PATH").ok();
+    pub static ref PG_SSL_CERT_PATH: Option<String> =
+        std::env::var("FILEBROKER_PG_SSL_CERT_PATH").ok();
 }
 
 #[cfg(feature = "auto_migration")]
@@ -520,8 +522,9 @@ async fn setup_tokio_runtime() {
     let incoming =
         AddrIncoming::bind(&([0, 0, 0, 0], *PORT).into()).expect("Failed to bind server to port");
     if CERT_PATH.is_some() && KEY_PATH.is_some() {
-        let certs = load_certs().expect("Failed to load TLS cert");
-        let key = load_private_key().expect("Failed to load TLS private key");
+        let certs = load_certs(CERT_PATH.as_ref().unwrap()).expect("Failed to load TLS cert");
+        let key =
+            load_private_key(KEY_PATH.as_ref().unwrap()).expect("Failed to load TLS private key");
         let server_config = ServerConfig::builder()
             .with_safe_defaults()
             .with_no_client_auth()
@@ -594,16 +597,16 @@ where
     server.await
 }
 
-fn load_certs() -> io::Result<Vec<Certificate>> {
-    let certfile = fs::File::open(CERT_PATH.as_ref().unwrap())?;
+fn load_certs(cert_path: &str) -> io::Result<Vec<Certificate>> {
+    let certfile = fs::File::open(cert_path)?;
     let mut reader = io::BufReader::new(certfile);
 
     let certs = rustls_pemfile::certs(&mut reader)?;
     Ok(certs.into_iter().map(Certificate).collect())
 }
 
-fn load_private_key() -> io::Result<PrivateKey> {
-    let keyfile = fs::File::open(KEY_PATH.as_ref().unwrap())?;
+fn load_private_key(key_path: &str) -> io::Result<PrivateKey> {
+    let keyfile = fs::File::open(key_path)?;
     let mut reader = io::BufReader::new(keyfile);
 
     let mut keys = Vec::new();
@@ -651,9 +654,14 @@ fn establish_connection(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConne
 
 fn root_certs() -> rustls::RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
-    let certs = rustls_native_certs::load_native_certs().expect("Certs not loadable!");
-    let certs: Vec<_> = certs.into_iter().map(|cert| cert.0).collect();
+    let certs =
+        rustls_native_certs::load_native_certs().expect("Failed to load native certificates");
     roots.add_parsable_certificates(&certs);
+    if let Some(ref pg_ssl_cert_path) = *PG_SSL_CERT_PATH {
+        let certs =
+            load_certs(pg_ssl_cert_path.as_str()).expect("Failed to load pg ssl certificate");
+        roots.add_parsable_certificates(&certs);
+    }
     roots
 }
 
