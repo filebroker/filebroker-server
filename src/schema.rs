@@ -2,7 +2,7 @@
 
 diesel::table! {
     broker (pk) {
-        pk -> Int4,
+        pk -> Int8,
         name -> Varchar,
         bucket -> Varchar,
         endpoint -> Varchar,
@@ -10,7 +10,7 @@ diesel::table! {
         secret_key -> Varchar,
         is_aws_region -> Bool,
         remove_duplicate_files -> Bool,
-        fk_owner -> Int4,
+        fk_owner -> Int8,
         creation_timestamp -> Timestamptz,
         hls_enabled -> Bool,
     }
@@ -18,13 +18,12 @@ diesel::table! {
 
 diesel::table! {
     broker_access (pk) {
-        pk -> Int4,
-        fk_broker -> Int4,
-        fk_granted_group -> Nullable<Int4>,
+        pk -> Int8,
+        fk_broker -> Int8,
+        fk_granted_group -> Nullable<Int8>,
         write -> Bool,
-        public -> Bool,
         quota -> Nullable<Int8>,
-        fk_granted_by -> Int4,
+        fk_granted_by -> Int8,
         creation_timestamp -> Timestamptz,
     }
 }
@@ -34,7 +33,7 @@ diesel::table! {
         uuid -> Uuid,
         expiry -> Timestamptz,
         invalidated -> Bool,
-        fk_user -> Int4,
+        fk_user -> Int8,
     }
 }
 
@@ -56,18 +55,18 @@ diesel::table! {
         password -> Varchar,
         expiry -> Timestamptz,
         invalidated -> Bool,
-        fk_user -> Int4,
+        fk_user -> Int8,
     }
 }
 
 diesel::table! {
     post (pk) {
-        pk -> Int4,
+        pk -> Int8,
         data_url -> Nullable<Varchar>,
         source_url -> Nullable<Varchar>,
         title -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
-        fk_create_user -> Int4,
+        fk_create_user -> Int8,
         score -> Int4,
         s3_object -> Nullable<Varchar>,
         thumbnail_url -> Nullable<Varchar>,
@@ -79,9 +78,9 @@ diesel::table! {
 
 diesel::table! {
     post_collection (pk) {
-        pk -> Int4,
+        pk -> Int8,
         name -> Varchar,
-        fk_owner -> Int4,
+        fk_owner -> Int8,
         creation_timestamp -> Timestamptz,
         public -> Bool,
     }
@@ -89,37 +88,37 @@ diesel::table! {
 
 diesel::table! {
     post_collection_group_access (fk_post_collection, fk_granted_group) {
-        fk_post_collection -> Int4,
-        fk_granted_group -> Int4,
+        fk_post_collection -> Int8,
+        fk_granted_group -> Int8,
         write -> Bool,
-        fk_granted_by -> Int4,
+        fk_granted_by -> Int8,
         creation_timestamp -> Timestamptz,
     }
 }
 
 diesel::table! {
     post_collection_item (fk_post, fk_post_collection) {
-        fk_post -> Int4,
-        fk_post_collection -> Int4,
-        fk_added_by -> Int4,
+        fk_post -> Int8,
+        fk_post_collection -> Int8,
+        fk_added_by -> Int8,
         creation_timestamp -> Timestamptz,
     }
 }
 
 diesel::table! {
     post_group_access (fk_post, fk_granted_group) {
-        fk_post -> Int4,
-        fk_granted_group -> Int4,
+        fk_post -> Int8,
+        fk_granted_group -> Int8,
         write -> Bool,
-        fk_granted_by -> Int4,
+        fk_granted_by -> Int8,
         creation_timestamp -> Timestamptz,
     }
 }
 
 diesel::table! {
     post_tag (fk_post, fk_tag) {
-        fk_post -> Int4,
-        fk_tag -> Int4,
+        fk_post -> Int8,
+        fk_tag -> Int8,
     }
 }
 
@@ -128,13 +127,13 @@ diesel::table! {
         uuid -> Uuid,
         expiry -> Timestamptz,
         invalidated -> Bool,
-        fk_user -> Int4,
+        fk_user -> Int8,
     }
 }
 
 diesel::table! {
     registered_user (pk) {
-        pk -> Int4,
+        pk -> Int8,
         user_name -> Varchar,
         password -> Varchar,
         email -> Nullable<Varchar>,
@@ -153,8 +152,8 @@ diesel::table! {
         sha256_hash -> Nullable<Bpchar>,
         size_bytes -> Int8,
         mime_type -> Varchar,
-        fk_broker -> Int4,
-        fk_uploader -> Int4,
+        fk_broker -> Int8,
+        fk_uploader -> Int8,
         thumbnail_object_key -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
         filename -> Nullable<Varchar>,
@@ -170,7 +169,7 @@ diesel::table! {
 
 diesel::table! {
     tag (pk) {
-        pk -> Int4,
+        pk -> Int8,
         tag_name -> Varchar,
         creation_timestamp -> Timestamptz,
     }
@@ -178,45 +177,45 @@ diesel::table! {
 
 diesel::table! {
     tag_alias (fk_source, fk_target) {
-        fk_source -> Int4,
-        fk_target -> Int4,
+        fk_source -> Int8,
+        fk_target -> Int8,
     }
 }
 
 diesel::table! {
     tag_closure_table (pk) {
-        pk -> Int4,
-        fk_parent -> Int4,
-        fk_child -> Int4,
+        pk -> Int8,
+        fk_parent -> Int8,
+        fk_child -> Int8,
         depth -> Int4,
     }
 }
 
 diesel::table! {
     tag_edge (fk_parent, fk_child) {
-        fk_parent -> Int4,
-        fk_child -> Int4,
+        fk_parent -> Int8,
+        fk_child -> Int8,
     }
 }
 
 diesel::table! {
     user_group (pk) {
-        pk -> Int4,
+        pk -> Int8,
         name -> Varchar,
         public -> Bool,
         hidden -> Bool,
-        fk_owner -> Int4,
+        fk_owner -> Int8,
         creation_timestamp -> Timestamptz,
     }
 }
 
 diesel::table! {
-    user_group_membership (fk_group, fk_user) {
-        fk_group -> Int4,
-        fk_user -> Int4,
+    user_group_membership (fk_user, fk_group) {
+        fk_group -> Int8,
+        fk_user -> Int8,
         administrator -> Bool,
         revoked -> Bool,
-        fk_granted_by -> Int4,
+        fk_granted_by -> Int8,
         creation_timestamp -> Timestamptz,
     }
 }

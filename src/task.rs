@@ -335,8 +335,8 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
 }
 
 async fn load_object_relations(
-    broker_pk: i32,
-    user_pk: i32,
+    broker_pk: i64,
+    user_pk: i64,
     connection: &mut AsyncPgConnection,
 ) -> Result<(Bucket, Broker, User), Error> {
     let broker = broker::table

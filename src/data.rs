@@ -37,7 +37,7 @@ pub struct UploadResponse {
 }
 
 pub async fn upload_handler(
-    broker_pk: i32,
+    broker_pk: i64,
     user: User,
     mime: Mime,
     disable_hls_transcoding: Option<bool>,

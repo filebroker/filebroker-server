@@ -122,12 +122,12 @@ pub async fn search_handler(
 
 #[derive(Serialize)]
 pub struct PostDetailed {
-    pub pk: i32,
+    pub pk: i64,
     pub data_url: Option<String>,
     pub source_url: Option<String>,
     pub title: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
-    pub fk_create_user: i32,
+    pub fk_create_user: i64,
     pub score: i32,
     pub s3_object: Option<S3Object>,
     pub thumbnail_url: Option<String>,
@@ -144,13 +144,13 @@ pub struct PostDetailed {
 
 #[derive(Serialize)]
 pub struct PostWindowObject {
-    pk: i32,
+    pk: i64,
     page: u32,
 }
 
 pub async fn get_post_handler(
     user: Option<User>,
-    post_pk: i32,
+    post_pk: i64,
     query_parameters_filter: QueryParametersFilter,
 ) -> Result<impl Reply, Rejection> {
     query_parameters_filter.validate().map_err(|e| {

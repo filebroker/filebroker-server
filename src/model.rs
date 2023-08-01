@@ -11,7 +11,7 @@ use crate::schema::*;
 #[diesel(table_name = registered_user)]
 #[diesel(primary_key(pk))]
 pub struct User {
-    pub pk: i32,
+    pub pk: i64,
     pub user_name: String,
     pub password: String,
     pub email: Option<String>,
@@ -43,7 +43,7 @@ pub struct RefreshToken {
     pub uuid: uuid::Uuid,
     pub expiry: DateTime<Utc>,
     pub invalidated: bool,
-    pub fk_user: i32,
+    pub fk_user: i64,
 }
 
 #[derive(Associations, Identifiable, Queryable, QueryableByName, Serialize)]
@@ -51,12 +51,12 @@ pub struct RefreshToken {
 #[diesel(primary_key(pk))]
 #[diesel(belongs_to(User, foreign_key = fk_create_user))]
 pub struct Post {
-    pub pk: i32,
+    pub pk: i64,
     pub data_url: Option<String>,
     pub source_url: Option<String>,
     pub title: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
-    pub fk_create_user: i32,
+    pub fk_create_user: i64,
     pub score: i32,
     pub s3_object: Option<String>,
     pub thumbnail_url: Option<String>,
@@ -73,8 +73,7 @@ pub struct NewPost {
     pub source_url: Option<String>,
     pub title: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
-    pub fk_create_user: i32,
-    pub score: i32,
+    pub fk_create_user: i64,
     pub s3_object: Option<String>,
     pub thumbnail_url: Option<String>,
     pub public: bool,
@@ -84,8 +83,8 @@ pub struct NewPost {
 
 #[derive(Queryable, QueryableByName, Serialize)]
 pub struct PostQueryObject {
-    #[diesel(sql_type = Int4)]
-    pub pk: i32,
+    #[diesel(sql_type = BigInt)]
+    pub pk: i64,
     #[diesel(sql_type = Nullable<Varchar>)]
     pub data_url: Option<String>,
     #[diesel(sql_type = Nullable<Varchar>)]
@@ -94,8 +93,8 @@ pub struct PostQueryObject {
     pub title: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     pub creation_timestamp: DateTime<Utc>,
-    #[diesel(sql_type = Int4)]
-    pub fk_create_user: i32,
+    #[diesel(sql_type = BigInt)]
+    pub fk_create_user: i64,
     #[diesel(sql_type = Int4)]
     pub score: i32,
     #[diesel(sql_type = Nullable<Varchar>)]
@@ -123,12 +122,12 @@ pub struct PostQueryObject {
 pub struct PostWindowQueryObject {
     #[diesel(sql_type = BigInt)]
     pub row_number: i64,
-    #[diesel(sql_type = Nullable<Int4>)]
-    pub prev: Option<i32>,
-    #[diesel(sql_type = Int4)]
-    pub pk: i32,
-    #[diesel(sql_type = Nullable<Int4>)]
-    pub next: Option<i32>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    pub prev: Option<i64>,
+    #[diesel(sql_type = BigInt)]
+    pub pk: i64,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    pub next: Option<i64>,
     #[diesel(sql_type = Int4)]
     pub evaluated_limit: i32,
 }
@@ -161,15 +160,15 @@ impl PostUpdateOptional {
 #[diesel(belongs_to(Post, foreign_key = fk_post))]
 #[diesel(belongs_to(Tag, foreign_key = fk_tag))]
 pub struct PostTag {
-    pub fk_post: i32,
-    pub fk_tag: i32,
+    pub fk_post: i64,
+    pub fk_tag: i64,
 }
 
 #[derive(Clone, Identifiable, Queryable, Serialize)]
 #[diesel(table_name = tag)]
 #[diesel(primary_key(pk))]
 pub struct Tag {
-    pub pk: i32,
+    pub pk: i64,
     pub tag_name: String,
     pub creation_timestamp: DateTime<Utc>,
 }
@@ -186,17 +185,17 @@ pub struct NewTag {
 #[diesel(primary_key(fk_source, fk_target))]
 #[diesel(belongs_to(Tag, foreign_key = fk_source))]
 pub struct TagAlias {
-    pub fk_source: i32,
-    pub fk_target: i32,
+    pub fk_source: i64,
+    pub fk_target: i64,
 }
 
 #[derive(Clone, Identifiable, Queryable, Serialize)]
 #[diesel(table_name = tag_closure_table)]
 #[diesel(primary_key(pk))]
 pub struct TagClosureTable {
-    pub pk: i32,
-    pub fk_parent: i32,
-    pub fk_child: i32,
+    pub pk: i64,
+    pub fk_parent: i64,
+    pub fk_child: i64,
     pub depth: i32,
 }
 
@@ -204,8 +203,8 @@ pub struct TagClosureTable {
 #[diesel(table_name = tag_edge)]
 #[diesel(primary_key(fk_parent, fk_child))]
 pub struct TagEdge {
-    pub fk_parent: i32,
-    pub fk_child: i32,
+    pub fk_parent: i64,
+    pub fk_child: i64,
 }
 
 #[derive(Associations, Identifiable, Queryable, Serialize, Clone)]
@@ -213,7 +212,7 @@ pub struct TagEdge {
 #[diesel(table_name = broker)]
 #[diesel(primary_key(pk))]
 pub struct Broker {
-    pub pk: i32,
+    pub pk: i64,
     pub name: String,
     pub bucket: String,
     pub endpoint: String,
@@ -221,7 +220,7 @@ pub struct Broker {
     pub secret_key: String,
     pub is_aws_region: bool,
     pub remove_duplicate_files: bool,
-    pub fk_owner: i32,
+    pub fk_owner: i64,
     pub creation_timestamp: DateTime<Utc>,
     pub hls_enabled: bool,
 }
@@ -236,7 +235,7 @@ pub struct NewBroker {
     pub secret_key: String,
     pub is_aws_region: bool,
     pub remove_duplicate_files: bool,
-    pub fk_owner: i32,
+    pub fk_owner: i64,
     pub creation_timestamp: DateTime<Utc>,
     pub hls_enabled: bool,
 }
@@ -251,8 +250,8 @@ pub struct S3Object {
     pub sha256_hash: Option<String>,
     pub size_bytes: i64,
     pub mime_type: String,
-    pub fk_broker: i32,
-    pub fk_uploader: i32,
+    pub fk_broker: i64,
+    pub fk_uploader: i64,
     pub thumbnail_object_key: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub filename: Option<String>,
@@ -285,12 +284,12 @@ pub struct HlsStream {
 #[diesel(table_name = user_group)]
 #[diesel(primary_key(pk))]
 pub struct UserGroup {
-    pub pk: i32,
+    pub pk: i64,
     pub name: String,
     #[serde(rename = "is_public")]
     pub public: bool,
     pub hidden: bool,
-    pub fk_owner: i32,
+    pub fk_owner: i64,
     pub creation_timestamp: DateTime<Utc>,
 }
 
@@ -300,7 +299,7 @@ pub struct NewUserGroup {
     pub name: String,
     pub public: bool,
     pub hidden: bool,
-    pub fk_owner: i32,
+    pub fk_owner: i64,
     pub creation_timestamp: DateTime<Utc>,
 }
 
@@ -308,13 +307,13 @@ pub struct NewUserGroup {
 #[diesel(belongs_to(UserGroup, foreign_key = fk_group))]
 #[diesel(belongs_to(User, foreign_key = fk_user))]
 #[diesel(table_name = user_group_membership)]
-#[diesel(primary_key(fk_group, fk_user))]
+#[diesel(primary_key(fk_user, fk_group))]
 pub struct UserGroupMembership {
-    pub fk_group: i32,
-    pub fk_user: i32,
+    pub fk_group: i64,
+    pub fk_user: i64,
     pub administrator: bool,
     pub revoked: bool,
-    pub fk_granted_by: i32,
+    pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
 }
 
@@ -323,9 +322,9 @@ pub struct UserGroupMembership {
 #[diesel(table_name = post_collection)]
 #[diesel(primary_key(pk))]
 pub struct PostCollection {
-    pub pk: i32,
+    pub pk: i64,
     pub name: String,
-    pub fk_owner: i32,
+    pub fk_owner: i64,
     pub creation_timestamp: DateTime<Utc>,
     pub public: bool,
 }
@@ -335,9 +334,9 @@ pub struct PostCollection {
 #[diesel(table_name = post_collection_item)]
 #[diesel(primary_key(fk_post, fk_post_collection))]
 pub struct PostCollectionItem {
-    pub fk_post: i32,
-    pub fk_post_collection: i32,
-    pub fk_added_by: i32,
+    pub fk_post: i64,
+    pub fk_post_collection: i64,
+    pub fk_added_by: i64,
     pub creation_timestamp: DateTime<Utc>,
 }
 
@@ -347,10 +346,10 @@ pub struct PostCollectionItem {
 #[diesel(table_name = post_group_access)]
 #[diesel(primary_key(fk_post, fk_granted_group))]
 pub struct PostGroupAccess {
-    pub fk_post: i32,
-    pub fk_granted_group: i32,
+    pub fk_post: i64,
+    pub fk_granted_group: i64,
     pub write: bool,
-    pub fk_granted_by: i32,
+    pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
 }
 
@@ -360,10 +359,10 @@ pub struct PostGroupAccess {
 #[diesel(table_name = post_collection_group_access)]
 #[diesel(primary_key(fk_post_collection, fk_granted_group))]
 pub struct PostCollectionGroupAccess {
-    pub fk_post_collection: i32,
-    pub fk_granted_group: i32,
+    pub fk_post_collection: i64,
+    pub fk_granted_group: i64,
     pub write: bool,
-    pub fk_granted_by: i32,
+    pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
 }
 
@@ -373,14 +372,12 @@ pub struct PostCollectionGroupAccess {
 #[diesel(table_name = broker_access)]
 #[diesel(primary_key(pk))]
 pub struct BrokerAccess {
-    pub pk: i32,
-    pub fk_broker: i32,
-    pub fk_granted_group: Option<i32>,
+    pub pk: i64,
+    pub fk_broker: i64,
+    pub fk_granted_group: Option<i64>,
     pub write: bool,
-    #[serde(rename = "is_public")]
-    pub public: bool,
     pub quota: Option<i64>,
-    pub fk_granted_by: i32,
+    pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
 }
 
@@ -392,7 +389,7 @@ pub struct EmailConfirmationToken {
     pub uuid: uuid::Uuid,
     pub expiry: DateTime<Utc>,
     pub invalidated: bool,
-    pub fk_user: i32,
+    pub fk_user: i64,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable)]
@@ -403,5 +400,5 @@ pub struct OneTimePassword {
     pub password: String,
     pub expiry: DateTime<Utc>,
     pub invalidated: bool,
-    pub fk_user: i32,
+    pub fk_user: i64,
 }

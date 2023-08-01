@@ -82,9 +82,9 @@ macro_rules! get_group_access_condition {
 pub(crate) use get_group_access_condition;
 
 macro_rules! get_group_access_or_public_condition {
-    ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
+    ($fk:expr, $target:expr, $user_pk:expr, $public_cond:expr, $group_fk:expr) => {
         $fk.eq($target).and(
-            $table::public.or($table::fk_granted_group.eq_any(
+            $public_cond.or($group_fk.eq_any(
                 user_group::table
                     .select(user_group::pk)
                     .nullable()
@@ -111,7 +111,7 @@ macro_rules! get_group_access_write_condition {
 pub(crate) use get_group_access_write_condition;
 
 pub async fn load_post_secured(
-    post_pk: i32,
+    post_pk: i64,
     connection: &mut AsyncPgConnection,
     user: Option<&User>,
 ) -> Result<(Post, Option<S3Object>), Error> {
@@ -142,7 +142,7 @@ pub async fn load_post_secured(
 
 pub async fn load_s3_object_posts(
     s3_object_key: &str,
-    user_pk: i32,
+    user_pk: i64,
     connection: &mut AsyncPgConnection,
 ) -> Result<Vec<(Post, S3Object)>, Error> {
     post::table
@@ -169,7 +169,7 @@ pub async fn load_s3_object_posts(
 }
 
 pub async fn load_broker_secured(
-    broker_pk: i32,
+    broker_pk: i64,
     connection: &mut AsyncPgConnection,
     user: Option<&User>,
 ) -> Result<Broker, Error> {
@@ -183,7 +183,8 @@ pub async fn load_broker_secured(
                         broker_access::fk_broker,
                         broker::pk,
                         &user_pk,
-                        broker_access
+                        broker_access::fk_granted_group.is_null(),
+                        broker_access::fk_granted_group
                     )),
                 ))),
         )
@@ -208,7 +209,8 @@ pub async fn get_brokers_secured(
                         broker_access::fk_broker,
                         broker::pk,
                         &user_pk,
-                        broker_access
+                        broker_access::fk_granted_group.is_null(),
+                        broker_access::fk_granted_group
                     ),
                 ))),
         )
@@ -243,7 +245,7 @@ pub async fn get_current_user_groups(
 pub async fn is_post_editable(
     connection: &mut AsyncPgConnection,
     user: Option<&User>,
-    post_pk: i32,
+    post_pk: i64,
 ) -> Result<bool, Error> {
     let user_pk = user.map(|user| user.pk);
     post::table

@@ -141,7 +141,7 @@ pub fn compile_sql(
 }
 
 pub fn compile_window_query(
-    post_pk: i32,
+    post_pk: i64,
     query: Option<String>,
     mut query_parameters: QueryParameters,
     user: &Option<User>,

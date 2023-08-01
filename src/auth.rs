@@ -675,7 +675,7 @@ async fn check_username(user_name: &str) -> Result<CheckUsernameResponse, Error>
     })
 }
 
-async fn prepare_email_confirmation_token(user_pk: i32) -> Result<EmailConfirmationToken, Error> {
+async fn prepare_email_confirmation_token(user_pk: i64) -> Result<EmailConfirmationToken, Error> {
     let current_utc = Utc::now();
     let expiry = current_utc + *EMAIL_CONFIRMATION_TOKEN_EXPIRATION;
     let mut connection = acquire_db_connection().await?;

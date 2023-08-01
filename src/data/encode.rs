@@ -765,8 +765,8 @@ impl tokio::io::AsyncRead for ByteCountingTokioFileReader {
 
 async fn persist_hls_transcode_results(
     source_object_key: &str,
-    broker_pk: i32,
-    user_pk: i32,
+    broker_pk: i64,
+    user_pk: i64,
     process_output: Output,
     master_playlist_join_handle: JoinHandle<Result<S3UploadResult, Error>>,
     output_reader_join_handles: Vec<JoinHandle<Result<UploadedHlsStream, Error>>>,

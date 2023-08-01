@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use diesel::{
     dsl::{exists, not},
-    sql_types::{Array, Integer},
+    sql_types::{Array, BigInt},
     BoolExpressionMethods, OptionalExtension, Table,
 };
 use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
@@ -36,7 +36,7 @@ macro_rules! report_missing_pks {
         $tab::table
             .select($tab::pk)
             .filter($tab::pk.eq_any($pks))
-            .load::<i32>($connection)
+            .load::<i64>($connection)
             .await
             .map(|found_pks| {
                 let missing_pks = $pks
@@ -48,7 +48,7 @@ macro_rules! report_missing_pks {
                 } else {
                     Err(crate::Error::InvalidEntityReferenceError(
                         itertools::Itertools::intersperse(
-                            missing_pks.into_iter().map(i32::to_string),
+                            missing_pks.into_iter().map(i64::to_string),
                             String::from(", "),
                         )
                         .collect::<String>(),
@@ -80,7 +80,7 @@ macro_rules! load_and_report_missing_pks {
         } else {
             Err(crate::Error::InvalidEntityReferenceError(
                 itertools::Itertools::intersperse(
-                    missing_pks.into_iter().map(i32::to_string),
+                    missing_pks.into_iter().map(i64::to_string),
                     String::from(", "),
                 )
                 .collect::<String>(),
@@ -102,7 +102,7 @@ async fn report_inaccessible_groups(
 }
 
 async fn report_inaccessible_group_pks(
-    group_pks: &[i32],
+    group_pks: &[i64],
     user: &User,
     connection: &mut AsyncPgConnection,
 ) -> Result<(), Error> {
@@ -113,7 +113,7 @@ async fn report_inaccessible_group_pks(
                 .eq_any(group_pks)
                 .and(perms::get_group_membership_condition!(user.pk)),
         )
-        .load::<i32>(connection)
+        .load::<i64>(connection)
         .await
         .map_err(|e| Error::QueryError(e.to_string()))?;
 
@@ -125,7 +125,7 @@ async fn report_inaccessible_group_pks(
     if !missing_pks.is_empty() {
         Err(Error::InvalidEntityReferenceError(
             itertools::Itertools::intersperse(
-                missing_pks.into_iter().map(i32::to_string),
+                missing_pks.into_iter().map(i64::to_string),
                 String::from(", "),
             )
             .collect::<String>(),
@@ -196,7 +196,7 @@ fn dedup_vecs<T: PartialEq + Ord>(v1: &mut Option<Vec<T>>, v2: &Option<Vec<T>>) 
 
 #[derive(Deserialize, Serialize, Clone, Copy, Eq)]
 pub struct GrantedPostGroupAccess {
-    pub group_pk: i32,
+    pub group_pk: i64,
     pub write: bool,
 }
 
@@ -220,9 +220,9 @@ impl Ord for GrantedPostGroupAccess {
 
 #[derive(Serialize)]
 pub struct PostGroupAccessDetailed {
-    pub fk_post: i32,
+    pub fk_post: i64,
     pub write: bool,
-    pub fk_granted_by: i32,
+    pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
     pub granted_group: UserGroup,
 }
@@ -238,7 +238,7 @@ pub struct CreatePostRequest {
     #[validate(length(max = 100), custom = "validate_tags")]
     pub entered_tags: Option<Vec<String>>,
     #[validate(length(max = 100))]
-    pub selected_tags: Option<Vec<i32>>,
+    pub selected_tags: Option<Vec<i64>>,
     pub s3_object: Option<String>,
     #[validate(url)]
     pub thumbnail_url: Option<String>,
@@ -318,7 +318,6 @@ pub async fn create_post_handler(
                     title: create_post_request.title.clone(),
                     creation_timestamp: now,
                     fk_create_user: user.pk,
-                    score: 0,
                     s3_object: create_post_request.s3_object.clone(),
                     thumbnail_url: create_post_request.thumbnail_url.clone(),
                     public: create_post_request.is_public.unwrap_or(false),
@@ -378,10 +377,10 @@ pub struct EditPostRequest {
     #[validate(length(max = 100), custom = "validate_tags")]
     pub tags_overwrite: Option<Vec<String>>,
     #[validate(length(max = 100))]
-    pub tag_pks_overwrite: Option<Vec<i32>>,
-    pub removed_tag_pks: Option<Vec<i32>>,
+    pub tag_pks_overwrite: Option<Vec<i64>>,
+    pub removed_tag_pks: Option<Vec<i64>>,
     #[validate(length(max = 100))]
-    pub added_tag_pks: Option<Vec<i32>>,
+    pub added_tag_pks: Option<Vec<i64>>,
     #[validate(length(max = 100), custom = "validate_tags")]
     pub added_tags: Option<Vec<String>>,
     #[validate(url)]
@@ -398,12 +397,12 @@ pub struct EditPostRequest {
     pub group_access_overwrite: Option<Vec<GrantedPostGroupAccess>>,
     #[validate(length(max = 50))]
     pub added_group_access: Option<Vec<GrantedPostGroupAccess>>,
-    pub removed_group_access: Option<Vec<i32>>,
+    pub removed_group_access: Option<Vec<i64>>,
 }
 
 pub async fn edit_post_handler(
     mut request: EditPostRequest,
-    post_pk: i32,
+    post_pk: i64,
     user: User,
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
@@ -873,7 +872,7 @@ pub async fn filter_redundant_tags(
 pub struct TagHierarchyInformation {
     pub tag: Tag,
     /// Mapping for the parent tag pks to their respective depth
-    pub parent_depth_map: HashMap<i32, i32>,
+    pub parent_depth_map: HashMap<i64, i32>,
     pub tag_aliases: Vec<Tag>,
 }
 
@@ -909,15 +908,15 @@ pub struct UpsertTagRequest {
     #[validate(custom = "validate_tag")]
     pub tag_name: String,
     #[validate(length(min = 0, max = 25))]
-    pub parent_pks: Option<Vec<i32>>,
+    pub parent_pks: Option<Vec<i64>>,
     #[validate(length(min = 0, max = 25))]
-    pub alias_pks: Option<Vec<i32>>,
+    pub alias_pks: Option<Vec<i64>>,
 }
 
 #[derive(Serialize)]
 pub struct UpsertTagResponse {
     pub inserted: bool,
-    pub tag_pk: i32,
+    pub tag_pk: i64,
 }
 
 /// Creates a tag with the given tag_name, parent and aliases. If the tag already exists, the existing tag is updated
@@ -1107,20 +1106,20 @@ pub async fn get_or_create_tag(
 }
 
 pub async fn get_tag_parents_pks(
-    tag_pk: i32,
+    tag_pk: i64,
     connection: &mut AsyncPgConnection,
-) -> Result<Vec<i32>, diesel::result::Error> {
+) -> Result<Vec<i64>, diesel::result::Error> {
     tag_edge::table
         .select(tag_edge::fk_parent)
         .filter(tag_edge::fk_child.eq(tag_pk))
-        .load::<i32>(connection)
+        .load::<i64>(connection)
         .await
 }
 
 pub async fn get_tag_aliases_pks(
-    tag_pk: i32,
+    tag_pk: i64,
     connection: &mut AsyncPgConnection,
-) -> Result<Vec<i32>, diesel::result::Error> {
+) -> Result<Vec<i64>, diesel::result::Error> {
     tag::table
         .select(tag::pk)
         .filter(exists(
@@ -1133,12 +1132,12 @@ pub async fn get_tag_aliases_pks(
                     .and(tag_alias::fk_target.eq(tag_pk))),
             ),
         ))
-        .load::<i32>(connection)
+        .load::<i64>(connection)
         .await
 }
 
 pub async fn get_tag_aliases(
-    tag_pk: i32,
+    tag_pk: i64,
     connection: &mut AsyncPgConnection,
 ) -> Result<Vec<Tag>, diesel::result::Error> {
     tag::table
@@ -1158,7 +1157,7 @@ pub async fn get_tag_aliases(
 
 pub async fn add_tag_aliases(
     tag: &Tag,
-    alias_pks: &[i32],
+    alias_pks: &[i64],
     connection: &mut AsyncPgConnection,
 ) -> Result<(), TransactionRuntimeError> {
     diesel::sql_query(
@@ -1177,8 +1176,8 @@ pub async fn add_tag_aliases(
         ON CONFLICT DO NOTHING
         "#,
     )
-    .bind::<Integer, _>(tag.pk)
-    .bind::<Array<Integer>, _>(alias_pks)
+    .bind::<BigInt, _>(tag.pk)
+    .bind::<Array<BigInt>, _>(alias_pks)
     .execute(connection)
     .await
     .map_err(retry_on_constraint_violation)?;
@@ -1187,8 +1186,8 @@ pub async fn add_tag_aliases(
 }
 
 pub async fn add_tag_parents(
-    tag_pk: i32,
-    parent_pks: &[i32],
+    tag_pk: i64,
+    parent_pks: &[i64],
     connection: &mut AsyncPgConnection,
 ) -> Result<(), TransactionRuntimeError> {
     let edges_to_insert = parent_pks
@@ -1209,7 +1208,7 @@ pub async fn add_tag_parents(
 }
 
 pub async fn get_post_tags(
-    post_pk: i32,
+    post_pk: i64,
     connection: &mut AsyncPgConnection,
 ) -> Result<Vec<Tag>, diesel::result::Error> {
     tag::table
@@ -1225,7 +1224,7 @@ pub async fn get_post_tags(
 }
 
 pub async fn get_post_group_access(
-    post_pk: i32,
+    post_pk: i64,
     user: Option<&User>,
     connection: &mut AsyncPgConnection,
 ) -> Result<Vec<PostGroupAccessDetailed>, diesel::result::Error> {

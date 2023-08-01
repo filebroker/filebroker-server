@@ -60,7 +60,7 @@ pub enum Error {
 
     // 403
     #[error("Cannot access object with provided pk {0}")]
-    InaccessibleObjectError(i32),
+    InaccessibleObjectError(i64),
     #[error("Cannot access object with provided key {0}")]
     InaccessibleS3ObjectError(String),
 
