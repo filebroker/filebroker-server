@@ -727,7 +727,7 @@ struct UploadedHlsStream {
 struct S3UploadResult {
     path: String,
     bytes_read: usize,
-    #[cfg(any(unix))]
+    #[cfg(unix)]
     response_status: u16,
 }
 
@@ -740,7 +740,7 @@ pin_project! {
 }
 
 impl ByteCountingTokioFileReader {
-    #[cfg(any(unix))]
+    #[cfg(unix)]
     fn new(file: tokio::fs::File) -> Self {
         ByteCountingTokioFileReader {
             file,
@@ -1112,7 +1112,7 @@ fn spawn_hls_master_playlist_reader(
     )))
 }
 
-#[cfg(any(unix))]
+#[cfg(unix)]
 fn upload_tokio_file(
     bucket: Bucket,
     file_path: impl AsRef<std::path::Path>,
