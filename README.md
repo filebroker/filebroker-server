@@ -82,6 +82,8 @@ if you send your mails through an SMTP relay that manages DKIM for you this is r
 
 `FILEBROKER_DKIM_DOMAIN` (optional, string): The domain name verified through the DKIM entry, used in combination with `FILEBROKER_DKIM_KEY_PATH` and `FILEBROKER_DKIM_SELECTOR`.
 
-`FILEBROKER_PG_SSL_CERT_PATH` (optional, string): Path to the SSL certificate used for postgres connections, used in addition to the native certificate store.
+`FILEBROKER_PG_ENABLE_SSL` (optional, boolean): Whether to enable SSL for postgres connection, defaults to false.
+
+`FILEBROKER_PG_SSL_CERT_PATH` (optional, string): Path to the SSL certificate used for postgres connections, used in addition to the native certificate store. Meaningless if `FILEBROKER_PG_ENABLE_SSL` is not enabled.
 
 Note that CORS headers are only set when running debug binaries for development, for production you need to set up nginx.
