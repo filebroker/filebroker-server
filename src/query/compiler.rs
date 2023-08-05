@@ -205,7 +205,8 @@ pub fn compile_window_query(
 
         sql_query.push_str(" SELECT 1::BIGINT AS row_number, NULL AS prev, ");
         sql_query.push_str(&post_pk.to_string());
-        sql_query.push_str("::BIGINT AS pk, pk AS next, 1 AS evaluated_limit FROM post WHERE pk != ");
+        sql_query
+            .push_str("::BIGINT AS pk, pk AS next, 1 AS evaluated_limit FROM post WHERE pk != ");
         sql_query.push_str(&post_pk.to_string());
         sql_query.push_str(" AND pk IN(SELECT pk FROM reducedRandomSet) ORDER BY RANDOM() LIMIT 1");
     }
