@@ -68,12 +68,20 @@ lazy_static! {
     pub static ref DATABASE_URL: String = std::env::var("FILEBROKER_DATABASE_URL").expect(
         "Missing environment variable FILEBROKER_DATABASE_URL must be set to connect to postgres"
     );
+    pub static ref PG_ENABLE_SSL: bool = std::env::var("FILEBROKER_PG_ENABLE_SSL")
+        .map(|val| val
+            .parse::<bool>()
+            .expect("FILEBROKER_PG_ENABLE_SSL is not a valid boolean"))
+        .unwrap_or_default();
     pub static ref CONNECTION_POOL: Pool<AsyncPgConnection> = {
-        let database_connection_manager =
+        let database_connection_manager = if *PG_ENABLE_SSL {
             AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_setup(
                 DATABASE_URL.clone(),
-                establish_connection,
-            );
+                establish_pg_ssl_connection,
+            )
+        } else {
+            AsyncDieselConnectionManager::<AsyncPgConnection>::new(DATABASE_URL.clone())
+        };
         let max_db_connections = std::env::var("FILEBROKER_MAX_DB_CONNECTIONS")
             .unwrap_or_else(|_| String::from("25"))
             .parse::<usize>()
@@ -631,7 +639,7 @@ fn load_private_key(key_path: &str) -> io::Result<PrivateKey> {
 
 // enable TLS for AsyncPgConnection, see https://github.com/weiznich/diesel_async/blob/main/examples/postgres/pooled-with-rustls
 
-fn establish_connection(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
+fn establish_pg_ssl_connection(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
     let fut = async {
         // We first set up the way we want rustls to work.
         let rustls_config = rustls::ClientConfig::builder()
