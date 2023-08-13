@@ -93,7 +93,13 @@ impl Operator {
                 }
             }
             Self::Times => "*",
-            Self::Unequal => "!=",
+            Self::Unequal => {
+                if let Some((_, Type::Null)) = binary_types {
+                    "IS NOT"
+                } else {
+                    "!="
+                }
+            }
         }
     }
 
