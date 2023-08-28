@@ -144,7 +144,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                 .map(|o| o.object_key.clone())
                 .collect::<Vec<_>>(),
             &tokio_handle,
-        );
+        ).await;
 
         log::info!(
             "Found {} objects with missing HLS playlists",
@@ -258,7 +258,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                 .map(|o| o.object_key.clone())
                 .collect::<Vec<_>>(),
             &tokio_handle,
-        );
+        ).await;
 
         log::info!(
             "Found {} objects with missing thumbnails",
