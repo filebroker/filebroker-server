@@ -138,8 +138,8 @@ pub async fn generate_hls_playlist(
 
         match LockedObjectTaskSentinel::new(
             "hls_locked_at",
+            "hls_master_playlist",
             source_object_key.clone(),
-            |s3_object| &s3_object.hls_master_playlist,
         )
         .await?
         {
@@ -542,8 +542,8 @@ pub async fn generate_thumbnail(
         } else {
             match LockedObjectTaskSentinel::new(
                 "thumbnail_locked_at",
+                "thumbnail_object_key",
                 source_object_key.clone(),
-                |s3_object| &s3_object.thumbnail_object_key,
             )
             .await?
             {
@@ -1149,25 +1149,20 @@ impl LockedObjectTaskSentinel {
     /// Try to acquire a hls_lock or thumbnail_lock, returning `None` if already locked
     async fn new(
         lock_column: &'static str,
+        locked_column: &'static str,
         object_key: String,
-        property_accessor: fn(&S3Object) -> &Option<String>,
     ) -> Result<Option<Self>, Error> {
         let mut connection = acquire_db_connection().await?;
         let update_result = diesel::sql_query(format!(
-            "UPDATE s3_object SET {lock_column} = NOW() WHERE object_key = $1 AND {lock_column} IS NULL RETURNING *",
+            "UPDATE s3_object SET {lock_column} = NOW() WHERE object_key = $1 AND {lock_column} IS NULL AND {locked_column} IS NULL RETURNING *",
         ))
         .bind::<VarChar, _>(&object_key)
         .get_result::<S3Object>(&mut connection)
         .await
         .optional()?;
 
-        match update_result {
-            Some(s3_object) => {
-                if property_accessor(&s3_object).is_some() {
-                    return Ok(None);
-                }
-            }
-            None => return Ok(None),
+        if update_result.is_none() {
+            return Ok(None);
         }
 
         let key_to_refresh = object_key.clone();
