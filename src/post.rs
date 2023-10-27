@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use diesel::{
     dsl::{exists, not},
     sql_types::{Array, BigInt},
+    upsert::excluded,
     BoolExpressionMethods, OptionalExtension, Table,
 };
 use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
@@ -622,6 +623,13 @@ pub async fn edit_post_handler(
                         .for_each(|group_access| added_group_access.push(*group_access));
                 }
 
+                added_group_access.retain_mut(|group_access| {
+                    !curr_visible_group_access.iter().any(|curr_group| {
+                        curr_group.fk_granted_group == group_access.group_pk
+                            && curr_group.write == group_access.write
+                    })
+                });
+
                 if !added_group_access.is_empty() {
                     let group_pks = added_group_access
                         .iter()
@@ -642,6 +650,12 @@ pub async fn edit_post_handler(
 
                     let res = diesel::insert_into(post_group_access::table)
                         .values(&new_post_group_access)
+                        .on_conflict((
+                            post_group_access::fk_post,
+                            post_group_access::fk_granted_group,
+                        ))
+                        .do_update()
+                        .set(post_group_access::write.eq(excluded(post_group_access::write)))
                         .execute(connection)
                         .await
                         .map_err(retry_on_constraint_violation)?;
