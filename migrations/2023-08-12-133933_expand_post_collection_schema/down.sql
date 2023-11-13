@@ -1,0 +1,60 @@
+DROP INDEX post_collection_tag_fk_tag_idx;
+
+DROP TABLE post_collection_tag;
+
+ALTER TABLE post_collection_item DROP CONSTRAINT post_collection_item_pkey;
+ALTER TABLE post_collection_item DROP COLUMN pk;
+DROP INDEX post_collection_item_fk_post_idx;
+ALTER TABLE post_collection_item ADD PRIMARY KEY(fk_post, fk_post_collection);
+
+ALTER TABLE post_collection RENAME COLUMN title TO name;
+ALTER TABLE post_collection RENAME COLUMN fk_create_user TO fk_owner;
+ALTER TABLE post_collection DROP COLUMN public_edit;
+ALTER TABLE post_collection DROP COLUMN poster_object_key;
+ALTER TABLE post_collection DROP COLUMN description;
+
+ALTER INDEX post_collection_fk_create_user_idx RENAME TO post_collection_fk_owner_idx;
+
+DROP INDEX post_collection_fk_create_user_desc_idx;
+
+DROP INDEX post_collection_creation_timestamp_idx;
+DROP INDEX post_collection_creation_timestamp_desc_idx;
+
+DROP INDEX post_collection_fk_create_user_creation_timestamp_idx;
+DROP INDEX post_collection_fk_create_user_desc_creation_timestamp_idx;
+DROP INDEX post_collection_fk_create_user_creation_timestamp_desc_idx;
+DROP INDEX post_collection_fk_create_user_desc_creation_timestamp_desc_idx;
+DROP INDEX post_collection_creation_timestamp_fk_create_user_idx;
+DROP INDEX post_collection_creation_timestamp_fk_create_user_desc_idx;
+DROP INDEX post_collection_creation_timestamp_desc_fk_create_user_idx;
+DROP INDEX post_collection_creation_timestamp_desc_fk_create_user_desc_idx;
+
+DROP INDEX post_collection_title_idx;
+DROP INDEX post_collection_title_desc_idx;
+
+DROP INDEX post_collection_title_creation_timestamp_idx;
+DROP INDEX post_collection_title_desc_creation_timestamp_idx;
+DROP INDEX post_collection_title_creation_timestamp_desc_idx;
+DROP INDEX post_collection_title_desc_creation_timestamp_desc_idx;
+DROP INDEX post_collection_creation_timestamp_title_idx;
+DROP INDEX post_collection_creation_timestamp_title_desc_idx;
+DROP INDEX post_collection_creation_timestamp_desc_title_idx;
+DROP INDEX post_collection_creation_timestamp_desc_title_desc_idx;
+DROP INDEX post_collection_title_fk_create_user_idx;
+DROP INDEX post_collection_title_fk_create_user_desc_idx;
+DROP INDEX post_collection_title_desc_fk_create_user_idx;
+DROP INDEX post_collection_title_desc_fk_create_user_desc_idx;
+DROP INDEX post_collection_fk_create_user_title_idx;
+DROP INDEX post_collection_fk_create_user_desc_title_idx;
+DROP INDEX post_collection_fk_create_user_title_desc_idx;
+DROP INDEX post_collection_fk_create_user_desc_title_desc_idx;
+
+DROP INDEX post_collection_title_gin_idx;
+
+DROP TRIGGER before_insert_or_update_set_empty_post_collection_strings_to_null ON post_collection;
+DROP FUNCTION set_empty_post_collection_strings_to_null();
+
+DROP INDEX s3_object_sha256_hash_idx;
+
+ALTER TABLE post_collection_item DROP CONSTRAINT post_collection_item_fk_post_collection_ordinal_unique_constr;
+ALTER TABLE post_collection_item DROP COLUMN ordinal;

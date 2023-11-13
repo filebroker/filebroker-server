@@ -47,6 +47,10 @@ pub enum Error {
     InvalidTokenError(String),
     #[error("This email address is already confirmed for this user")]
     EmailAlreadyConfirmedError,
+    #[error("The query returned {0} results, exceeding the limit of {1}")]
+    TooManyResultsError(u32, u32),
+    #[error("Detected duplicate post in collection {0} and duplicate_mode set to reject")]
+    DuplicatePostCollectionItemError(i64, Vec<i64>),
 
     // 401
     #[error("invalid credentials")]
@@ -63,6 +67,8 @@ pub enum Error {
     InaccessibleObjectError(i64),
     #[error("Cannot access object with provided key {0}")]
     InaccessibleS3ObjectError(String),
+    #[error("Cannot access objects with provided pks {0:?}")]
+    InaccessibleObjectsError(Vec<i64>),
 
     // 416
     #[error("The provided byte range is invalid: {1}")]
@@ -107,9 +113,9 @@ pub enum Error {
 impl Error {
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Error::InaccessibleObjectError(_) | Error::InaccessibleS3ObjectError(_) => {
-                StatusCode::FORBIDDEN
-            }
+            Error::InaccessibleObjectError(_)
+            | Error::InaccessibleS3ObjectError(_)
+            | Error::InaccessibleObjectsError(_) => StatusCode::FORBIDDEN,
             Error::InvalidCredentialsError
             | Error::MissingAuthHeaderError
             | Error::InvalidJwtError
@@ -129,7 +135,9 @@ impl Error {
             | Error::WeakPasswordError
             | Error::InvalidUserNameError
             | Error::InvalidTokenError(_)
-            | Error::EmailAlreadyConfirmedError => StatusCode::BAD_REQUEST,
+            | Error::EmailAlreadyConfirmedError
+            | Error::TooManyResultsError(..)
+            | Error::DuplicatePostCollectionItemError(..) => StatusCode::BAD_REQUEST,
             Error::DatabaseConnectionError(_)
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -169,6 +177,8 @@ impl Error {
             Self::InvalidUserNameError => 400_014,
             Self::InvalidTokenError(_) => 400_015,
             Self::EmailAlreadyConfirmedError => 400_016,
+            Self::TooManyResultsError(..) => 400_017,
+            Self::DuplicatePostCollectionItemError(..) => 400_018,
 
             Self::InvalidCredentialsError => 401_001,
             Self::MissingAuthHeaderError => 401_002,
@@ -177,6 +187,7 @@ impl Error {
 
             Self::InaccessibleObjectError(_) => 403_001,
             Self::InaccessibleS3ObjectError(_) => 403_002,
+            Self::InaccessibleObjectsError(_) => 403_003,
 
             Self::IllegalRangeError(..) => 416_001,
 
@@ -285,6 +296,8 @@ struct ErrorResponse {
     error_code: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     compilation_errors: Option<Vec<compiler::Error>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duplicate_post_collection_items: Option<Vec<i64>>,
 }
 
 /// Creates a Rejection response for the given error and logs internal server errors.
@@ -310,11 +323,19 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
             None
         };
 
+        let duplicate_post_collection_items =
+            if let Error::DuplicatePostCollectionItemError(_, duplicates) = e {
+                Some(duplicates.clone())
+            } else {
+                None
+            };
+
         let err_response = ErrorResponse {
             message,
             status: status_code.to_string(),
             error_code,
             compilation_errors,
+            duplicate_post_collection_items,
         };
 
         let response_builder = Response::builder()

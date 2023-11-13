@@ -128,3 +128,26 @@ pub fn addr_to_ip_string(addr: &SocketAddr) -> String {
         SocketAddr::V6(addr) => addr.ip().to_string(),
     }
 }
+
+pub fn dedup_vec_optional<T: PartialEq + Ord>(vec: &mut Option<Vec<T>>) {
+    if let Some(vec) = vec {
+        dedup_vec(vec);
+    }
+}
+
+pub fn dedup_vecs_optional<T: PartialEq + Ord>(v1: &mut Option<Vec<T>>, v2: &Option<Vec<T>>) {
+    if let Some(v1) = v1 {
+        if let Some(v2) = v2 {
+            dedup_vecs(v1, v2);
+        }
+    }
+}
+
+pub fn dedup_vec<T: PartialEq + Ord>(vec: &mut Vec<T>) {
+    vec.sort_unstable();
+    vec.dedup();
+}
+
+pub fn dedup_vecs<T: PartialEq + Ord>(v1: &mut Vec<T>, v2: &[T]) {
+    v1.retain(|e| !v2.contains(e));
+}

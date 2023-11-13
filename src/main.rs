@@ -59,6 +59,7 @@ mod perms;
 mod post;
 mod query;
 mod schema;
+mod tags;
 mod task;
 mod util;
 
@@ -310,23 +311,33 @@ async fn setup_tokio_runtime() {
         .and(warp::post())
         .and(warp::body::json())
         .and(auth::with_user())
-        .and_then(post::create_post_handler);
+        .and_then(post::create::create_post_handler);
 
     let create_tags_route = warp::path("create-tags")
         .and(warp::post())
         .and(warp::body::json())
         .and(auth::with_user())
-        .and_then(post::create_tags_handler);
+        .and_then(tags::create_tags_handler);
 
     let upsert_tag_route = warp::path("upsert-tag")
         .and(warp::post())
         .and(warp::body::json())
         .and(auth::with_user())
-        .and_then(post::upsert_tag_handler);
+        .and_then(tags::upsert_tag_handler);
 
     let search_route = warp::path("search")
         .and(warp::get())
         .and(auth::with_user_optional())
+        .and(
+            warp::path::param::<String>()
+                .map(Some)
+                .or_else(|_| async { Ok::<(Option<String>,), std::convert::Infallible>((None,)) }),
+        )
+        .and(
+            warp::path::param::<String>()
+                .map(Some)
+                .or_else(|_| async { Ok::<(Option<String>,), std::convert::Infallible>((None,)) }),
+        )
         .and(warp::query::<QueryParametersFilter>())
         .and_then(query::search_handler);
 
@@ -334,6 +345,11 @@ async fn setup_tokio_runtime() {
         .and(warp::get())
         .and(auth::with_user_optional())
         .and(warp::path::param())
+        .and(
+            warp::path::param::<i64>()
+                .map(Some)
+                .or_else(|_| async { Ok::<(Option<i64>,), std::convert::Infallible>((None,)) }),
+        )
         .and(warp::query::<QueryParametersFilter>())
         .and_then(query::get_post_handler);
 
@@ -372,7 +388,7 @@ async fn setup_tokio_runtime() {
     let find_tag_route = warp::path("find-tag")
         .and(warp::get())
         .and(warp::path::param())
-        .and_then(post::find_tag_handler);
+        .and_then(tags::find_tag_handler);
 
     let create_user_group_route = warp::path("create-user-group")
         .and(warp::post())
@@ -395,7 +411,7 @@ async fn setup_tokio_runtime() {
         .and(warp::body::json())
         .and(warp::path::param())
         .and(auth::with_user())
-        .and_then(post::edit_post_handler);
+        .and_then(post::update::edit_post_handler);
 
     let analyze_query_route = warp::path("analyze-query")
         .and(warp::post())
@@ -444,6 +460,37 @@ async fn setup_tokio_runtime() {
         .and(warp::body::json())
         .and_then(auth::reset_password_handler);
 
+    let create_post_collection_route = warp::path("create-collection")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(post::create::create_post_collection_handler);
+
+    let get_post_collection_route = warp::path("get-collection")
+        .and(warp::get())
+        .and(auth::with_user_optional())
+        .and(warp::path::param())
+        .and_then(query::get_post_collection_handler);
+
+    let edit_post_collection_route = warp::path("edit-collection")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(post::update::edit_post_collection_handler);
+
+    let delete_posts_route = warp::path("delete-posts")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(post::delete::delete_posts_handler);
+
+    let delete_post_collections_route = warp::path("delete-collections")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(post::delete::delete_posts_collections_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -480,7 +527,13 @@ async fn setup_tokio_runtime() {
         .or(change_password_route)
         .or(send_password_reset_route)
         .boxed()
-        .or(reset_password_route);
+        .or(reset_password_route)
+        .or(create_post_collection_route)
+        .or(get_post_collection_route)
+        .or(edit_post_collection_route)
+        .or(delete_posts_route)
+        .boxed()
+        .or(delete_post_collections_route);
 
     let filter = routes
         .recover(error::handle_rejection)
@@ -723,6 +776,12 @@ fn configure_scheduler() -> Scheduler<Utc> {
     });
     scheduler.every(clokwerk::Interval::Minutes(30)).run(|| {
         task::submit_task("clear_old_tokens", task::clear_old_tokens);
+    });
+    scheduler.every(clokwerk::Interval::Minutes(5)).run(|| {
+        task::submit_task(
+            "execute_deferred_s3_object_deletions",
+            task::execute_deferred_s3_object_deletions,
+        );
     });
 
     scheduler

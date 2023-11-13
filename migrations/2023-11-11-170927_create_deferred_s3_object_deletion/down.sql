@@ -1,0 +1,1 @@
+DROP TABLE deferred_s3_object_deletion;

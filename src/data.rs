@@ -20,7 +20,8 @@ use crate::{
     diesel::{ExpressionMethods, OptionalExtension},
     error::Error,
     model::{Broker, NewBroker, S3Object, User},
-    perms, post,
+    perms::{self, PostJoinedS3Object},
+    post,
     query::PostDetailed,
     schema::{broker, s3_object},
 };
@@ -120,9 +121,14 @@ pub async fn upload_handler(
                     perms::load_s3_object_posts(&s3_object.object_key, user.pk, &mut connection)
                         .await?;
 
-                for (post, s3_object) in posts {
-                    let is_editable =
-                        perms::is_post_editable(&mut connection, Some(&user), post.pk).await?;
+                for PostJoinedS3Object {
+                    post,
+                    create_user,
+                    s3_object,
+                } in posts
+                {
+                    let is_editable = post.is_editable(Some(&user), &mut connection).await?;
+                    let is_deletable = post.is_deletable(Some(&user), &mut connection).await?;
                     let tags = post::get_post_tags(post.pk, &mut connection)
                         .await
                         .map_err(Error::from)?;
@@ -137,7 +143,7 @@ pub async fn upload_handler(
                         source_url: post.source_url,
                         title: post.title,
                         creation_timestamp: post.creation_timestamp,
-                        fk_create_user: post.fk_create_user,
+                        create_user,
                         score: post.score,
                         s3_object: Some(s3_object),
                         thumbnail_url: post.thumbnail_url,
@@ -147,8 +153,10 @@ pub async fn upload_handler(
                         public_edit: post.public_edit,
                         description: post.description,
                         is_editable,
+                        is_deletable,
                         tags,
                         group_access,
+                        post_collection_item: None,
                     });
                 }
             }

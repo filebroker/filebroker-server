@@ -3,23 +3,38 @@
 use chrono::{offset::Utc, DateTime};
 use diesel::sql_types::{BigInt, Bool, Int4, Int8, Nullable, Timestamptz, Varchar};
 use diesel::{Associations, Identifiable, Insertable, Queryable};
+use diesel_async::AsyncPgConnection;
 use serde::Serialize;
 
-use crate::schema::*;
+use crate::error::Error;
+use crate::query::{SearchQueryResultObject, SearchResult};
+use crate::{perms, schema::*};
 
-#[derive(Identifiable, Queryable, Serialize, Clone)]
+#[derive(Identifiable, Queryable, QueryableByName, Serialize, Clone)]
 #[diesel(table_name = registered_user)]
 #[diesel(primary_key(pk))]
 pub struct User {
+    #[diesel(sql_type = BigInt)]
     pub pk: i64,
+    #[diesel(sql_type = Varchar)]
     pub user_name: String,
+    #[diesel(sql_type = Varchar)]
+    #[serde(skip_serializing)]
     pub password: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub email: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub avatar_url: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
     pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = Bool)]
     pub email_confirmed: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub display_name: Option<String>,
+    #[diesel(sql_type = Int4)]
+    #[serde(skip_serializing)]
     pub jwt_version: i32,
+    #[diesel(sql_type = Int4)]
     pub password_fail_count: i32,
 }
 
@@ -66,13 +81,45 @@ pub struct Post {
     pub description: Option<String>,
 }
 
+impl Post {
+    pub async fn is_editable(
+        &self,
+        user: Option<&User>,
+        connection: &mut AsyncPgConnection,
+    ) -> Result<bool, Error> {
+        if self.public_edit {
+            return Ok(true);
+        }
+        if let Some(user) = user {
+            if user.pk == self.fk_create_user {
+                return Ok(true);
+            }
+        }
+
+        perms::is_post_editable(connection, user, self.pk).await
+    }
+
+    pub async fn is_deletable(
+        &self,
+        user: Option<&User>,
+        connection: &mut AsyncPgConnection,
+    ) -> Result<bool, Error> {
+        if let Some(user) = user {
+            if user.pk == self.fk_create_user {
+                return Ok(true);
+            }
+        }
+
+        perms::is_post_deletable(connection, user, self.pk).await
+    }
+}
+
 #[derive(Insertable)]
 #[diesel(table_name = post)]
 pub struct NewPost {
     pub data_url: Option<String>,
     pub source_url: Option<String>,
     pub title: Option<String>,
-    pub creation_timestamp: DateTime<Utc>,
     pub fk_create_user: i64,
     pub s3_object: Option<String>,
     pub thumbnail_url: Option<String>,
@@ -82,26 +129,198 @@ pub struct NewPost {
 }
 
 #[derive(Queryable, QueryableByName, Serialize)]
-pub struct PostQueryObject {
+#[diesel(table_name = registered_user)]
+pub struct PostCreateUser {
     #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_create_user_pk")]
+    pub pk: i64,
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_create_user_user_name")]
+    pub user_name: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_create_user_email")]
+    pub email: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_create_user_avatar_url")]
+    pub avatar_url: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_create_user_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_create_user_email_confirmed")]
+    pub email_confirmed: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_create_user_display_name")]
+    pub display_name: Option<String>,
+    #[diesel(sql_type = Int4)]
+    #[diesel(column_name = "post_create_user_password_fail_count")]
+    pub password_fail_count: i32,
+}
+
+impl From<User> for PostCreateUser {
+    fn from(value: User) -> Self {
+        Self {
+            pk: value.pk,
+            user_name: value.user_name,
+            email: value.email,
+            avatar_url: value.avatar_url,
+            creation_timestamp: value.creation_timestamp,
+            email_confirmed: value.email_confirmed,
+            display_name: value.display_name,
+            password_fail_count: value.password_fail_count,
+        }
+    }
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = s3_object)]
+pub struct PostS3Object {
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_s3_object_object_key")]
+    pub object_key: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_sha256_hash")]
+    pub sha256_hash: Option<String>,
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_s3_object_size_bytes")]
+    pub size_bytes: i64,
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_s3_object_mime_type")]
+    pub mime_type: String,
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_s3_object_fk_broker")]
+    pub fk_broker: i64,
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_s3_object_fk_uploader")]
+    pub fk_uploader: i64,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_thumbnail_object_key")]
+    pub thumbnail_object_key: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_s3_object_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_filename")]
+    pub filename: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_hls_master_playlist")]
+    pub hls_master_playlist: Option<String>,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_s3_object_hls_disabled")]
+    pub hls_disabled: bool,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    #[diesel(column_name = "post_s3_object_hls_locked_at")]
+    pub hls_locked_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    #[diesel(column_name = "post_s3_object_thumbnail_locked_at")]
+    pub thumbnail_locked_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Int4>)]
+    #[diesel(column_name = "post_s3_object_hls_fail_count")]
+    pub hls_fail_count: Option<i32>,
+    #[diesel(sql_type = Nullable<Int4>)]
+    #[diesel(column_name = "post_s3_object_thumbnail_fail_count")]
+    pub thumbnail_fail_count: Option<i32>,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_s3_object_thumbnail_disabled")]
+    pub thumbnail_disabled: bool,
+}
+
+impl From<S3Object> for PostS3Object {
+    fn from(value: S3Object) -> Self {
+        Self {
+            object_key: value.object_key,
+            sha256_hash: value.sha256_hash,
+            size_bytes: value.size_bytes,
+            mime_type: value.mime_type,
+            fk_broker: value.fk_broker,
+            fk_uploader: value.fk_uploader,
+            thumbnail_object_key: value.thumbnail_object_key,
+            creation_timestamp: value.creation_timestamp,
+            filename: value.filename,
+            hls_master_playlist: value.hls_master_playlist,
+            hls_disabled: value.hls_disabled,
+            hls_locked_at: value.hls_locked_at,
+            thumbnail_locked_at: value.thumbnail_locked_at,
+            hls_fail_count: value.hls_fail_count,
+            thumbnail_fail_count: value.thumbnail_fail_count,
+            thumbnail_disabled: value.thumbnail_disabled,
+        }
+    }
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = post)]
+pub struct PostFull {
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_pk")]
     pub pk: i64,
     #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_data_url")]
     pub data_url: Option<String>,
     #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_source_url")]
     pub source_url: Option<String>,
     #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_title")]
     pub title: Option<String>,
     #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
-    #[diesel(sql_type = BigInt)]
-    pub fk_create_user: i64,
+    #[diesel(embed)]
+    pub create_user: PostCreateUser,
     #[diesel(sql_type = Int4)]
+    #[diesel(column_name = "post_score")]
     pub score: i32,
+    #[diesel(embed)]
+    pub s3_object: Option<PostS3Object>,
     #[diesel(sql_type = Nullable<Varchar>)]
-    pub s3_object: Option<String>,
-    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_thumbnail_url")]
     pub thumbnail_url: Option<String>,
     #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_thumbnail_object_key")]
+    pub thumbnail_object_key: Option<String>,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_public")]
+    #[serde(rename = "is_public")]
+    pub public: bool,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_public_edit")]
+    pub public_edit: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_description")]
+    pub description: Option<String>,
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = post)]
+pub struct PostQueryObject {
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_pk")]
+    pub pk: i64,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_data_url")]
+    pub data_url: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_source_url")]
+    pub source_url: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_title")]
+    pub title: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(embed)]
+    pub create_user: PostCreateUser,
+    #[diesel(sql_type = Int4)]
+    #[diesel(column_name = "post_score")]
+    pub score: i32,
+    #[diesel(embed)]
+    pub s3_object: Option<PostS3Object>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_thumbnail_url")]
+    pub thumbnail_url: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_thumbnail_object_key")]
     pub thumbnail_object_key: Option<String>,
     #[serde(skip_serializing)]
     #[diesel(sql_type = Nullable<Int8>)]
@@ -110,12 +329,42 @@ pub struct PostQueryObject {
     #[diesel(sql_type = Int4)]
     pub evaluated_limit: i32,
     #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_public")]
     #[serde(rename = "is_public")]
     pub public: bool,
     #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_public_edit")]
     pub public_edit: bool,
     #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_description")]
     pub description: Option<String>,
+}
+
+impl SearchQueryResultObject for PostQueryObject {
+    fn construct_search_result(
+        full_count: Option<i64>,
+        pages: Option<i64>,
+        objects: Vec<Self>,
+    ) -> SearchResult
+    where
+        Self: Sized,
+    {
+        SearchResult {
+            full_count,
+            pages,
+            posts: Some(objects),
+            collections: None,
+            collection_items: None,
+        }
+    }
+
+    fn get_full_count(&self) -> Option<i64> {
+        self.full_count
+    }
+
+    fn get_evaluated_limit(&self) -> i32 {
+        self.evaluated_limit
+    }
 }
 
 #[derive(Queryable, QueryableByName)]
@@ -130,6 +379,338 @@ pub struct PostWindowQueryObject {
     pub next: Option<i64>,
     #[diesel(sql_type = Int4)]
     pub evaluated_limit: i32,
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = registered_user)]
+pub struct PostCollectionCreateUser {
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_create_user_pk")]
+    pub pk: i64,
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_collection_create_user_user_name")]
+    pub user_name: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_create_user_email")]
+    pub email: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_create_user_avatar_url")]
+    pub avatar_url: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_create_user_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_collection_create_user_email_confirmed")]
+    pub email_confirmed: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_create_user_display_name")]
+    pub display_name: Option<String>,
+    #[diesel(sql_type = Int4)]
+    #[diesel(column_name = "post_collection_create_user_password_fail_count")]
+    pub password_fail_count: i32,
+}
+
+impl From<User> for PostCollectionCreateUser {
+    fn from(value: User) -> Self {
+        Self {
+            pk: value.pk,
+            user_name: value.user_name,
+            email: value.email,
+            avatar_url: value.avatar_url,
+            creation_timestamp: value.creation_timestamp,
+            email_confirmed: value.email_confirmed,
+            display_name: value.display_name,
+            password_fail_count: value.password_fail_count,
+        }
+    }
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = s3_object)]
+pub struct PostCollectionPosterS3Object {
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_collection_poster_object_key")]
+    pub object_key: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_poster_sha256_hash")]
+    pub sha256_hash: Option<String>,
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_poster_size_bytes")]
+    pub size_bytes: i64,
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_collection_poster_mime_type")]
+    pub mime_type: String,
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_poster_fk_broker")]
+    pub fk_broker: i64,
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_poster_fk_uploader")]
+    pub fk_uploader: i64,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_poster_thumbnail_object_key")]
+    pub thumbnail_object_key: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_poster_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_poster_filename")]
+    pub filename: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_poster_hls_master_playlist")]
+    pub hls_master_playlist: Option<String>,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_collection_poster_hls_disabled")]
+    pub hls_disabled: bool,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    #[diesel(column_name = "post_collection_poster_hls_locked_at")]
+    pub hls_locked_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    #[diesel(column_name = "post_collection_poster_thumbnail_locked_at")]
+    pub thumbnail_locked_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Int4>)]
+    #[diesel(column_name = "post_collection_poster_hls_fail_count")]
+    pub hls_fail_count: Option<i32>,
+    #[diesel(sql_type = Nullable<Int4>)]
+    #[diesel(column_name = "post_collection_poster_thumbnail_fail_count")]
+    pub thumbnail_fail_count: Option<i32>,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_collection_poster_thumbnail_disabled")]
+    pub thumbnail_disabled: bool,
+}
+
+impl From<S3Object> for PostCollectionPosterS3Object {
+    fn from(value: S3Object) -> Self {
+        Self {
+            object_key: value.object_key,
+            sha256_hash: value.sha256_hash,
+            size_bytes: value.size_bytes,
+            mime_type: value.mime_type,
+            fk_broker: value.fk_broker,
+            fk_uploader: value.fk_uploader,
+            thumbnail_object_key: value.thumbnail_object_key,
+            creation_timestamp: value.creation_timestamp,
+            filename: value.filename,
+            hls_master_playlist: value.hls_master_playlist,
+            hls_disabled: value.hls_disabled,
+            hls_locked_at: value.hls_locked_at,
+            thumbnail_locked_at: value.thumbnail_locked_at,
+            hls_fail_count: value.hls_fail_count,
+            thumbnail_fail_count: value.thumbnail_fail_count,
+            thumbnail_disabled: value.thumbnail_disabled,
+        }
+    }
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = post_collection)]
+pub struct PostCollectionFull {
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_pk")]
+    pub pk: i64,
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_collection_title")]
+    pub title: String,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(embed)]
+    pub create_user: PostCollectionCreateUser,
+    #[diesel(embed)]
+    pub poster_object: Option<PostCollectionPosterS3Object>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_thumbnail_object_key")]
+    pub thumbnail_object_key: Option<String>,
+    #[diesel(sql_type = Bool)]
+    #[serde(rename = "is_public")]
+    #[diesel(column_name = "post_collection_public")]
+    pub public: bool,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_collection_public_edit")]
+    pub public_edit: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_description")]
+    pub description: Option<String>,
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = post_collection)]
+pub struct PostCollectionQueryObject {
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_pk")]
+    pub pk: i64,
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_collection_title")]
+    pub title: String,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(embed)]
+    pub create_user: PostCollectionCreateUser,
+    #[diesel(embed)]
+    pub poster_object: Option<PostCollectionPosterS3Object>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_thumbnail_object_key")]
+    pub thumbnail_object_key: Option<String>,
+    #[serde(skip_serializing)]
+    #[diesel(sql_type = Nullable<Int8>)]
+    pub full_count: Option<i64>,
+    #[serde(skip_serializing)]
+    #[diesel(sql_type = Int4)]
+    pub evaluated_limit: i32,
+    #[diesel(sql_type = Bool)]
+    #[serde(rename = "is_public")]
+    #[diesel(column_name = "post_collection_public")]
+    pub public: bool,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_collection_public_edit")]
+    pub public_edit: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_description")]
+    pub description: Option<String>,
+}
+
+impl SearchQueryResultObject for PostCollectionQueryObject {
+    fn construct_search_result(
+        full_count: Option<i64>,
+        pages: Option<i64>,
+        objects: Vec<Self>,
+    ) -> SearchResult
+    where
+        Self: Sized,
+    {
+        SearchResult {
+            full_count,
+            pages,
+            posts: None,
+            collections: Some(objects),
+            collection_items: None,
+        }
+    }
+
+    fn get_full_count(&self) -> Option<i64> {
+        self.full_count
+    }
+
+    fn get_evaluated_limit(&self) -> i32 {
+        self.evaluated_limit
+    }
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = registered_user)]
+pub struct PostCollectionItemAddedUser {
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_item_added_user_pk")]
+    pub pk: i64,
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_collection_item_added_user_user_name")]
+    pub user_name: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_item_added_user_email")]
+    pub email: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_item_added_user_avatar_url")]
+    pub avatar_url: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_item_added_user_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_collection_item_added_user_email_confirmed")]
+    pub email_confirmed: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_item_added_user_display_name")]
+    pub display_name: Option<String>,
+    #[diesel(sql_type = Int4)]
+    #[diesel(column_name = "post_collection_item_added_user_password_fail_count")]
+    pub password_fail_count: i32,
+}
+
+impl From<User> for PostCollectionItemAddedUser {
+    fn from(value: User) -> Self {
+        Self {
+            pk: value.pk,
+            user_name: value.user_name,
+            email: value.email,
+            avatar_url: value.avatar_url,
+            creation_timestamp: value.creation_timestamp,
+            email_confirmed: value.email_confirmed,
+            display_name: value.display_name,
+            password_fail_count: value.password_fail_count,
+        }
+    }
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = post_collection_item)]
+pub struct PostCollectionItemFull {
+    #[diesel(embed)]
+    pub post: PostFull,
+    #[diesel(embed)]
+    pub post_collection: PostCollectionFull,
+    #[diesel(embed)]
+    pub added_by: PostCollectionItemAddedUser,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_item_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_item_pk")]
+    pub pk: i64,
+    #[diesel(sql_type = Int4)]
+    #[diesel(column_name = "post_collection_item_ordinal")]
+    pub ordinal: i32,
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = post_collection_item)]
+pub struct PostCollectionItemQueryObject {
+    #[diesel(embed)]
+    pub post: PostFull,
+    #[diesel(embed)]
+    pub post_collection: PostCollectionFull,
+    #[diesel(embed)]
+    pub added_by: PostCollectionItemAddedUser,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_item_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_item_pk")]
+    pub pk: i64,
+    #[diesel(sql_type = Int4)]
+    #[diesel(column_name = "post_collection_item_ordinal")]
+    pub ordinal: i32,
+    #[serde(skip_serializing)]
+    #[diesel(sql_type = Nullable<Int8>)]
+    pub full_count: Option<i64>,
+    #[serde(skip_serializing)]
+    #[diesel(sql_type = Int4)]
+    pub evaluated_limit: i32,
+}
+
+impl SearchQueryResultObject for PostCollectionItemQueryObject {
+    fn construct_search_result(
+        full_count: Option<i64>,
+        pages: Option<i64>,
+        objects: Vec<Self>,
+    ) -> SearchResult
+    where
+        Self: Sized,
+    {
+        SearchResult {
+            full_count,
+            pages,
+            posts: None,
+            collections: None,
+            collection_items: Some(objects),
+        }
+    }
+
+    fn get_full_count(&self) -> Option<i64> {
+        self.full_count
+    }
+
+    fn get_evaluated_limit(&self) -> i32 {
+        self.evaluated_limit
+    }
 }
 
 #[derive(AsChangeset)]
@@ -150,6 +731,26 @@ impl PostUpdateOptional {
             || self.title.is_some()
             || self.public.is_some()
             || self.public_edit.is_some()
+            || self.description.is_some()
+    }
+}
+
+#[derive(AsChangeset)]
+#[diesel(table_name = post_collection)]
+pub struct PostCollectionUpdateOptional {
+    pub title: Option<String>,
+    pub public: Option<bool>,
+    pub public_edit: Option<bool>,
+    pub poster_object_key: Option<String>,
+    pub description: Option<String>,
+}
+
+impl PostCollectionUpdateOptional {
+    pub fn has_changes(&self) -> bool {
+        self.title.is_some()
+            || self.public.is_some()
+            || self.public_edit.is_some()
+            || self.poster_object_key.is_some()
             || self.description.is_some()
     }
 }
@@ -177,7 +778,6 @@ pub struct Tag {
 #[diesel(table_name = tag)]
 pub struct NewTag {
     pub tag_name: String,
-    pub creation_timestamp: DateTime<Utc>,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
@@ -318,26 +918,87 @@ pub struct UserGroupMembership {
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[diesel(belongs_to(User, foreign_key = fk_owner))]
+#[diesel(belongs_to(User, foreign_key = fk_create_user))]
 #[diesel(table_name = post_collection)]
 #[diesel(primary_key(pk))]
 pub struct PostCollection {
     pub pk: i64,
-    pub name: String,
-    pub fk_owner: i64,
+    pub title: String,
+    pub fk_create_user: i64,
     pub creation_timestamp: DateTime<Utc>,
+    #[serde(rename = "is_public")]
     pub public: bool,
+    pub public_edit: bool,
+    pub poster_object_key: Option<String>,
+    pub description: Option<String>,
+}
+
+impl PostCollection {
+    pub async fn is_editable(
+        &self,
+        user: Option<&User>,
+        connection: &mut AsyncPgConnection,
+    ) -> Result<bool, Error> {
+        if self.public_edit {
+            return Ok(true);
+        }
+        if let Some(user) = user {
+            if user.pk == self.fk_create_user {
+                return Ok(true);
+            }
+        }
+
+        perms::is_post_collection_editable(connection, user, self.pk).await
+    }
+
+    pub async fn is_deletable(
+        &self,
+        user: Option<&User>,
+        connection: &mut AsyncPgConnection,
+    ) -> Result<bool, Error> {
+        if let Some(user) = user {
+            if user.pk == self.fk_create_user {
+                return Ok(true);
+            }
+        }
+
+        perms::is_post_collection_deletable(connection, user, self.pk).await
+    }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = post_collection)]
+pub struct NewPostCollection {
+    pub title: String,
+    pub fk_create_user: i64,
+    pub public: bool,
+    pub public_edit: bool,
+    pub poster_object_key: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
 #[diesel(belongs_to(User, foreign_key = fk_added_by))]
+#[diesel(belongs_to(Post, foreign_key = fk_post))]
+#[diesel(belongs_to(PostCollection, foreign_key = fk_post_collection))]
 #[diesel(table_name = post_collection_item)]
-#[diesel(primary_key(fk_post, fk_post_collection))]
+#[diesel(primary_key(pk))]
 pub struct PostCollectionItem {
     pub fk_post: i64,
     pub fk_post_collection: i64,
     pub fk_added_by: i64,
     pub creation_timestamp: DateTime<Utc>,
+    pub pk: i64,
+    pub ordinal: i32,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = post_collection_item)]
+pub struct NewPostCollectionItem {
+    pub fk_post: i64,
+    pub fk_post_collection: i64,
+    pub fk_added_by: i64,
+    pub ordinal: i32,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -364,6 +1025,16 @@ pub struct PostCollectionGroupAccess {
     pub write: bool,
     pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(table_name = post_collection_tag)]
+#[diesel(primary_key(fk_post_collection, fk_tag))]
+#[diesel(belongs_to(PostCollection, foreign_key = fk_post_collection))]
+#[diesel(belongs_to(Tag, foreign_key = fk_tag))]
+pub struct PostCollectionTag {
+    pub fk_post_collection: i64,
+    pub fk_tag: i64,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -401,4 +1072,15 @@ pub struct OneTimePassword {
     pub expiry: DateTime<Utc>,
     pub invalidated: bool,
     pub fk_user: i64,
+}
+
+#[derive(Associations, Identifiable, Insertable, Queryable, QueryableByName)]
+#[diesel(belongs_to(Broker, foreign_key = fk_broker))]
+#[diesel(table_name = deferred_s3_object_deletion)]
+#[diesel(primary_key(object_key))]
+pub struct DeferredS3ObjectDeletion {
+    pub object_key: String,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub fail_count: Option<i32>,
+    pub fk_broker: i64,
 }

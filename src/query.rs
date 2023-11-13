@@ -1,18 +1,21 @@
-use std::{cmp, collections::HashMap};
+use std::{cmp, collections::HashMap, str::FromStr};
 
 use chrono::{DateTime, Utc};
-use diesel::{OptionalExtension, QueryDsl};
-use diesel_async::RunQueryDsl;
+use diesel::{OptionalExtension, QueryDsl, QueryableByName};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 use warp::{Rejection, Reply};
 
+use crate::model::{PostCollectionFull, PostCollectionItemQueryObject, PostCollectionQueryObject};
+use crate::perms::{PostCollectionItemJoined, PostCollectionJoined};
+use crate::post::PostCollectionGroupAccessDetailed;
 use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, TextExpressionMethods},
     error::Error,
     model::{PostQueryObject, PostWindowQueryObject, S3Object, Tag, User},
-    perms,
+    perms::{self, PostJoined},
     post::{self, PostGroupAccessDetailed},
     schema::tag,
 };
@@ -23,7 +26,8 @@ use self::{
             AttributeNode, ExpressionNode, ExpressionStatement, FunctionCallNode, ModifierNode,
             Node, PostTagNode, SemanticAnalysisVisitor, StatementNode, VariableNode,
         },
-        dict, lexer, Location, Log,
+        dict::Scope,
+        lexer, Location, Log,
     },
     functions::{char_length, lower},
 };
@@ -31,9 +35,71 @@ use self::{
 pub mod compiler;
 
 const DEFAULT_LIMIT_STR: &str = "50";
-const MAX_LIMIT: u16 = 100;
-const MAX_LIMIT_STR: &str = "100";
+const MAX_LIMIT: u32 = 100;
+const MAX_FULL_LIMIT: u32 = 10000;
 const MAX_SHUFFLE_LIMIT_STR: &str = "10000";
+
+macro_rules! report_missing_pks {
+    ($tab:ident, $pks:expr, $connection:expr) => {
+        $tab::table
+            .select($tab::pk)
+            .filter($tab::pk.eq_any($pks))
+            .load::<i64>($connection)
+            .await
+            .map(|found_pks| {
+                let missing_pks = $pks
+                    .iter()
+                    .filter(|pk| !found_pks.contains(pk))
+                    .collect::<Vec<_>>();
+                if missing_pks.is_empty() {
+                    Ok(())
+                } else {
+                    Err(crate::Error::InvalidEntityReferenceError(
+                        itertools::Itertools::intersperse(
+                            missing_pks.into_iter().map(i64::to_string),
+                            String::from(", "),
+                        )
+                        .collect::<String>(),
+                    ))
+                }
+            })
+            .map_err(crate::Error::from)
+    };
+}
+
+pub(crate) use report_missing_pks;
+
+macro_rules! load_and_report_missing_pks {
+    ($return_type:ident, $tab:ident, $pks:expr, $connection:expr) => {{
+        let found = $tab::table
+            .filter($tab::pk.eq_any($pks))
+            .load::<$return_type>($connection)
+            .await
+            .map_err(crate::Error::from)?;
+
+        let found_pks = found
+            .iter()
+            .map(|f| f.pk)
+            .collect::<std::collections::HashSet<_>>();
+        let missing_pks = $pks
+            .iter()
+            .filter(|pk| !found_pks.contains(pk))
+            .collect::<Vec<_>>();
+        if missing_pks.is_empty() {
+            Ok(found)
+        } else {
+            Err(crate::Error::InvalidEntityReferenceError(
+                itertools::Itertools::intersperse(
+                    missing_pks.into_iter().map(i64::to_string),
+                    String::from(", "),
+                )
+                .collect::<String>(),
+            ))
+        }
+    }};
+}
+
+pub(crate) use load_and_report_missing_pks;
 
 #[derive(Deserialize, Validate)]
 pub struct QueryParametersFilter {
@@ -43,6 +109,7 @@ pub struct QueryParametersFilter {
     pub query: Option<String>,
     pub exclude_window: Option<bool>,
     pub shuffle: Option<bool>,
+    pub writable_only: Option<bool>,
 }
 
 pub struct QueryParameters {
@@ -51,16 +118,25 @@ pub struct QueryParameters {
     pub ordering: Vec<Ordering>,
     pub variables: HashMap<String, String>,
     pub shuffle: bool,
+    pub writable_only: bool,
+    pub base_table_name: &'static str,
+    pub tag_relation_table_name: &'static str,
+    pub select_statements: Vec<String>,
+    pub join_statements: Vec<String>,
+    pub max_limit: u32,
+    pub fallback_ordering: Ordering,
+    pub from_table_override: Option<&'static str>,
+    pub predefined_where_conditions: Option<Vec<String>>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Ordering {
     pub expression: String,
     pub direction: Direction,
     pub nullable: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Direction {
     Ascending,
     Descending,
@@ -70,11 +146,18 @@ pub enum Direction {
 pub struct SearchResult {
     pub full_count: Option<i64>,
     pub pages: Option<i64>,
-    pub posts: Vec<PostQueryObject>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub posts: Option<Vec<PostQueryObject>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collections: Option<Vec<PostCollectionQueryObject>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection_items: Option<Vec<PostCollectionItemQueryObject>>,
 }
 
 pub async fn search_handler(
     user: Option<User>,
+    scope: Option<String>,
+    scope_param: Option<String>,
     query_parameters_filter: QueryParametersFilter,
 ) -> Result<impl Reply, Rejection> {
     query_parameters_filter.validate().map_err(|e| {
@@ -84,40 +167,65 @@ pub async fn search_handler(
         ))
     })?;
 
-    let query_parameters = prepare_query_parameters(&query_parameters_filter, &user);
+    let mut scope = scope
+        .map(|scope| {
+            Scope::from_str(scope.as_str()).map_err(|_| {
+                warp::reject::custom(Error::BadRequestError(format!(
+                    "Invalid scope '{}'",
+                    &scope
+                )))
+            })
+        })
+        .unwrap_or(Ok(Scope::Post))?;
 
-    let sql_query = compiler::compile_sql(query_parameters_filter.query, query_parameters, &user)?;
-    let mut connection = acquire_db_connection().await?;
-    let posts = diesel::sql_query(sql_query)
-        .load::<PostQueryObject>(&mut connection)
-        .await
-        .map_err(|e| Error::QueryError(e.to_string()))?;
-
-    let full_count = if posts.is_empty() {
-        Some(0)
-    } else {
-        posts[0].full_count
-    };
-
-    let pages = if posts.is_empty() {
-        Some(0)
-    } else if let Some(full_count) = full_count {
-        let limit = posts[0].evaluated_limit;
-        if limit > MAX_LIMIT as i32 {
-            return Err(warp::reject::custom(Error::IllegalQueryInputError(
-                format!("Limit '{}' exceeds maximum limit of {}.", limit, MAX_LIMIT),
-            )));
+    if let Some(scope_param) = scope_param {
+        if scope == Scope::Collection {
+            scope = match scope_param.parse::<i64>() {
+                Ok(collection_pk) => Scope::CollectionItem { collection_pk },
+                Err(_) => {
+                    return Err(warp::reject::custom(Error::BadRequestError(format!(
+                        "'{scope_param}' is not a valid i64"
+                    ))))
+                }
+            };
+        } else {
+            return Err(warp::reject::custom(Error::BadRequestError(format!(
+                "Scope {:?} does not accept a parameter",
+                &scope
+            ))));
         }
-        Some(((full_count as f64) / (limit as f64)).ceil() as i64)
-    } else {
-        None
-    };
+    }
 
-    Ok(warp::reply::json(&SearchResult {
-        full_count,
-        pages,
-        posts,
-    }))
+    let query_parameters = prepare_query_parameters(&query_parameters_filter, &user, &scope)?;
+    let max_limit = query_parameters.max_limit;
+
+    let sql_query = compiler::compile_sql(
+        query_parameters_filter.query,
+        query_parameters,
+        &scope,
+        &user,
+    )?;
+    let mut connection = acquire_db_connection().await?;
+    match scope {
+        Scope::Global => {
+            Err(Error::BadRequestError(format!("Invalid scope '{:?}'", &scope)).into())
+        }
+        Scope::Post => Ok(warp::reply::json(
+            &get_search_result::<PostQueryObject>(sql_query, max_limit, &mut connection).await?,
+        )),
+        Scope::Collection => Ok(warp::reply::json(
+            &get_search_result::<PostCollectionQueryObject>(sql_query, max_limit, &mut connection)
+                .await?,
+        )),
+        Scope::CollectionItem { .. } => Ok(warp::reply::json(
+            &get_search_result::<PostCollectionItemQueryObject>(
+                sql_query,
+                max_limit,
+                &mut connection,
+            )
+            .await?,
+        )),
+    }
 }
 
 #[derive(Serialize)]
@@ -127,7 +235,7 @@ pub struct PostDetailed {
     pub source_url: Option<String>,
     pub title: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
-    pub fk_create_user: i64,
+    pub create_user: User,
     pub score: i32,
     pub s3_object: Option<S3Object>,
     pub thumbnail_url: Option<String>,
@@ -138,8 +246,11 @@ pub struct PostDetailed {
     pub public_edit: bool,
     pub description: Option<String>,
     pub is_editable: bool,
+    pub is_deletable: bool,
     pub tags: Vec<Tag>,
     pub group_access: Vec<PostGroupAccessDetailed>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_collection_item: Option<PostCollectionItemInformation>,
 }
 
 #[derive(Serialize)]
@@ -148,9 +259,19 @@ pub struct PostWindowObject {
     page: u32,
 }
 
+#[derive(Serialize)]
+pub struct PostCollectionItemInformation {
+    pub post_collection: PostCollectionFull,
+    pub added_by: User,
+    pub creation_timestamp: DateTime<Utc>,
+    pub pk: i64,
+    pub ordinal: i32,
+}
+
 pub async fn get_post_handler(
     user: Option<User>,
-    post_pk: i64,
+    outer_pk: i64,
+    inner_pk: Option<i64>,
     query_parameters_filter: QueryParametersFilter,
 ) -> Result<impl Reply, Rejection> {
     query_parameters_filter.validate().map_err(|e| {
@@ -162,17 +283,68 @@ pub async fn get_post_handler(
 
     let mut connection = acquire_db_connection().await?;
 
-    let (post, s3_object) =
-        perms::load_post_secured(post_pk, &mut connection, user.as_ref()).await?;
+    let (scope, post, post_collection_item) = if let Some(inner_pk) = inner_pk {
+        let PostCollectionItemJoined {
+            post_collection_item,
+            added_by,
+            post,
+            post_collection,
+        } = perms::load_post_collection_item_secured(
+            outer_pk,
+            inner_pk,
+            &mut connection,
+            user.as_ref(),
+        )
+        .await?;
+        (
+            Scope::CollectionItem {
+                collection_pk: outer_pk,
+            },
+            post,
+            Some(PostCollectionItemInformation {
+                post_collection: PostCollectionFull {
+                    pk: post_collection.post_collection.pk,
+                    title: post_collection.post_collection.title,
+                    creation_timestamp: post_collection.post_collection.creation_timestamp,
+                    create_user: post_collection.create_user.into(),
+                    poster_object: post_collection.poster_object.map(|p| p.into()),
+                    thumbnail_object_key: post_collection.post_collection.poster_object_key,
+                    public: post_collection.post_collection.public,
+                    public_edit: post_collection.post_collection.public_edit,
+                    description: post_collection.post_collection.description,
+                },
+                added_by,
+                creation_timestamp: post_collection_item.creation_timestamp,
+                pk: post_collection_item.pk,
+                ordinal: post_collection_item.ordinal,
+            }),
+        )
+    } else {
+        (
+            Scope::Post,
+            perms::load_post_secured(outer_pk, &mut connection, user.as_ref()).await?,
+            None,
+        )
+    };
+
+    let PostJoined {
+        post,
+        create_user,
+        s3_object,
+    } = post;
 
     let page = query_parameters_filter.page;
     let exclude_window = query_parameters_filter.exclude_window;
-    let query_parameters = prepare_query_parameters(&query_parameters_filter, &user);
+    let query_parameters = prepare_query_parameters(&query_parameters_filter, &user, &scope)?;
     let (prev_post, next_post) = if !exclude_window.unwrap_or(false) {
         let sql_query = compiler::compile_window_query(
-            post.pk,
+            post_collection_item
+                .as_ref()
+                .map(|item| item.pk)
+                .unwrap_or(post.pk),
             query_parameters_filter.query,
             query_parameters,
+            &scope,
             &user,
         )?;
         let result = diesel::sql_query(sql_query)
@@ -219,11 +391,12 @@ pub async fn get_post_handler(
         (None, None)
     };
 
-    let is_editable = perms::is_post_editable(&mut connection, user.as_ref(), post_pk).await?;
-    let tags = post::get_post_tags(post_pk, &mut connection)
+    let is_editable = post.is_editable(user.as_ref(), &mut connection).await?;
+    let is_deletable = post.is_deletable(user.as_ref(), &mut connection).await?;
+    let tags = post::get_post_tags(post.pk, &mut connection)
         .await
         .map_err(Error::from)?;
-    let group_access = post::get_post_group_access(post_pk, user.as_ref(), &mut connection)
+    let group_access = post::get_post_group_access(post.pk, user.as_ref(), &mut connection)
         .await
         .map_err(Error::from)?;
 
@@ -233,7 +406,7 @@ pub async fn get_post_handler(
         source_url: post.source_url,
         title: post.title,
         creation_timestamp: post.creation_timestamp,
-        fk_create_user: post.fk_create_user,
+        create_user,
         score: post.score,
         s3_object,
         thumbnail_url: post.thumbnail_url,
@@ -243,15 +416,175 @@ pub async fn get_post_handler(
         public_edit: post.public_edit,
         description: post.description,
         is_editable,
+        is_deletable,
+        tags,
+        group_access,
+        post_collection_item,
+    }))
+}
+
+#[derive(Serialize)]
+pub struct PostCollectionDetailed {
+    pub pk: i64,
+    pub title: String,
+    pub create_user: User,
+    pub creation_timestamp: DateTime<Utc>,
+    #[serde(rename = "is_public")]
+    pub public: bool,
+    pub public_edit: bool,
+    pub poster_object: Option<S3Object>,
+    pub poster_object_key: Option<String>,
+    pub description: Option<String>,
+    pub is_editable: bool,
+    pub is_deletable: bool,
+    pub tags: Vec<Tag>,
+    pub group_access: Vec<PostCollectionGroupAccessDetailed>,
+}
+
+pub async fn get_post_collection_handler(
+    user: Option<User>,
+    post_collection_pk: i64,
+) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection().await?;
+
+    let PostCollectionJoined {
+        post_collection,
+        create_user,
+        poster_object,
+    } = perms::load_post_collection_secured(post_collection_pk, &mut connection, user.as_ref())
+        .await?;
+
+    let is_editable = post_collection
+        .is_editable(user.as_ref(), &mut connection)
+        .await?;
+    let is_deletable = post_collection
+        .is_deletable(user.as_ref(), &mut connection)
+        .await?;
+    let tags = post::get_post_collection_tags(post_collection_pk, &mut connection)
+        .await
+        .map_err(Error::from)?;
+    let group_access =
+        post::get_post_collection_group_access(post_collection_pk, user.as_ref(), &mut connection)
+            .await
+            .map_err(Error::from)?;
+
+    Ok(warp::reply::json(&PostCollectionDetailed {
+        pk: post_collection.pk,
+        title: post_collection.title,
+        create_user,
+        creation_timestamp: post_collection.creation_timestamp,
+        public: post_collection.public,
+        public_edit: post_collection.public_edit,
+        poster_object,
+        poster_object_key: post_collection.poster_object_key,
+        description: post_collection.description,
+        is_editable,
+        is_deletable,
         tags,
         group_access,
     }))
 }
 
+/// Find all posts for the given query string, limited to 10000 results maximum
+pub async fn find_all_posts(
+    query: String,
+    user: &Option<User>,
+) -> Result<Vec<PostQueryObject>, Error> {
+    let scope = Scope::Post;
+    let query_parameters_filter = QueryParametersFilter {
+        limit: None,
+        page: None,
+        query: Some(query),
+        exclude_window: None,
+        shuffle: None,
+        writable_only: None,
+    };
+    let mut query_parameters = prepare_query_parameters(&query_parameters_filter, user, &scope)?;
+    query_parameters.limit = Some(MAX_FULL_LIMIT.to_string());
+    query_parameters.max_limit = MAX_FULL_LIMIT;
+    let sql_query = compiler::compile_sql(
+        query_parameters_filter.query,
+        query_parameters,
+        &scope,
+        user,
+    )?;
+    let mut connection = acquire_db_connection().await?;
+    let search_result =
+        get_search_result::<PostQueryObject>(sql_query, MAX_FULL_LIMIT, &mut connection).await?;
+    if search_result
+        .full_count
+        .map(|count| count > MAX_FULL_LIMIT.into())
+        .unwrap_or(true)
+    {
+        Err(Error::TooManyResultsError(
+            search_result.full_count.unwrap_or(100000) as u32,
+            MAX_FULL_LIMIT,
+        ))
+    } else {
+        Ok(search_result.posts.unwrap_or_default())
+    }
+}
+
+pub trait SearchQueryResultObject {
+    fn get_search_result(objects: Vec<Self>, max_limit: u32) -> Result<SearchResult, Error>
+    where
+        Self: Sized,
+    {
+        let full_count = if objects.is_empty() {
+            Some(0)
+        } else {
+            objects[0].get_full_count()
+        };
+
+        let pages: Option<i64> = if objects.is_empty() {
+            Some(0)
+        } else {
+            let limit = objects[0].get_evaluated_limit();
+            if limit > max_limit as i32 {
+                return Err(Error::IllegalQueryInputError(format!(
+                    "Limit '{}' exceeds maximum limit of {}.",
+                    limit, max_limit
+                )));
+            }
+            full_count.map(|full_count| ((full_count as f64) / (limit as f64)).ceil() as i64)
+        };
+
+        Ok(Self::construct_search_result(full_count, pages, objects))
+    }
+
+    fn construct_search_result(
+        full_count: Option<i64>,
+        pages: Option<i64>,
+        objects: Vec<Self>,
+    ) -> SearchResult
+    where
+        Self: Sized;
+
+    fn get_full_count(&self) -> Option<i64>;
+
+    fn get_evaluated_limit(&self) -> i32;
+}
+
+async fn get_search_result<
+    T: SearchQueryResultObject + Send + QueryableByName<diesel::pg::Pg> + 'static,
+>(
+    sql_query: String,
+    max_limit: u32,
+    connection: &mut AsyncPgConnection,
+) -> Result<SearchResult, Error> {
+    let objects = diesel::sql_query(sql_query)
+        .load::<T>(connection)
+        .await
+        .map_err(|e| Error::QueryError(e.to_string()))?;
+
+    T::get_search_result(objects, max_limit)
+}
+
 fn prepare_query_parameters(
     query_parameters_filter: &QueryParametersFilter,
     user: &Option<User>,
-) -> QueryParameters {
+    scope: &Scope,
+) -> Result<QueryParameters, Error> {
     let mut variables = HashMap::new();
     variables.insert(
         String::from("current_utc_timestamp"),
@@ -266,12 +599,237 @@ fn prepare_query_parameters(
         variables.insert(String::from("current_user_key"), user.pk.to_string());
     }
 
-    QueryParameters {
-        limit: query_parameters_filter.limit.map(|l| l.to_string()),
-        page: query_parameters_filter.page,
-        ordering: Vec::new(),
-        variables,
-        shuffle: query_parameters_filter.shuffle.unwrap_or(false),
+    match scope {
+        Scope::Global => Err(Error::BadRequestError(format!(
+            "Invalid scope '{:?}'",
+            &scope
+        ))),
+        Scope::Post => Ok(QueryParameters {
+            limit: query_parameters_filter.limit.map(|l| l.to_string()),
+            page: query_parameters_filter.page,
+            ordering: Vec::new(),
+            variables,
+            shuffle: query_parameters_filter.shuffle.unwrap_or(false),
+            writable_only: query_parameters_filter.writable_only.unwrap_or(false),
+            base_table_name: "post",
+            tag_relation_table_name: "post_tag",
+            select_statements: vec![
+                String::from("post.pk AS post_pk"),
+                String::from("post.data_url AS post_data_url"),
+                String::from("post.source_url AS post_source_url"),
+                String::from("post.title AS post_title"),
+                String::from("post.creation_timestamp AS post_creation_timestamp"),
+                String::from("post.score AS post_score"),
+                String::from("post.thumbnail_url AS post_thumbnail_url"),
+                String::from("post.public AS post_public"),
+                String::from("post.public_edit AS post_public_edit"),
+                String::from("post.description AS post_description"),
+                String::from("s3_object.thumbnail_object_key AS post_thumbnail_object_key"),
+                String::from("create_user.pk AS post_create_user_pk"),
+                String::from("create_user.user_name AS post_create_user_user_name"),
+                String::from("create_user.user_name AS post_create_user_user_name"),
+                String::from("create_user.email AS post_create_user_email"),
+                String::from("create_user.avatar_url AS post_create_user_avatar_url"),
+                String::from("create_user.creation_timestamp AS post_create_user_creation_timestamp"),
+                String::from("create_user.email_confirmed AS post_create_user_email_confirmed"),
+                String::from("create_user.display_name AS post_create_user_display_name"),
+                String::from("create_user.password_fail_count AS post_create_user_password_fail_count"),
+                String::from("s3_object.object_key AS post_s3_object_object_key"),
+                String::from("s3_object.sha256_hash AS post_s3_object_sha256_hash"),
+                String::from("s3_object.size_bytes AS post_s3_object_size_bytes"),
+                String::from("s3_object.mime_type AS post_s3_object_mime_type"),
+                String::from("s3_object.fk_broker AS post_s3_object_fk_broker"),
+                String::from("s3_object.fk_uploader AS post_s3_object_fk_uploader"),
+                String::from("s3_object.thumbnail_object_key AS post_s3_object_thumbnail_object_key"),
+                String::from("s3_object.creation_timestamp AS post_s3_object_creation_timestamp"),
+                String::from("s3_object.filename AS post_s3_object_filename"),
+                String::from("s3_object.hls_master_playlist AS post_s3_object_hls_master_playlist"),
+                String::from("s3_object.hls_disabled AS post_s3_object_hls_disabled"),
+                String::from("s3_object.hls_locked_at AS post_s3_object_hls_locked_at"),
+                String::from("s3_object.thumbnail_locked_at AS post_s3_object_thumbnail_locked_at"),
+                String::from("s3_object.hls_fail_count AS post_s3_object_hls_fail_count"),
+                String::from("s3_object.thumbnail_fail_count AS post_s3_object_thumbnail_fail_count"),
+                String::from("s3_object.thumbnail_disabled AS post_s3_object_thumbnail_disabled"),
+            ],
+            join_statements: vec![
+                String::from("LEFT JOIN s3_object ON s3_object.object_key = post.s3_object"),
+                String::from(
+                    "INNER JOIN registered_user create_user ON create_user.pk = post.fk_create_user",
+                ),
+            ],
+            max_limit: MAX_LIMIT,
+            fallback_ordering: Ordering {
+                expression: String::from("post.pk"),
+                direction: Direction::Descending,
+                nullable: false,
+            },
+            from_table_override: None,
+            predefined_where_conditions: None,
+        }),
+        Scope::Collection => Ok(QueryParameters {
+            limit: query_parameters_filter.limit.map(|l| l.to_string()),
+            page: query_parameters_filter.page,
+            ordering: Vec::new(),
+            variables,
+            shuffle: query_parameters_filter.shuffle.unwrap_or(false),
+            writable_only: query_parameters_filter.writable_only.unwrap_or(false),
+            base_table_name: "post_collection",
+            tag_relation_table_name: "post_collection_tag",
+            select_statements: vec![
+                String::from("post_collection.pk AS post_collection_pk"),
+                String::from("post_collection.title AS post_collection_title"),
+                String::from("post_collection.creation_timestamp AS post_collection_creation_timestamp"),
+                String::from("post_collection.public AS post_collection_public"),
+                String::from("post_collection.public_edit AS post_collection_public_edit"),
+                String::from("post_collection.description AS post_collection_description"),
+                String::from("poster_object.thumbnail_object_key AS post_collection_thumbnail_object_key"),
+                String::from("poster_object.object_key AS post_collection_poster_object_key"),
+                String::from("poster_object.sha256_hash AS post_collection_poster_sha256_hash"),
+                String::from("poster_object.size_bytes AS post_collection_poster_size_bytes"),
+                String::from("poster_object.mime_type AS post_collection_poster_mime_type"),
+                String::from("poster_object.fk_broker AS post_collection_poster_fk_broker"),
+                String::from("poster_object.fk_uploader AS post_collection_poster_fk_uploader"),
+                String::from("poster_object.thumbnail_object_key AS post_collection_poster_thumbnail_object_key"),
+                String::from("poster_object.creation_timestamp AS post_collection_poster_creation_timestamp"),
+                String::from("poster_object.filename AS post_collection_poster_filename"),
+                String::from("poster_object.hls_master_playlist AS post_collection_poster_hls_master_playlist"),
+                String::from("poster_object.hls_disabled AS post_collection_poster_hls_disabled"),
+                String::from("poster_object.hls_locked_at AS post_collection_poster_hls_locked_at"),
+                String::from("poster_object.thumbnail_locked_at AS post_collection_poster_thumbnail_locked_at"),
+                String::from("poster_object.hls_fail_count AS post_collection_poster_hls_fail_count"),
+                String::from("poster_object.thumbnail_fail_count AS post_collection_poster_thumbnail_fail_count"),
+                String::from("poster_object.thumbnail_disabled AS post_collection_poster_thumbnail_disabled"),
+                String::from("create_user.pk AS post_collection_create_user_pk"),
+                String::from("create_user.user_name AS post_collection_create_user_user_name"),
+                String::from("create_user.email AS post_collection_create_user_email"),
+                String::from("create_user.avatar_url AS post_collection_create_user_avatar_url"),
+                String::from("create_user.creation_timestamp AS post_collection_create_user_creation_timestamp"),
+                String::from("create_user.email_confirmed AS post_collection_create_user_email_confirmed"),
+                String::from("create_user.display_name AS post_collection_create_user_display_name"),
+                String::from("create_user.password_fail_count AS post_collection_create_user_password_fail_count"),
+            ],
+            join_statements: vec![
+                String::from("LEFT JOIN s3_object AS poster_object ON poster_object.object_key = post_collection.poster_object_key"),
+                String::from("INNER JOIN registered_user create_user ON create_user.pk = post_collection.fk_create_user"),
+            ],
+            max_limit: MAX_LIMIT,
+            fallback_ordering: Ordering {
+                expression: String::from("post_collection.pk"),
+                direction: Direction::Descending,
+                nullable: false,
+            },
+            from_table_override: None,
+            predefined_where_conditions: None,
+        }),
+        Scope::CollectionItem { collection_pk } => Ok(QueryParameters {
+            limit: query_parameters_filter.limit.map(|l| l.to_string()),
+            page: query_parameters_filter.page,
+            ordering: Vec::new(),
+            variables,
+            shuffle: query_parameters_filter.shuffle.unwrap_or(false),
+            writable_only: query_parameters_filter.writable_only.unwrap_or(false),
+            base_table_name: "post",
+            tag_relation_table_name: "post_tag",
+            select_statements: vec![
+                String::from("post_collection_item.pk AS post_collection_item_pk"),
+                String::from("post_collection_item.ordinal AS post_collection_item_ordinal"),
+                String::from("post_collection_item.creation_timestamp AS post_collection_item_creation_timestamp"),
+                String::from("post_collection_item_added_user.pk AS post_collection_item_added_user_pk"),
+                String::from("post_collection_item_added_user.user_name AS post_collection_item_added_user_user_name"),
+                String::from("post_collection_item_added_user.email AS post_collection_item_added_user_email"),
+                String::from("post_collection_item_added_user.avatar_url AS post_collection_item_added_user_avatar_url"),
+                String::from("post_collection_item_added_user.creation_timestamp AS post_collection_item_added_user_creation_timestamp"),
+                String::from("post_collection_item_added_user.email_confirmed AS post_collection_item_added_user_email_confirmed"),
+                String::from("post_collection_item_added_user.display_name AS post_collection_item_added_user_display_name"),
+                String::from("post_collection_item_added_user.password_fail_count AS post_collection_item_added_user_password_fail_count"),
+                // post data
+                String::from("post.pk AS post_pk"),
+                String::from("post.data_url AS post_data_url"),
+                String::from("post.source_url AS post_source_url"),
+                String::from("post.title AS post_title"),
+                String::from("post.creation_timestamp AS post_creation_timestamp"),
+                String::from("post.score AS post_score"),
+                String::from("post.thumbnail_url AS post_thumbnail_url"),
+                String::from("post.public AS post_public"),
+                String::from("post.public_edit AS post_public_edit"),
+                String::from("post.description AS post_description"),
+                String::from("post_s3_object.thumbnail_object_key AS post_thumbnail_object_key"),
+                String::from("post_create_user.pk AS post_create_user_pk"),
+                String::from("post_create_user.user_name AS post_create_user_user_name"),
+                String::from("post_create_user.user_name AS post_create_user_user_name"),
+                String::from("post_create_user.email AS post_create_user_email"),
+                String::from("post_create_user.avatar_url AS post_create_user_avatar_url"),
+                String::from("post_create_user.creation_timestamp AS post_create_user_creation_timestamp"),
+                String::from("post_create_user.email_confirmed AS post_create_user_email_confirmed"),
+                String::from("post_create_user.display_name AS post_create_user_display_name"),
+                String::from("post_create_user.password_fail_count AS post_create_user_password_fail_count"),
+                String::from("post_s3_object.object_key AS post_s3_object_object_key"),
+                String::from("post_s3_object.sha256_hash AS post_s3_object_sha256_hash"),
+                String::from("post_s3_object.size_bytes AS post_s3_object_size_bytes"),
+                String::from("post_s3_object.mime_type AS post_s3_object_mime_type"),
+                String::from("post_s3_object.fk_broker AS post_s3_object_fk_broker"),
+                String::from("post_s3_object.fk_uploader AS post_s3_object_fk_uploader"),
+                String::from("post_s3_object.thumbnail_object_key AS post_s3_object_thumbnail_object_key"),
+                String::from("post_s3_object.creation_timestamp AS post_s3_object_creation_timestamp"),
+                String::from("post_s3_object.filename AS post_s3_object_filename"),
+                String::from("post_s3_object.hls_master_playlist AS post_s3_object_hls_master_playlist"),
+                String::from("post_s3_object.hls_disabled AS post_s3_object_hls_disabled"),
+                String::from("post_s3_object.hls_locked_at AS post_s3_object_hls_locked_at"),
+                String::from("post_s3_object.thumbnail_locked_at AS post_s3_object_thumbnail_locked_at"),
+                String::from("post_s3_object.hls_fail_count AS post_s3_object_hls_fail_count"),
+                String::from("post_s3_object.thumbnail_fail_count AS post_s3_object_thumbnail_fail_count"),
+                String::from("post_s3_object.thumbnail_disabled AS post_s3_object_thumbnail_disabled"),
+                // collection data
+                String::from("post_collection.pk AS post_collection_pk"),
+                String::from("post_collection.title AS post_collection_title"),
+                String::from("post_collection.creation_timestamp AS post_collection_creation_timestamp"),
+                String::from("post_collection.public AS post_collection_public"),
+                String::from("post_collection.public_edit AS post_collection_public_edit"),
+                String::from("post_collection.description AS post_collection_description"),
+                String::from("poster_object.thumbnail_object_key AS post_collection_thumbnail_object_key"),
+                String::from("poster_object.object_key AS post_collection_poster_object_key"),
+                String::from("poster_object.sha256_hash AS post_collection_poster_sha256_hash"),
+                String::from("poster_object.size_bytes AS post_collection_poster_size_bytes"),
+                String::from("poster_object.mime_type AS post_collection_poster_mime_type"),
+                String::from("poster_object.fk_broker AS post_collection_poster_fk_broker"),
+                String::from("poster_object.fk_uploader AS post_collection_poster_fk_uploader"),
+                String::from("poster_object.thumbnail_object_key AS post_collection_poster_thumbnail_object_key"),
+                String::from("poster_object.creation_timestamp AS post_collection_poster_creation_timestamp"),
+                String::from("poster_object.filename AS post_collection_poster_filename"),
+                String::from("poster_object.hls_master_playlist AS post_collection_poster_hls_master_playlist"),
+                String::from("poster_object.hls_disabled AS post_collection_poster_hls_disabled"),
+                String::from("poster_object.hls_locked_at AS post_collection_poster_hls_locked_at"),
+                String::from("poster_object.thumbnail_locked_at AS post_collection_poster_thumbnail_locked_at"),
+                String::from("poster_object.hls_fail_count AS post_collection_poster_hls_fail_count"),
+                String::from("poster_object.thumbnail_fail_count AS post_collection_poster_thumbnail_fail_count"),
+                String::from("poster_object.thumbnail_disabled AS post_collection_poster_thumbnail_disabled"),
+                String::from("post_collection_create_user.pk AS post_collection_create_user_pk"),
+                String::from("post_collection_create_user.user_name AS post_collection_create_user_user_name"),
+                String::from("post_collection_create_user.email AS post_collection_create_user_email"),
+                String::from("post_collection_create_user.avatar_url AS post_collection_create_user_avatar_url"),
+                String::from("post_collection_create_user.creation_timestamp AS post_collection_create_user_creation_timestamp"),
+                String::from("post_collection_create_user.email_confirmed AS post_collection_create_user_email_confirmed"),
+                String::from("post_collection_create_user.display_name AS post_collection_create_user_display_name"),
+                String::from("post_collection_create_user.password_fail_count AS post_collection_create_user_password_fail_count"),
+            ],
+            join_statements: vec![
+                String::from("INNER JOIN post ON post_collection_item.fk_post = post.pk"),
+                String::from("INNER JOIN post_collection ON post_collection_item.fk_post_collection = post_collection.pk"),
+                String::from("INNER JOIN registered_user post_collection_item_added_user ON post_collection_item.fk_added_by = post_collection_item_added_user.pk"),
+                String::from("LEFT JOIN s3_object post_s3_object ON post_s3_object.object_key = post.s3_object"),
+                String::from("INNER JOIN registered_user post_create_user ON post_create_user.pk = post.fk_create_user"),
+                String::from("LEFT JOIN s3_object AS poster_object ON poster_object.object_key = post_collection.poster_object_key"),
+                String::from("INNER JOIN registered_user post_collection_create_user ON post_collection_create_user.pk = post_collection.fk_create_user"),
+            ],
+            max_limit: MAX_LIMIT,
+            fallback_ordering: Ordering {
+                expression: String::from("post_collection_item.ordinal"),
+                direction: Direction::Ascending,
+                nullable: false,
+            },
+            from_table_override: Some("post_collection_item"),
+            predefined_where_conditions: Some(vec![format!("post_collection_item.fk_post_collection = {collection_pk}")]),
+        }),
     }
 }
 
@@ -280,6 +838,7 @@ pub struct AnalyzeQueryRequest {
     pub cursor_pos: Option<usize>,
     #[validate(length(min = 0, max = 1024))]
     pub query: String,
+    pub scope: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -321,10 +880,22 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
             return Ok(warp::reply::json(&AnalyzeQueryResponse {
                 error: Some(QueryCompilationError { phase, errors }),
                 suggestions: Vec::new(),
-            }))
+            }));
         }
         Err(e) => return Err(warp::reject::custom(e)),
     };
+
+    let scope = request
+        .scope
+        .map(|scope| {
+            Scope::from_str(scope.as_str()).map_err(|_| {
+                warp::reject::custom(Error::BadRequestError(format!(
+                    "Invalid scope '{}'",
+                    &scope
+                )))
+            })
+        })
+        .unwrap_or(Ok(Scope::Post))?;
 
     // find the statement and nested expression at the current cursor position
     // the cursor position refers to the index of the char to the right of the cursor
@@ -351,7 +922,7 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
         {
             let expression = find_nested_expression(pos, &expression_statement.expression_node);
 
-            find_expression_autocomplete_suggestions(expression).await?
+            find_expression_autocomplete_suggestions(expression, &scope).await?
         } else if let Some(modifier_statement) =
             current_statement.node_type.downcast_ref::<ModifierNode>()
         {
@@ -361,10 +932,10 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
 
             if let Some(nested_expression) = nested_expression {
                 let expression = find_nested_expression(pos, nested_expression);
-                find_expression_autocomplete_suggestions(expression).await?
+                find_expression_autocomplete_suggestions(expression, &scope).await?
             } else {
                 find_matching_map_keys(
-                    &dict::MODIFIERS,
+                    &scope.get_modifiers(),
                     &modifier_statement.identifier,
                     current_statement.location,
                     "%",
@@ -381,7 +952,7 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
 
     let error = if log.errors.is_empty() {
         let mut semantic_analysis_visitor = SemanticAnalysisVisitor {};
-        ast.accept(&mut semantic_analysis_visitor, &mut log);
+        ast.accept(&mut semantic_analysis_visitor, &scope, &mut log);
         if !log.errors.is_empty() {
             Some(QueryCompilationError {
                 phase: String::from("semantic analysis"),
@@ -409,6 +980,7 @@ pub fn string_is_valid_ident(s: &str) -> bool {
 
 async fn find_expression_autocomplete_suggestions(
     expression: &Node<dyn ExpressionNode>,
+    scope: &Scope,
 ) -> Result<Vec<QueryAutocompleteSuggestion>, Error> {
     if let Some(post_tag_node) = expression.node_type.downcast_ref::<PostTagNode>() {
         let mut connection = acquire_db_connection().await?;
@@ -442,7 +1014,7 @@ async fn find_expression_autocomplete_suggestions(
         Ok(tag_suggestions)
     } else if let Some(attribute_node) = expression.node_type.downcast_ref::<AttributeNode>() {
         Ok(find_matching_map_keys(
-            &dict::ATTRIBUTES,
+            &scope.get_attributes(),
             &attribute_node.identifier,
             expression.location,
             "@",
@@ -452,7 +1024,7 @@ async fn find_expression_autocomplete_suggestions(
     } else if let Some(function_call_node) = expression.node_type.downcast_ref::<FunctionCallNode>()
     {
         Ok(find_matching_map_keys(
-            &dict::FUNCTIONS,
+            &scope.get_functions(),
             &function_call_node.identifier,
             expression.location,
             ".",
@@ -461,7 +1033,7 @@ async fn find_expression_autocomplete_suggestions(
         ))
     } else if let Some(variable_node) = expression.node_type.downcast_ref::<VariableNode>() {
         Ok(find_matching_map_keys(
-            &dict::VARIABLES,
+            &scope.get_variables(),
             &variable_node.identifier,
             expression.location,
             ":",

@@ -4,7 +4,11 @@ use downcast_rs::{impl_downcast, Downcast};
 
 use crate::query::{Direction, Ordering, QueryParameters};
 
-use super::{dict, dict::Type, lexer::Tag, Cte, Error, Location, Log};
+use super::{
+    dict::{Scope, Type},
+    lexer::Tag,
+    Cte, Error, Location, Log,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operator {
@@ -180,11 +184,18 @@ fn both_of_type_or_null(l: Type, r: Type, t: Type) -> bool {
 }
 
 pub trait Visitor {
-    fn visit_query_node(&mut self, query_node: &QueryNode, log: &mut Log, location: Location);
+    fn visit_query_node(
+        &mut self,
+        query_node: &QueryNode,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    );
 
     fn visit_expression_statement(
         &mut self,
         expression_statement: &ExpressionStatement,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     );
@@ -199,6 +210,7 @@ pub trait Visitor {
     fn visit_binary_expression_node(
         &mut self,
         binary_expression_node: &BinaryExpressionNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     );
@@ -234,6 +246,7 @@ pub trait Visitor {
     fn visit_unary_expression_node(
         &mut self,
         unary_expression_node: &UnaryExpressionNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     );
@@ -241,6 +254,7 @@ pub trait Visitor {
     fn visit_attribute_node(
         &mut self,
         attribute_node: &AttributeNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     );
@@ -248,6 +262,7 @@ pub trait Visitor {
     fn visit_function_call_node(
         &mut self,
         function_call_node: &FunctionCallNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     );
@@ -255,6 +270,7 @@ pub trait Visitor {
     fn visit_modifier_node(
         &mut self,
         modifier_node: &ModifierNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     );
@@ -262,6 +278,7 @@ pub trait Visitor {
     fn visit_variable_node(
         &mut self,
         variable_node: &VariableNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     );
@@ -270,23 +287,32 @@ pub trait Visitor {
 pub struct SemanticAnalysisVisitor {}
 
 impl Visitor for SemanticAnalysisVisitor {
-    fn visit_query_node(&mut self, query_node: &QueryNode, log: &mut Log, _location: Location) {
+    fn visit_query_node(
+        &mut self,
+        query_node: &QueryNode,
+        scope: &Scope,
+        log: &mut Log,
+        _location: Location,
+    ) {
         for node in query_node.statements.iter() {
-            node.accept(self, log);
+            node.accept(self, scope, log);
         }
     }
 
     fn visit_expression_statement(
         &mut self,
         expression_statement: &ExpressionStatement,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
-        expression_statement.expression_node.accept(self, log);
+        expression_statement
+            .expression_node
+            .accept(self, scope, log);
         let return_type = expression_statement
             .expression_node
             .node_type
-            .get_return_type();
+            .get_return_type(scope);
         if return_type != Type::Boolean && return_type != Type::Null {
             log.errors.push(Error {
                 location,
@@ -306,17 +332,18 @@ impl Visitor for SemanticAnalysisVisitor {
     fn visit_binary_expression_node(
         &mut self,
         binary_expression_node: &BinaryExpressionNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         let op = binary_expression_node.op;
         let left = &binary_expression_node.left;
         let right = &binary_expression_node.right;
-        let left_type = left.node_type.get_return_type();
-        let right_type = right.node_type.get_return_type();
+        let left_type = left.node_type.get_return_type(scope);
+        let right_type = right.node_type.get_return_type(scope);
 
-        left.accept(self, log);
-        right.accept(self, log);
+        left.accept(self, scope, log);
+        right.accept(self, scope, log);
 
         if op
             .accepts_binary_expression(left_type, right_type)
@@ -427,14 +454,15 @@ impl Visitor for SemanticAnalysisVisitor {
     fn visit_unary_expression_node(
         &mut self,
         unary_expression_node: &UnaryExpressionNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         let operand = &unary_expression_node.operand;
-        let expression_type = operand.node_type.get_return_type();
+        let expression_type = operand.node_type.get_return_type(scope);
         let op = unary_expression_node.op;
 
-        operand.accept(self, log);
+        operand.accept(self, scope, log);
         if op.accepts_unary_expression(expression_type).is_none() {
             log.errors.push(Error {
                 location,
@@ -449,11 +477,12 @@ impl Visitor for SemanticAnalysisVisitor {
     fn visit_attribute_node(
         &mut self,
         attribute_node: &AttributeNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         let identifier: &str = &attribute_node.identifier;
-        if !dict::ATTRIBUTES.contains_key(identifier) {
+        if !scope.get_attributes().contains_key(identifier) {
             log.errors.push(Error {
                 location,
                 msg: format!("No such attribute '{}'", identifier),
@@ -464,17 +493,18 @@ impl Visitor for SemanticAnalysisVisitor {
     fn visit_function_call_node(
         &mut self,
         function_call_node: &FunctionCallNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         for argument in function_call_node.arguments.iter() {
-            argument.accept(self, log);
+            argument.accept(self, scope, log);
         }
 
         let identifier: &str = &function_call_node.identifier;
-        if let Some(function) = dict::FUNCTIONS.get(identifier) {
+        if let Some(function) = scope.get_functions().get(identifier) {
             let arguments = &function_call_node.arguments;
-            (function.accept_arguments)(&function.params, arguments, location, log);
+            (function.accept_arguments)(&function.params, arguments, scope, location, log);
         } else {
             log.errors.push(Error {
                 location,
@@ -486,17 +516,18 @@ impl Visitor for SemanticAnalysisVisitor {
     fn visit_modifier_node(
         &mut self,
         modifier_node: &ModifierNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         for argument in modifier_node.arguments.iter() {
-            argument.accept(self, log);
+            argument.accept(self, scope, log);
         }
 
         let identifier: &str = &modifier_node.identifier;
-        if let Some(modifier) = dict::MODIFIERS.get(identifier) {
+        if let Some(modifier) = scope.get_modifiers().get(identifier) {
             let arguments = &modifier_node.arguments;
-            (modifier.accept_arguments)(&modifier.params, arguments, location, log);
+            (modifier.accept_arguments)(&modifier.params, arguments, scope, location, log);
         } else {
             log.errors.push(Error {
                 location,
@@ -508,11 +539,12 @@ impl Visitor for SemanticAnalysisVisitor {
     fn visit_variable_node(
         &mut self,
         variable_node: &VariableNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         let identifier: &str = &variable_node.identifier;
-        if !dict::VARIABLES.contains_key(identifier) {
+        if !scope.get_variables().contains_key(identifier) {
             log.errors.push(Error {
                 location,
                 msg: format!("No such variable '{}'", identifier),
@@ -543,11 +575,12 @@ impl QueryBuilderVisitor<'_> {
     pub fn visit_limit_modifier(
         &mut self,
         arguments: &[Box<Node<dyn ExpressionNode>>],
+        scope: &Scope,
         log: &mut Log,
     ) {
         if !arguments.is_empty() {
             self.buffer = Some(String::new());
-            arguments[0].accept(self, log);
+            arguments[0].accept(self, scope, log);
             self.query_parameters.limit = self.buffer.take();
         }
     }
@@ -555,6 +588,7 @@ impl QueryBuilderVisitor<'_> {
     pub fn visit_sort_modifier(
         &mut self,
         arguments: &[Box<Node<dyn ExpressionNode>>],
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
@@ -567,9 +601,10 @@ impl QueryBuilderVisitor<'_> {
             }
             self.buffer = Some(String::new());
             let attr_arg = &arguments[0];
-            let is_string = attr_arg.node_type.get_return_type() == Type::String;
+            let is_string = attr_arg.node_type.get_return_type(scope) == Type::String;
             let nullable = match attr_arg.node_type.downcast_ref::<AttributeNode>() {
-                Some(attr_arg) => dict::ATTRIBUTES
+                Some(attr_arg) => scope
+                    .get_attributes()
                     .get(attr_arg.identifier.as_str())
                     .map(|attr| attr.nullable)
                     .unwrap_or(true),
@@ -579,7 +614,7 @@ impl QueryBuilderVisitor<'_> {
             if is_string {
                 self.write_buff("LOWER(");
             }
-            arguments[0].accept(self, log);
+            arguments[0].accept(self, scope, log);
             if is_string {
                 self.write_buff(")");
             }
@@ -615,20 +650,29 @@ impl QueryBuilderVisitor<'_> {
 }
 
 impl Visitor for QueryBuilderVisitor<'_> {
-    fn visit_query_node(&mut self, query_node: &QueryNode, log: &mut Log, _location: Location) {
+    fn visit_query_node(
+        &mut self,
+        query_node: &QueryNode,
+        scope: &Scope,
+        log: &mut Log,
+        _location: Location,
+    ) {
         for node in query_node.statements.iter() {
-            node.accept(self, log);
+            node.accept(self, scope, log);
         }
     }
 
     fn visit_expression_statement(
         &mut self,
         expression_statement: &ExpressionStatement,
+        scope: &Scope,
         log: &mut Log,
         _location: Location,
     ) {
         self.buffer = Some(String::new());
-        expression_statement.expression_node.accept(self, log);
+        expression_statement
+            .expression_node
+            .accept(self, scope, log);
         let expression_string = self.buffer.take().unwrap();
         self.where_expressions.push(expression_string);
     }
@@ -661,24 +705,23 @@ impl Visitor for QueryBuilderVisitor<'_> {
             });
 
         let cte_idx = cte.idx;
-        self.write_buff(&format!("EXISTS(SELECT * FROM post_tag WHERE fk_post = post.pk AND fk_tag IN(SELECT tag_keys FROM cte{cte_idx}))"));
+        let base_table_name = self.query_parameters.base_table_name;
+        self.write_buff(&format!("EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN(SELECT tag_keys FROM cte{cte_idx}))"));
     }
 
     fn visit_binary_expression_node(
         &mut self,
         binary_expression_node: &BinaryExpressionNode,
+        scope: &Scope,
         log: &mut Log,
         _location: Location,
     ) {
         let op = binary_expression_node.op;
         let left = &binary_expression_node.left;
-        let left_type = left.node_type.get_return_type();
+        let left_type = left.node_type.get_return_type(scope);
         let right = &binary_expression_node.right;
-        let right_type = right.node_type.get_return_type();
-        let binary_types = (
-            left.node_type.get_return_type(),
-            right.node_type.get_return_type(),
-        );
+        let right_type = right.node_type.get_return_type(scope);
+        let binary_types = (left_type, right_type);
 
         self.write_buff("(");
 
@@ -687,11 +730,11 @@ impl Visitor for QueryBuilderVisitor<'_> {
             && right_type == Type::String
         {
             // add explicit types for date interval addition / subtraction
-            left.accept(self, log);
+            left.accept(self, scope, log);
             self.write_buff("::date ");
             self.write_buff(op.get_sql_string(Some(binary_types)));
             self.write_buff(" interval ");
-            right.accept(self, log);
+            right.accept(self, scope, log);
         } else if op == Operator::FuzzyEqual
             || ((op == Operator::Equal || op == Operator::Unequal)
                 && left_type == Type::String
@@ -699,11 +742,11 @@ impl Visitor for QueryBuilderVisitor<'_> {
         {
             // case insensitive matching for fuzzy equals and string equals
             self.write_buff("LOWER(");
-            left.accept(self, log);
+            left.accept(self, scope, log);
             self.write_buff(") ");
             self.write_buff(op.get_sql_string(Some(binary_types)));
             self.write_buff(" LOWER(");
-            right.accept(self, log);
+            right.accept(self, scope, log);
             self.write_buff(")");
 
             // when using the equals operator on post.description, add the LENGTH(description) < 2048 condition in order to use index post_description_idx
@@ -722,11 +765,11 @@ impl Visitor for QueryBuilderVisitor<'_> {
                 self.write_buff(" AND LENGTH(description) < 2048");
             }
         } else {
-            left.accept(self, log);
+            left.accept(self, scope, log);
             self.write_buff(" ");
             self.write_buff(op.get_sql_string(Some(binary_types)));
             self.write_buff(" ");
-            right.accept(self, log);
+            right.accept(self, scope, log);
         }
 
         self.write_buff(")");
@@ -774,23 +817,25 @@ impl Visitor for QueryBuilderVisitor<'_> {
     fn visit_unary_expression_node(
         &mut self,
         unary_expression_node: &UnaryExpressionNode,
+        scope: &Scope,
         log: &mut Log,
         _location: Location,
     ) {
         self.write_buff(unary_expression_node.op.get_sql_string(None));
         self.write_buff(" (");
-        unary_expression_node.operand.accept(self, log);
+        unary_expression_node.operand.accept(self, scope, log);
         self.write_buff(")");
     }
 
     fn visit_attribute_node(
         &mut self,
         attribute_node: &AttributeNode,
+        scope: &Scope,
         _log: &mut Log,
         _location: Location,
     ) {
         let identifier: &str = &attribute_node.identifier;
-        if let Some(attribute) = dict::ATTRIBUTES.get(identifier) {
+        if let Some(attribute) = scope.get_attributes().get(identifier) {
             self.write_buff(&attribute.selection_expression);
         } else {
             self.write_buff("NULL");
@@ -800,13 +845,14 @@ impl Visitor for QueryBuilderVisitor<'_> {
     fn visit_function_call_node(
         &mut self,
         function_call_node: &FunctionCallNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         let identifier: &str = &function_call_node.identifier;
-        if let Some(function) = dict::FUNCTIONS.get(identifier) {
+        if let Some(function) = scope.get_functions().get(identifier) {
             let arguments = &function_call_node.arguments;
-            (function.write_expression_fn)(self, arguments, location, log);
+            (function.write_expression_fn)(self, arguments, scope, location, log);
         } else {
             self.write_buff("NULL");
         }
@@ -815,23 +861,25 @@ impl Visitor for QueryBuilderVisitor<'_> {
     fn visit_modifier_node(
         &mut self,
         modifier_node: &ModifierNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         let identifier: &str = &modifier_node.identifier;
-        if let Some(modifier) = dict::MODIFIERS.get(identifier) {
-            (modifier.visit_query_builder)(self, &modifier_node.arguments, log, location);
+        if let Some(modifier) = scope.get_modifiers().get(identifier) {
+            (modifier.visit_query_builder)(self, &modifier_node.arguments, scope, log, location);
         }
     }
 
     fn visit_variable_node(
         &mut self,
         variable_node: &VariableNode,
+        scope: &Scope,
         _log: &mut Log,
         _location: Location,
     ) {
         let identifier: &str = &variable_node.identifier;
-        if let Some(variable) = dict::VARIABLES.get(identifier) {
+        if let Some(variable) = scope.get_variables().get(identifier) {
             let variable_expression =
                 (variable.get_expression_fn)(&self.query_parameters.variables);
             self.write_buff(&variable_expression);
@@ -853,13 +901,13 @@ pub struct Node<T: NodeType + Send + ?Sized> {
 }
 
 impl<T: NodeType + Send + ?Sized> Node<T> {
-    pub fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log) {
-        self.node_type.accept(visitor, log, self.location);
+    pub fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log) {
+        self.node_type.accept(visitor, scope, log, self.location);
     }
 }
 
 pub trait NodeType: Downcast + Debug {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location);
+    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location);
 }
 
 impl_downcast!(NodeType);
@@ -870,8 +918,8 @@ pub struct QueryNode {
 }
 
 impl NodeType for QueryNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
-        visitor.visit_query_node(self, log, location);
+    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+        visitor.visit_query_node(self, scope, log, location);
     }
 }
 
@@ -890,8 +938,8 @@ pub struct ExpressionStatement {
 }
 
 impl NodeType for ExpressionStatement {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
-        visitor.visit_expression_statement(self, log, location);
+    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+        visitor.visit_expression_statement(self, scope, log, location);
     }
 }
 
@@ -911,8 +959,8 @@ pub struct ModifierNode {
 }
 
 impl NodeType for ModifierNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
-        visitor.visit_modifier_node(self, log, location);
+    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+        visitor.visit_modifier_node(self, scope, log, location);
     }
 }
 
@@ -926,7 +974,7 @@ impl StatementNode for ModifierNode {
 }
 
 pub trait ExpressionNode: NodeType + Downcast + Send + Sync {
-    fn get_return_type(&self) -> Type;
+    fn get_return_type(&self, scope: &Scope) -> Type;
 
     /// Return an iterator over the nested expressions inside this expression (e.g. left and right expression in binary expression).
     fn unnest(&self) -> UnnestIter<'_> {
@@ -1035,13 +1083,13 @@ pub struct PostTagNode {
 }
 
 impl NodeType for PostTagNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
+    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
         visitor.visit_post_tag_node(self, log, location);
     }
 }
 
 impl ExpressionNode for PostTagNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Boolean
     }
 }
@@ -1052,15 +1100,15 @@ pub struct AttributeNode {
 }
 
 impl NodeType for AttributeNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
-        visitor.visit_attribute_node(self, log, location);
+    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+        visitor.visit_attribute_node(self, scope, log, location);
     }
 }
 
 impl ExpressionNode for AttributeNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, scope: &Scope) -> Type {
         let identifier: &str = &self.identifier;
-        if let Some(attribute) = dict::ATTRIBUTES.get(identifier) {
+        if let Some(attribute) = scope.get_attributes().get(identifier) {
             attribute.return_type
         } else {
             Type::Void
@@ -1075,15 +1123,15 @@ pub struct FunctionCallNode {
 }
 
 impl NodeType for FunctionCallNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
-        visitor.visit_function_call_node(self, log, location);
+    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+        visitor.visit_function_call_node(self, scope, log, location);
     }
 }
 
 impl ExpressionNode for FunctionCallNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, scope: &Scope) -> Type {
         let identifier: &str = &self.identifier;
-        if let Some(function) = dict::FUNCTIONS.get(identifier) {
+        if let Some(function) = scope.get_functions().get(identifier) {
             function.return_type
         } else {
             Type::Void
@@ -1106,17 +1154,17 @@ pub struct BinaryExpressionNode {
 }
 
 impl NodeType for BinaryExpressionNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
-        visitor.visit_binary_expression_node(self, log, location);
+    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+        visitor.visit_binary_expression_node(self, scope, log, location);
     }
 }
 
 impl ExpressionNode for BinaryExpressionNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, scope: &Scope) -> Type {
         self.op
             .accepts_binary_expression(
-                self.left.node_type.get_return_type(),
-                self.right.node_type.get_return_type(),
+                self.left.node_type.get_return_type(scope),
+                self.right.node_type.get_return_type(scope),
             )
             .unwrap_or(Type::Void)
     }
@@ -1136,13 +1184,13 @@ pub struct IntegerLiteralNode {
 }
 
 impl NodeType for IntegerLiteralNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
+    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
         visitor.visit_integer_literal_node(self, log, location);
     }
 }
 
 impl ExpressionNode for IntegerLiteralNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Number
     }
 }
@@ -1153,13 +1201,13 @@ pub struct StringLiteralNode {
 }
 
 impl NodeType for StringLiteralNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
+    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
         visitor.visit_string_literal_node(self, log, location);
     }
 }
 
 impl ExpressionNode for StringLiteralNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::String
     }
 }
@@ -1170,13 +1218,13 @@ pub struct BooleanLiteralNode {
 }
 
 impl NodeType for BooleanLiteralNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
+    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
         visitor.visit_boolean_literal_node(self, log, location);
     }
 }
 
 impl ExpressionNode for BooleanLiteralNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Boolean
     }
 }
@@ -1185,13 +1233,13 @@ impl ExpressionNode for BooleanLiteralNode {
 pub struct NullLiteralNode {}
 
 impl NodeType for NullLiteralNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
+    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
         visitor.visit_null_literal_node(self, log, location);
     }
 }
 
 impl ExpressionNode for NullLiteralNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Null
     }
 }
@@ -1203,15 +1251,15 @@ pub struct UnaryExpressionNode {
 }
 
 impl NodeType for UnaryExpressionNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
-        visitor.visit_unary_expression_node(self, log, location);
+    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+        visitor.visit_unary_expression_node(self, scope, log, location);
     }
 }
 
 impl ExpressionNode for UnaryExpressionNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, scope: &Scope) -> Type {
         self.op
-            .accepts_unary_expression(self.operand.node_type.get_return_type())
+            .accepts_unary_expression(self.operand.node_type.get_return_type(scope))
             .unwrap_or(Type::Void)
     }
 
@@ -1229,15 +1277,15 @@ pub struct VariableNode {
 }
 
 impl NodeType for VariableNode {
-    fn accept(&self, visitor: &mut dyn Visitor, log: &mut Log, location: Location) {
-        visitor.visit_variable_node(self, log, location);
+    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+        visitor.visit_variable_node(self, scope, log, location);
     }
 }
 
 impl ExpressionNode for VariableNode {
-    fn get_return_type(&self) -> Type {
+    fn get_return_type(&self, scope: &Scope) -> Type {
         let identifier: &str = &self.identifier;
-        if let Some(variable) = dict::VARIABLES.get(identifier) {
+        if let Some(variable) = scope.get_variables().get(identifier) {
             variable.return_type
         } else {
             Type::Void

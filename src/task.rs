@@ -21,9 +21,12 @@ use crate::{
     },
     diesel::{BoolExpressionMethods, ExpressionMethods},
     error::Error,
-    model::{Broker, S3Object, User},
+    model::{Broker, DeferredS3ObjectDeletion, S3Object, User},
     retry_on_serialization_failure, run_serializable_transaction,
-    schema::{broker, email_confirmation_token, one_time_password, refresh_token, registered_user},
+    schema::{
+        broker, deferred_s3_object_deletion, email_confirmation_token, one_time_password,
+        refresh_token, registered_user,
+    },
 };
 
 lazy_static! {
@@ -416,8 +419,94 @@ pub fn clear_old_tokens(tokio_handle: Handle) -> Result<(), Error> {
     })
 }
 
+pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), Error> {
+    tokio_handle.block_on(async {
+        loop {
+            let mut connection = acquire_db_connection().await?;
+            let deferred_deletions = run_serializable_transaction(&mut connection, |connection| async move {
+                diesel::sql_query("
+                WITH relevant_s3_object_deletions AS(
+                    SELECT * FROM deferred_s3_object_deletion
+                    WHERE locked_at IS NULL
+                    AND (fail_count IS NULL OR fail_count < 3)
+                    LIMIT 50
+                )
+                UPDATE deferred_s3_object_deletion SET locked_at = NOW() WHERE locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3_object_deletions) RETURNING *;
+            ")
+            .load::<DeferredS3ObjectDeletion>(connection)
+            .await
+            .map_err(retry_on_serialization_failure)
+            }.scope_boxed()).await?;
+            drop(connection);
+
+            if deferred_deletions.is_empty() {
+                break;
+            }
+
+            log::info!("Found {} s3 objects to delete", deferred_deletions.len());
+
+            let _sentinel = LockedObjectsTaskSentinel::new_for_table(
+                "locked_at",
+                "deferred_s3_object_deletion",
+                deferred_deletions
+                    .iter()
+                    .map(|o| o.object_key.clone())
+                    .collect::<Vec<_>>(),
+                &tokio_handle,
+            ).await;
+
+            for deferred_deletion in deferred_deletions {
+                let mut connection = acquire_db_connection().await?;
+                let broker = broker::table
+                    .filter(broker::pk.eq(deferred_deletion.fk_broker))
+                    .get_result::<Broker>(&mut connection)
+                    .await?;
+
+                let bucket = create_bucket(
+                    &broker.bucket,
+                    &broker.endpoint,
+                    &broker.access_key,
+                    &broker.secret_key,
+                    broker.is_aws_region,
+                )?;
+
+                match bucket.delete_object(&deferred_deletion.object_key).await {
+                    Ok(response) if response.status_code() < 300 => {
+                        log::info!("Deleted object {} from broker {} (s3 bucket {})", &deferred_deletion.object_key, broker.pk, &broker.bucket);
+                        if let Err(e) = diesel::delete(deferred_s3_object_deletion::table)
+                            .filter(deferred_s3_object_deletion::object_key.eq(&deferred_deletion.object_key))
+                            .execute(&mut connection)
+                            .await {
+                                log::error!("Failed to delete deferred_s3_object_deletion for object {} after successful deletion with error: {e}", &deferred_deletion.object_key);
+                            }
+                    }
+                    Ok(response) => {
+                        log::error!("Failed to delete object {} from s3 with status code {}", &deferred_deletion.object_key, response.status_code());
+                        if let Err(e) = diesel::sql_query("UPDATE deferred_s3_object_deletion SET fail_count = coalesce(fail_count, 0) + 1 WHERE object_key = $1")
+                        .bind::<VarChar, _>(&deferred_deletion.object_key)
+                        .execute(&mut connection).await {
+                            log::error!("Failed to increment fail_count: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to delete object {} from s3 with error: {e}", &deferred_deletion.object_key);
+                        if let Err(e) = diesel::sql_query("UPDATE deferred_s3_object_deletion SET fail_count = coalesce(fail_count, 0) + 1 WHERE object_key = $1")
+                        .bind::<VarChar, _>(&deferred_deletion.object_key)
+                        .execute(&mut connection).await {
+                            log::error!("Failed to increment fail_count: {e}");
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    })
+}
+
 struct LockedObjectsTaskSentinel {
     lock_column: &'static str,
+    table_name: &'static str,
     object_keys: Vec<String>,
     refresh_task_join_handle: JoinHandle<()>,
     update_mutex: Arc<Mutex<()>>,
@@ -426,6 +515,15 @@ struct LockedObjectsTaskSentinel {
 impl LockedObjectsTaskSentinel {
     async fn new(
         lock_column: &'static str,
+        object_keys: Vec<String>,
+        tokio_handle: &Handle,
+    ) -> Self {
+        Self::new_for_table(lock_column, "s3_object", object_keys, tokio_handle).await
+    }
+
+    async fn new_for_table(
+        lock_column: &'static str,
+        table_name: &'static str,
         object_keys: Vec<String>,
         tokio_handle: &Handle,
     ) -> Self {
@@ -440,8 +538,7 @@ impl LockedObjectsTaskSentinel {
                 match acquire_db_connection().await {
                     Ok(mut connection) => {
                         if let Err(e) = diesel::sql_query(format!(
-                            "UPDATE s3_object SET {} = NOW() WHERE object_key = ANY($1)",
-                            lock_column
+                            "UPDATE {table_name} SET {lock_column} = NOW() WHERE object_key = ANY($1)"
                         ))
                         .bind::<Array<VarChar>, _>(&keys_to_refresh)
                         .execute(&mut connection)
@@ -457,6 +554,7 @@ impl LockedObjectsTaskSentinel {
 
         Self {
             lock_column,
+            table_name,
             object_keys,
             refresh_task_join_handle,
             update_mutex,
@@ -469,6 +567,7 @@ impl Drop for LockedObjectsTaskSentinel {
         self.refresh_task_join_handle.abort();
         let update_mutex = self.update_mutex.clone();
         let object_keys = std::mem::take(&mut self.object_keys);
+        let table_name = self.table_name;
         let lock_column = self.lock_column;
         tokio::spawn(async move {
             let _update_mutex = update_mutex.lock().await;
@@ -481,8 +580,7 @@ impl Drop for LockedObjectsTaskSentinel {
             };
 
             let res = diesel::sql_query(format!(
-                "UPDATE s3_object SET {} = NULL WHERE object_key = ANY($1)",
-                lock_column
+                "UPDATE {table_name} SET {lock_column} = NULL WHERE object_key = ANY($1)",
             ))
             .bind::<Array<VarChar>, _>(&object_keys)
             .execute(&mut connection)

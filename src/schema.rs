@@ -29,6 +29,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    deferred_s3_object_deletion (object_key) {
+        object_key -> Varchar,
+        locked_at -> Nullable<Timestamptz>,
+        fail_count -> Nullable<Int4>,
+        fk_broker -> Int8,
+    }
+}
+
+diesel::table! {
     email_confirmation_token (uuid) {
         uuid -> Uuid,
         expiry -> Timestamptz,
@@ -79,10 +88,13 @@ diesel::table! {
 diesel::table! {
     post_collection (pk) {
         pk -> Int8,
-        name -> Varchar,
-        fk_owner -> Int8,
+        title -> Varchar,
+        fk_create_user -> Int8,
         creation_timestamp -> Timestamptz,
         public -> Bool,
+        public_edit -> Bool,
+        poster_object_key -> Nullable<Varchar>,
+        description -> Nullable<Text>,
     }
 }
 
@@ -97,11 +109,20 @@ diesel::table! {
 }
 
 diesel::table! {
-    post_collection_item (fk_post, fk_post_collection) {
+    post_collection_item (pk) {
         fk_post -> Int8,
         fk_post_collection -> Int8,
         fk_added_by -> Int8,
         creation_timestamp -> Timestamptz,
+        pk -> Int8,
+        ordinal -> Int4,
+    }
+}
+
+diesel::table! {
+    post_collection_tag (fk_post_collection, fk_tag) {
+        fk_post_collection -> Int8,
+        fk_tag -> Int8,
     }
 }
 
@@ -224,17 +245,21 @@ diesel::joinable!(broker -> registered_user (fk_owner));
 diesel::joinable!(broker_access -> broker (fk_broker));
 diesel::joinable!(broker_access -> registered_user (fk_granted_by));
 diesel::joinable!(broker_access -> user_group (fk_granted_group));
+diesel::joinable!(deferred_s3_object_deletion -> broker (fk_broker));
 diesel::joinable!(email_confirmation_token -> registered_user (fk_user));
 diesel::joinable!(one_time_password -> registered_user (fk_user));
 diesel::joinable!(post -> registered_user (fk_create_user));
 diesel::joinable!(post -> s3_object (s3_object));
-diesel::joinable!(post_collection -> registered_user (fk_owner));
+diesel::joinable!(post_collection -> registered_user (fk_create_user));
+diesel::joinable!(post_collection -> s3_object (poster_object_key));
 diesel::joinable!(post_collection_group_access -> post_collection (fk_post_collection));
 diesel::joinable!(post_collection_group_access -> registered_user (fk_granted_by));
 diesel::joinable!(post_collection_group_access -> user_group (fk_granted_group));
 diesel::joinable!(post_collection_item -> post (fk_post));
 diesel::joinable!(post_collection_item -> post_collection (fk_post_collection));
 diesel::joinable!(post_collection_item -> registered_user (fk_added_by));
+diesel::joinable!(post_collection_tag -> post_collection (fk_post_collection));
+diesel::joinable!(post_collection_tag -> tag (fk_tag));
 diesel::joinable!(post_group_access -> post (fk_post));
 diesel::joinable!(post_group_access -> registered_user (fk_granted_by));
 diesel::joinable!(post_group_access -> user_group (fk_granted_group));
@@ -249,6 +274,7 @@ diesel::joinable!(user_group_membership -> user_group (fk_group));
 diesel::allow_tables_to_appear_in_same_query!(
     broker,
     broker_access,
+    deferred_s3_object_deletion,
     email_confirmation_token,
     hls_stream,
     one_time_password,
@@ -256,6 +282,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     post_collection,
     post_collection_group_access,
     post_collection_item,
+    post_collection_tag,
     post_group_access,
     post_tag,
     refresh_token,
