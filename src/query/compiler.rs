@@ -126,16 +126,12 @@ pub fn compile_sql(
         )?;
         sql_query.push_str(" LIMIT ");
         sql_query.push_str(MAX_SHUFFLE_LIMIT_STR);
-        sql_query.push(')');
+        sql_query.push_str("), countCte AS (SELECT count(*) AS full_count FROM reducedRandomSet)");
     }
 
     sql_query.push_str(" SELECT ");
     sql_query.push_str(&query_parameters.select_statements.join(", "));
-    if !query_parameters.shuffle {
-        sql_query.push_str(", (SELECT full_count FROM countCte), ");
-    } else {
-        sql_query.push_str(", NULL AS full_count, ");
-    }
+    sql_query.push_str(", (SELECT full_count FROM countCte), ");
     // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
     // since the effective limit is needed to calculate the number of pages
     let limit = query_parameters
