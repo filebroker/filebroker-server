@@ -311,10 +311,16 @@ pub async fn create_post_collection_handler(
                             ordinal: idx as i32,
                         })
                         .collect::<Vec<_>>();
-                    diesel::insert_into(post_collection_item::table)
-                        .values(&post_collection_items)
-                        .execute(connection)
-                        .await?
+
+                    // split items into chunks to avoid hitting the parameter limit
+                    let mut insertion_count = 0;
+                    for item_chunk in post_collection_items.chunks(4096) {
+                        insertion_count += diesel::insert_into(post_collection_item::table)
+                            .values(item_chunk)
+                            .execute(connection)
+                            .await?;
+                    }
+                    insertion_count
                 } else {
                     0
                 }
@@ -344,10 +350,13 @@ pub async fn create_post_collection_handler(
                         ));
                     }
                     if !post_collection_items.is_empty() {
-                        diesel::insert_into(post_collection_item::table)
-                            .values(&post_collection_items)
-                            .execute(connection)
-                            .await?;
+                        // split items into chunks to avoid hitting the parameter limit
+                        for item_chunk in post_collection_items.chunks(4096) {
+                            diesel::insert_into(post_collection_item::table)
+                                .values(item_chunk)
+                                .execute(connection)
+                                .await?;
+                        }
                     }
                 }
             }

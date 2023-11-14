@@ -685,10 +685,13 @@ pub async fn edit_post_collection_handler(
                         ordinal: current_ordinal + (idx as i32),
                     }).collect::<Vec<_>>();
 
-                    diesel::insert_into(post_collection_item::table)
-                        .values(&post_collection_items)
-                        .execute(connection)
-                        .await?;
+                    // split items into chunks to avoid hitting the parameter limit
+                    for item_chunk in post_collection_items.chunks(4096) {
+                        diesel::insert_into(post_collection_item::table)
+                            .values(item_chunk)
+                            .execute(connection)
+                            .await?;
+                    }
                 }
             }
 
