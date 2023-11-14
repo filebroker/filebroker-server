@@ -1,7 +1,6 @@
 /target
 /.idea/
 /logs/
-/Cargo.lock
 /filebroker-server.iml
 /.env.local
 /.env.secret
