@@ -704,14 +704,14 @@ pub async fn edit_post_collection_handler(
 
                     // close resulting gaps in the ordinal sequence
                     diesel::sql_query(r#"
-                        WITH post_collection_items_enumerated AS (
+                        UPDATE post_collection_item
+                        SET ordinal = post_collection_items_enumerated.row_idx - 1
+                        FROM (
                             SELECT pk, row_number() OVER(ORDER BY ordinal) as row_idx
                             FROM post_collection_item
                             WHERE fk_post_collection = $1
-                        )
-                        UPDATE post_collection_item
-                        SET ordinal = (SELECT row_idx - 1 FROM post_collection_items_enumerated WHERE pk = post_collection_item.pk)
-                        WHERE fk_post_collection = $1
+                        ) AS post_collection_items_enumerated
+                        WHERE fk_post_collection = $1 AND post_collection_item.pk = post_collection_items_enumerated.pk
                     "#)
                     .bind::<BigInt, _>(post_collection_pk)
                     .execute(connection)
