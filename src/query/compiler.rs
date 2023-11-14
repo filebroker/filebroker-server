@@ -88,7 +88,7 @@ pub fn compile_sql(
         // checks if there are more than 100000 results does not apply the post permission conditions to speed up
         // the query, that means the effective result size may be smaller.
         sql_query.push_str("countCte AS (SELECT CASE WHEN (SELECT COUNT(*) FROM (SELECT ");
-        sql_query.push_str(query_parameters.base_table_name);
+        sql_query.push_str(from_table_name);
         sql_query.push_str(".pk FROM ");
         sql_query.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
@@ -98,7 +98,7 @@ pub fn compile_sql(
         apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
         sql_query
             .push_str(" LIMIT 100000) limitedPks) < 100000 THEN (SELECT COUNT(*) FROM (SELECT ");
-        sql_query.push_str(query_parameters.base_table_name);
+        sql_query.push_str(from_table_name);
         sql_query.push_str(".pk FROM ");
         sql_query.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
@@ -110,7 +110,7 @@ pub fn compile_sql(
         sql_query.push_str(") pks) END AS full_count)");
     } else {
         sql_query.push_str("reducedRandomSet AS (SELECT ");
-        sql_query.push_str(query_parameters.base_table_name);
+        sql_query.push_str(from_table_name);
         sql_query.push_str(".pk FROM ");
         sql_query.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
@@ -152,7 +152,7 @@ pub fn compile_sql(
 
     if query_parameters.shuffle {
         sql_query.push_str(" WHERE ");
-        sql_query.push_str(query_parameters.base_table_name);
+        sql_query.push_str(from_table_name);
         sql_query.push_str(".pk in(SELECT pk FROM reducedRandomSet) ORDER BY RANDOM()");
     } else {
         apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
@@ -263,7 +263,7 @@ pub fn compile_window_query(
         }
 
         sql_query.push_str("reducedRandomSet AS (SELECT ");
-        sql_query.push_str(query_parameters.base_table_name);
+        sql_query.push_str(from_table_name);
         sql_query.push_str(".pk FROM ");
         sql_query.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
@@ -284,7 +284,7 @@ pub fn compile_window_query(
         sql_query.push_str(" SELECT 1::BIGINT AS row_number, NULL AS prev, ");
         sql_query.push_str(&current_pk.to_string());
         sql_query.push_str("::BIGINT AS pk, ");
-        sql_query.push_str(query_parameters.base_table_name);
+        sql_query.push_str(from_table_name);
         sql_query.push_str(".pk AS next, 50 AS evaluated_limit FROM ");
         sql_query.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
@@ -292,11 +292,11 @@ pub fn compile_window_query(
             sql_query.push_str(&query_parameters.join_statements.join(" "));
         }
         sql_query.push_str(" WHERE ");
-        sql_query.push_str(query_parameters.base_table_name);
+        sql_query.push_str(from_table_name);
         sql_query.push_str(".pk != ");
         sql_query.push_str(&current_pk.to_string());
         sql_query.push_str(" AND ");
-        sql_query.push_str(query_parameters.base_table_name);
+        sql_query.push_str(from_table_name);
         sql_query.push_str(".pk IN(SELECT pk FROM reducedRandomSet) ORDER BY RANDOM() LIMIT 1");
     }
 
