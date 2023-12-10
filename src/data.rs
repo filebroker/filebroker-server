@@ -7,6 +7,7 @@ use mpart_async::server::MultipartStream;
 use ring::digest;
 use s3::{creds::Credentials, Bucket, Region};
 use serde::{Deserialize, Serialize};
+use url::Url;
 use uuid::Uuid;
 use validator::Validate;
 use warp::{
@@ -306,6 +307,12 @@ pub async fn create_broker_handler(
         &create_broker_request.secret_key,
         create_broker_request.is_aws_region,
     )?;
+
+    if let Err(e) = Url::parse(&bucket.url()) {
+        return Err(warp::reject::custom(Error::InvalidBucketError(
+            e.to_string(),
+        )));
+    }
 
     // test connection
     let mut test_path = Uuid::new_v4().to_string();
