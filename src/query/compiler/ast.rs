@@ -556,6 +556,7 @@ impl Visitor for SemanticAnalysisVisitor {
 pub struct QueryBuilderVisitor<'p> {
     pub ctes: HashMap<String, Cte>,
     pub where_expressions: Vec<String>,
+    pub having_expressions: Vec<String>,
     pub query_parameters: &'p mut QueryParameters,
     buffer: Option<String>,
 }
@@ -565,6 +566,7 @@ impl<'p> QueryBuilderVisitor<'p> {
         QueryBuilderVisitor {
             ctes: HashMap::new(),
             where_expressions: Vec::new(),
+            having_expressions: Vec::new(),
             query_parameters,
             buffer: None,
         }
@@ -674,7 +676,11 @@ impl Visitor for QueryBuilderVisitor<'_> {
             .expression_node
             .accept(self, scope, log);
         let expression_string = self.buffer.take().unwrap();
-        self.where_expressions.push(expression_string);
+        if expression_statement.expression_node.node_type.is_having_expression() {
+            self.having_expressions.push(expression_string);
+        } else {
+            self.where_expressions.push(expression_string);
+        }
     }
 
     fn visit_post_tag_node(
@@ -706,7 +712,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
         let cte_idx = cte.idx;
         let base_table_name = self.query_parameters.base_table_name;
-        self.write_buff(&format!("EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN(SELECT tag_keys FROM cte{cte_idx}))"));
+        self.write_buff(&format!("array_agg({base_table_name}_tag.fk_tag) && ARRAY(SELECT tag_keys FROM cte{cte_idx})"));
     }
 
     fn visit_binary_expression_node(
@@ -976,6 +982,8 @@ impl StatementNode for ModifierNode {
 pub trait ExpressionNode: NodeType + Downcast + Send + Sync {
     fn get_return_type(&self, scope: &Scope) -> Type;
 
+    fn is_having_expression(&self) -> bool;
+
     /// Return an iterator over the nested expressions inside this expression (e.g. left and right expression in binary expression).
     fn unnest(&self) -> UnnestIter<'_> {
         UnnestIter::Empty
@@ -1092,6 +1100,10 @@ impl ExpressionNode for PostTagNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Boolean
     }
+
+    fn is_having_expression(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1113,6 +1125,10 @@ impl ExpressionNode for AttributeNode {
         } else {
             Type::Void
         }
+    }
+
+    fn is_having_expression(&self) -> bool {
+        false
     }
 }
 
@@ -1136,6 +1152,10 @@ impl ExpressionNode for FunctionCallNode {
         } else {
             Type::Void
         }
+    }
+
+    fn is_having_expression(&self) -> bool {
+        false
     }
 
     fn unnest(&self) -> UnnestIter<'_> {
@@ -1169,6 +1189,10 @@ impl ExpressionNode for BinaryExpressionNode {
             .unwrap_or(Type::Void)
     }
 
+    fn is_having_expression(&self) -> bool {
+        self.left.node_type.is_having_expression() || self.right.node_type.is_having_expression()
+    }
+
     fn unnest(&self) -> UnnestIter<'_> {
         UnnestIter::BinaryExpression {
             binary_expression_node: self,
@@ -1193,6 +1217,10 @@ impl ExpressionNode for IntegerLiteralNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Number
     }
+
+    fn is_having_expression(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1209,6 +1237,10 @@ impl NodeType for StringLiteralNode {
 impl ExpressionNode for StringLiteralNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::String
+    }
+
+    fn is_having_expression(&self) -> bool {
+        false
     }
 }
 
@@ -1227,6 +1259,10 @@ impl ExpressionNode for BooleanLiteralNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Boolean
     }
+
+    fn is_having_expression(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1241,6 +1277,10 @@ impl NodeType for NullLiteralNode {
 impl ExpressionNode for NullLiteralNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Null
+    }
+
+    fn is_having_expression(&self) -> bool {
+        false
     }
 }
 
@@ -1261,6 +1301,10 @@ impl ExpressionNode for UnaryExpressionNode {
         self.op
             .accepts_unary_expression(self.operand.node_type.get_return_type(scope))
             .unwrap_or(Type::Void)
+    }
+
+    fn is_having_expression(&self) -> bool {
+        self.operand.node_type.is_having_expression()
     }
 
     fn unnest(&self) -> UnnestIter<'_> {
@@ -1290,5 +1334,9 @@ impl ExpressionNode for VariableNode {
         } else {
             Type::Void
         }
+    }
+
+    fn is_having_expression(&self) -> bool {
+        false
     }
 }

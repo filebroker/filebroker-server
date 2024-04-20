@@ -64,10 +64,10 @@ pub fn compile_sql(
         (None, None)
     };
 
-    let (ctes, mut where_expressions) = if let Some(query) = query {
+    let (ctes, mut where_expressions, having_expressions) = if let Some(query) = query {
         compile_expressions(query, &mut query_parameters, scope)?
     } else {
-        (HashMap::new(), Vec::new())
+        (HashMap::new(), Vec::new(), Vec::new())
     };
 
     let mut sql_query = String::new();
@@ -80,6 +80,11 @@ pub fn compile_sql(
         sql_query.push_str(", ");
     }
 
+    let limit = query_parameters
+        .limit
+        .as_deref()
+        .unwrap_or(DEFAULT_LIMIT_STR);
+
     let from_table_name = query_parameters
         .from_table_override
         .unwrap_or(query_parameters.base_table_name);
@@ -87,7 +92,7 @@ pub fn compile_sql(
         // Only get a full count of the result set if the number of results is below 100000, the count query that
         // checks if there are more than 100000 results does not apply the post permission conditions to speed up
         // the query, that means the effective result size may be smaller.
-        sql_query.push_str("countCte AS (SELECT CASE WHEN (SELECT COUNT(*) FROM (SELECT ");
+        sql_query.push_str("countCte AS (SELECT CASE WHEN (SELECT COUNT(*) FROM (SELECT DISTINCT ");
         sql_query.push_str(from_table_name);
         sql_query.push_str(".pk FROM ");
         sql_query.push_str(from_table_name);
@@ -95,9 +100,12 @@ pub fn compile_sql(
             sql_query.push(' ');
             sql_query.push_str(&query_parameters.join_statements.join(" "));
         }
+        sql_query.push_str(&format!(" LEFT JOIN {from_table_name}_tag ON {from_table_name}_tag.fk_{from_table_name} = {from_table_name}.pk"));
         apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+        sql_query.push_str(&format!(" GROUP BY {from_table_name}.pk"));
+        apply_having_conditions(&mut sql_query, &having_expressions);
         sql_query
-            .push_str(" LIMIT 100000) limitedPks) < 100000 THEN (SELECT COUNT(*) FROM (SELECT ");
+            .push_str(" LIMIT 100000) limitedPks) < 100000 THEN (SELECT COUNT(*) FROM (SELECT DISTINCT ");
         sql_query.push_str(from_table_name);
         sql_query.push_str(".pk FROM ");
         sql_query.push_str(from_table_name);
@@ -105,11 +113,14 @@ pub fn compile_sql(
             sql_query.push(' ');
             sql_query.push_str(&query_parameters.join_statements.join(" "));
         }
+        sql_query.push_str(&format!(" LEFT JOIN {from_table_name}_tag ON {from_table_name}_tag.fk_{from_table_name} = {from_table_name}.pk"));
         perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
         apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+        sql_query.push_str(&format!(" GROUP BY {from_table_name}.pk"));
+        apply_having_conditions(&mut sql_query, &having_expressions);
         sql_query.push_str(") pks) END AS full_count)");
-    } else {
-        sql_query.push_str("reducedRandomSet AS (SELECT ");
+
+        sql_query.push_str(", postPks AS (SELECT ");
         sql_query.push_str(from_table_name);
         sql_query.push_str(".pk FROM ");
         sql_query.push_str(from_table_name);
@@ -117,8 +128,30 @@ pub fn compile_sql(
             sql_query.push(' ');
             sql_query.push_str(&query_parameters.join_statements.join(" "));
         }
+        sql_query.push_str(&format!(" LEFT JOIN {from_table_name}_tag ON {from_table_name}_tag.fk_{from_table_name} = {from_table_name}.pk"));
+        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+        sql_query.push_str(&format!(" GROUP BY {from_table_name}.pk"));
+        apply_having_conditions(&mut sql_query, &having_expressions);
+        apply_ordering(
+            &mut sql_query,
+            &mut query_parameters.ordering,
+            query_parameters.fallback_ordering.clone(),
+        )?;
+        apply_pagination(&mut sql_query, &query_parameters, limit, false)?;
+        sql_query.push_str(") ");
+    } else {
+        sql_query.push_str("reducedRandomSet AS (SELECT DISTINCT ");
+        sql_query.push_str(from_table_name);
+        sql_query.push_str(".pk FROM ");
+        sql_query.push_str(from_table_name);
+        if !query_parameters.join_statements.is_empty() {
+            sql_query.push(' ');
+            sql_query.push_str(&query_parameters.join_statements.join(" "));
+        }
+        sql_query.push_str(&format!(" LEFT JOIN {from_table_name}_tag ON {from_table_name}_tag.fk_{from_table_name} = {from_table_name}.pk"));
         perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
         apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+        apply_having_conditions(&mut sql_query, &having_expressions);
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
@@ -134,10 +167,6 @@ pub fn compile_sql(
     sql_query.push_str(", (SELECT full_count FROM countCte), ");
     // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
     // since the effective limit is needed to calculate the number of pages
-    let limit = query_parameters
-        .limit
-        .as_deref()
-        .unwrap_or(DEFAULT_LIMIT_STR);
     sql_query.push_str(limit);
     sql_query.push_str(" AS evaluated_limit FROM ");
     sql_query.push_str(from_table_name);
@@ -149,16 +178,17 @@ pub fn compile_sql(
     if query_parameters.shuffle {
         sql_query.push_str(" WHERE ");
         sql_query.push_str(from_table_name);
-        sql_query.push_str(".pk in(SELECT pk FROM reducedRandomSet) ORDER BY RANDOM()");
+        sql_query.push_str(".pk IN(SELECT pk FROM reducedRandomSet) ORDER BY RANDOM()");
     } else {
-        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+        sql_query.push_str(" WHERE ");
+        sql_query.push_str(from_table_name);
+        sql_query.push_str(".pk IN(SELECT pk FROM postPks)");
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
             query_parameters.fallback_ordering.clone(),
         )?;
     }
-    apply_pagination(&mut sql_query, &query_parameters, limit, false)?;
 
     log::debug!(
         "Compiled query [{}] (in {} microseconds) to sql {}",
@@ -185,10 +215,10 @@ pub fn compile_window_query(
         (None, None)
     };
 
-    let (ctes, mut where_expressions) = if let Some(query) = query {
+    let (ctes, mut where_expressions, having_expressions) = if let Some(query) = query {
         compile_expressions(query, &mut query_parameters, scope)?
     } else {
-        (HashMap::new(), Vec::new())
+        (HashMap::new(), Vec::new(), Vec::new())
     };
 
     let mut sql_query = String::new();
@@ -344,7 +374,7 @@ fn compile_expressions(
     query: String,
     query_parameters: &mut QueryParameters,
     scope: &Scope,
-) -> Result<(HashMap<String, Cte>, Vec<String>), crate::Error> {
+) -> Result<(HashMap<String, Cte>, Vec<String>, Vec<String>), crate::Error> {
     let mut log = Log { errors: Vec::new() };
     let ast = compile_ast(query, &mut log, true)?;
     let mut semantic_analysis_visitor = SemanticAnalysisVisitor {};
@@ -368,6 +398,7 @@ fn compile_expressions(
     Ok((
         query_builder_visitor.ctes,
         query_builder_visitor.where_expressions,
+        query_builder_visitor.having_expressions,
     ))
 }
 
@@ -417,6 +448,24 @@ fn apply_where_conditions(
             sql_query.push_str(where_expression);
 
             if i < where_expressions_len - 1 {
+                sql_query.push_str(" AND ");
+            }
+        }
+    }
+}
+
+fn apply_having_conditions(
+    sql_query: &mut String,
+    having_expressions: &[String],
+) {
+    let having_expressions_len = having_expressions.len();
+    if having_expressions_len > 0 {
+        sql_query.push_str(" HAVING ");
+
+        for (i, having_expression) in having_expressions.iter().enumerate() {
+            sql_query.push_str(having_expression);
+
+            if i < having_expressions_len - 1 {
                 sql_query.push_str(" AND ");
             }
         }
