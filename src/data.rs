@@ -42,6 +42,7 @@ pub async fn upload_handler(
     broker_pk: i64,
     user: User,
     mime: Mime,
+    upload_size: usize,
     disable_hls_transcoding: Option<bool>,
     body: impl Stream<Item = Result<impl Buf, warp::Error>> + Unpin,
 ) -> Result<impl Reply, Rejection> {
@@ -52,6 +53,9 @@ pub async fn upload_handler(
 
     let mut connection = acquire_db_connection().await?;
     let broker = perms::load_broker_secured(broker_pk, &mut connection, Some(&user)).await?;
+    if broker.fk_owner != user.pk {
+        up::check_broker_quota_usage(&broker, &user, upload_size, &mut connection).await?;
+    }
     drop(connection);
 
     let bucket = create_bucket(
@@ -102,6 +106,7 @@ pub async fn upload_handler(
                 async_read,
                 hasher: digest::Context::new(&digest::SHA256),
                 file_size: 0,
+                upload_size,
             };
 
             let (s3_object, is_existing) = up::upload_file(

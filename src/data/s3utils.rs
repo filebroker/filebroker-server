@@ -17,6 +17,7 @@ pin_project! {
         pub(crate) async_read: R,
         pub(crate) hasher: digest::Context,
         pub(crate) file_size: usize,
+        pub(crate) upload_size: usize,
     }
 }
 
@@ -41,6 +42,15 @@ where
         let filled = buf.filled();
         let len = filled.len();
         *this.file_size += n;
+        if this.file_size > this.upload_size {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Read file size reached {}, exceeding provided upload size {}",
+                    this.file_size, this.upload_size
+                ),
+            )));
+        }
         this.hasher.update(&filled[len - n..len]);
         Poll::Ready(Ok(()))
     }

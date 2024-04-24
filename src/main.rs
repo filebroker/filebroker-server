@@ -358,6 +358,7 @@ async fn setup_tokio_runtime() {
         .and(warp::path::param())
         .and(auth::with_user())
         .and(warp::header::<Mime>("content-type"))
+        .and(warp::header::<usize>("Filebroker-Upload-Size"))
         .and(warp::header::optional::<bool>("Disable-HLS-Transcoding"))
         .and(warp::body::stream())
         .and_then(data::upload_handler);
@@ -570,6 +571,8 @@ async fn setup_tokio_runtime() {
             .allow_header("Authorization")
             .allow_header("Range")
             .allow_header("if-modified-since")
+            .allow_header("Filebroker-Upload-Size")
+            .allow_header("Disable-HLS-Transcoding")
             .allow_credentials(true)
             .allow_method(warp::http::Method::DELETE)
             .allow_method(warp::http::Method::GET)

@@ -51,6 +51,10 @@ pub enum Error {
     TooManyResultsError(u32, u32),
     #[error("Detected duplicate post in collection {0} and duplicate_mode set to reject")]
     DuplicatePostCollectionItemError(i64, Vec<i64>),
+    #[error("Exceeded quota for broker, available quota: {0} bytes, remaining: {1} bytes")]
+    QuotaExceededError(i64, i64),
+    #[error("The Filebroker-Upload-Size header value does not match the actual upload size")]
+    InvalidUploadSizeError,
 
     // 401
     #[error("invalid credentials")]
@@ -137,7 +141,9 @@ impl Error {
             | Error::InvalidTokenError(_)
             | Error::EmailAlreadyConfirmedError
             | Error::TooManyResultsError(..)
-            | Error::DuplicatePostCollectionItemError(..) => StatusCode::BAD_REQUEST,
+            | Error::DuplicatePostCollectionItemError(..)
+            | Error::QuotaExceededError(..)
+            | Error::InvalidUploadSizeError => StatusCode::BAD_REQUEST,
             Error::DatabaseConnectionError(_)
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -179,6 +185,8 @@ impl Error {
             Self::EmailAlreadyConfirmedError => 400_016,
             Self::TooManyResultsError(..) => 400_017,
             Self::DuplicatePostCollectionItemError(..) => 400_018,
+            Self::QuotaExceededError(..) => 400_019,
+            Self::InvalidUploadSizeError => 400_020,
 
             Self::InvalidCredentialsError => 401_001,
             Self::MissingAuthHeaderError => 401_002,
