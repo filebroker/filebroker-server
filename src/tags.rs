@@ -40,7 +40,7 @@ pub(crate) use get_source_object_tag;
 
 #[derive(Deserialize, Validate)]
 pub struct CreateTagsRequest {
-    #[validate(custom = "validate_tags")]
+    #[validate(custom(function = "validate_tags"))]
     pub tag_names: Vec<String>,
 }
 
@@ -182,7 +182,7 @@ pub async fn get_tag_hierarchy_information(
 
 #[derive(Deserialize, Validate)]
 pub struct UpsertTagRequest {
-    #[validate(custom = "validate_tag")]
+    #[validate(custom(function = "validate_tag"))]
     pub tag_name: String,
     #[validate(length(min = 0, max = 25))]
     pub parent_pks: Option<Vec<i64>>,

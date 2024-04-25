@@ -316,14 +316,14 @@ macro_rules! handle_object_group_access_update {
 
 #[derive(Deserialize, Validate)]
 pub struct EditPostRequest {
-    #[validate(length(max = 100), custom = "validate_tags")]
+    #[validate(length(max = 100), custom(function = "validate_tags"))]
     pub tags_overwrite: Option<Vec<String>>,
     #[validate(length(max = 100))]
     pub tag_pks_overwrite: Option<Vec<i64>>,
     pub removed_tag_pks: Option<Vec<i64>>,
     #[validate(length(max = 100))]
     pub added_tag_pks: Option<Vec<i64>>,
-    #[validate(length(max = 100), custom = "validate_tags")]
+    #[validate(length(max = 100), custom(function = "validate_tags"))]
     pub added_tags: Option<Vec<String>>,
     #[validate(url)]
     pub data_url: Option<String>,
@@ -489,14 +489,14 @@ pub async fn edit_post_handler(
 
 #[derive(Deserialize, Validate)]
 pub struct EditPostCollectionRequest {
-    #[validate(length(max = 100), custom = "validate_tags")]
+    #[validate(length(max = 100), custom(function = "validate_tags"))]
     pub tags_overwrite: Option<Vec<String>>,
     #[validate(length(max = 100))]
     pub tag_pks_overwrite: Option<Vec<i64>>,
     pub removed_tag_pks: Option<Vec<i64>>,
     #[validate(length(max = 100))]
     pub added_tag_pks: Option<Vec<i64>>,
-    #[validate(length(max = 100), custom = "validate_tags")]
+    #[validate(length(max = 100), custom(function = "validate_tags"))]
     pub added_tags: Option<Vec<String>>,
     #[validate(length(max = 300))]
     pub title: Option<String>,

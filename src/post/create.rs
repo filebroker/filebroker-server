@@ -38,7 +38,7 @@ pub struct CreatePostRequest {
     pub source_url: Option<String>,
     #[validate(length(max = 300))]
     pub title: Option<String>,
-    #[validate(length(max = 100), custom = "validate_tags")]
+    #[validate(length(max = 100), custom(function = "validate_tags"))]
     pub entered_tags: Option<Vec<String>>,
     #[validate(length(max = 100))]
     pub selected_tags: Option<Vec<i64>>,
@@ -197,7 +197,7 @@ pub async fn create_post_handler(
 pub struct CreatePostCollectionRequest {
     #[validate(length(max = 300))]
     pub title: String,
-    #[validate(length(max = 100), custom = "validate_tags")]
+    #[validate(length(max = 100), custom(function = "validate_tags"))]
     pub entered_tags: Option<Vec<String>>,
     #[validate(length(max = 100))]
     pub selected_tags: Option<Vec<i64>>,

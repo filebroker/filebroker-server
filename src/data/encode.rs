@@ -11,7 +11,7 @@ use diesel::{sql_types::VarChar, OptionalExtension};
 use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
 use futures::{future::try_join_all, ready};
 use itertools::Itertools;
-use pin_project_lite::pin_project;
+use pin_project::pin_project;
 use rusty_pool::ThreadPool;
 use s3::Bucket;
 use tokio::{
@@ -735,12 +735,11 @@ struct S3UploadResult {
     response_status: u16,
 }
 
-pin_project! {
-    struct ByteCountingTokioFileReader {
-        #[pin]
-        file: tokio::fs::File,
-        byte_count: usize
-    }
+#[pin_project]
+struct ByteCountingTokioFileReader {
+    #[pin]
+    file: tokio::fs::File,
+    byte_count: usize,
 }
 
 impl ByteCountingTokioFileReader {

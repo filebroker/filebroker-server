@@ -7,7 +7,7 @@ use diesel_async::{
     pg::TransactionBuilder,
     pooled_connection::{
         deadpool::{Object, Pool},
-        AsyncDieselConnectionManager,
+        AsyncDieselConnectionManager, ManagerConfig,
     },
     scoped_futures::ScopedBoxFuture,
     AsyncPgConnection,
@@ -21,18 +21,20 @@ use futures::{future::BoxFuture, Future, FutureExt, StreamExt, TryFuture};
 use lazy_static::lazy_static;
 use mime::Mime;
 use query::QueryParametersFilter;
-use std::{
-    convert::Infallible, fs, future::ready, io, str::FromStr, sync::Arc, thread::JoinHandle,
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer},
+    ServerConfig,
 };
-use tls_listener::TlsListener;
+use std::{
+    convert::Infallible, fs, future::ready, io, pin::Pin, str::FromStr, sync::Arc,
+    thread::JoinHandle,
+};
+use tls_listener::{AsyncTls, TlsListener};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::Runtime,
 };
-use tokio_rustls::{
-    rustls::{Certificate, PrivateKey, ServerConfig},
-    TlsAcceptor,
-};
+use tokio_rustls::{server::TlsStream, TlsAcceptor};
 use url::Url;
 use warp::{
     host::Authority,
@@ -76,9 +78,11 @@ lazy_static! {
         .unwrap_or_default();
     pub static ref CONNECTION_POOL: Pool<AsyncPgConnection> = {
         let database_connection_manager = if *PG_ENABLE_SSL {
-            AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_setup(
+            let mut config = ManagerConfig::default();
+            config.custom_setup = Box::new(establish_pg_ssl_connection);
+            AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(
                 DATABASE_URL.clone(),
-                establish_pg_ssl_connection,
+                config,
             )
         } else {
             AsyncDieselConnectionManager::<AsyncPgConnection>::new(DATABASE_URL.clone())
@@ -590,12 +594,11 @@ async fn setup_tokio_runtime() {
         let key =
             load_private_key(KEY_PATH.as_ref().unwrap()).expect("Failed to load TLS private key");
         let server_config = ServerConfig::builder()
-            .with_safe_defaults()
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .expect("Failed to build TLS ServerConfig");
         let acceptor: TlsAcceptor = Arc::new(server_config).into();
-        let incoming = TlsListener::new(acceptor, incoming).filter(|conn| {
+        let incoming = TlsListener::new(TlsAcceptorAdapter(acceptor), incoming).filter(|conn| {
             if let Err(e) = conn {
                 log::error!("Failed to open TLS connection: {e}");
                 ready(false)
@@ -611,6 +614,24 @@ async fn setup_tokio_runtime() {
         run_server(incoming, filter)
             .await
             .expect("Failed running server");
+    }
+}
+
+// cannot use the latest version of tls_listener as it upgraded to hyper 1.0 while warp is still on 0.14, use this to adapt the new tokio_rustls version to the old tls_listener version
+#[derive(Clone)]
+struct TlsAcceptorAdapter(TlsAcceptor);
+
+impl<C> AsyncTls<C> for TlsAcceptorAdapter
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = TlsStream<C>;
+    type Error = io::Error;
+    type AcceptFuture = Pin<Box<dyn Future<Output = Result<Self::Stream, Self::Error>> + Send>>;
+
+    fn accept(&self, conn: C) -> Self::AcceptFuture {
+        let tls = self.clone();
+        Box::pin(async move { TlsAcceptor::accept(&tls.0, conn).await })
     }
 }
 
@@ -661,28 +682,21 @@ where
     server.await
 }
 
-fn load_certs(cert_path: &str) -> io::Result<Vec<Certificate>> {
+fn load_certs(cert_path: &str) -> io::Result<Vec<CertificateDer<'static>>> {
     let certfile = fs::File::open(cert_path)?;
     let mut reader = io::BufReader::new(certfile);
 
-    let certs = rustls_pemfile::certs(&mut reader)?;
-    Ok(certs.into_iter().map(Certificate).collect())
+    let certs = rustls_pemfile::certs(&mut reader);
+    certs.collect()
 }
 
-fn load_private_key(key_path: &str) -> io::Result<PrivateKey> {
+fn load_private_key(key_path: &str) -> io::Result<PrivateKeyDer<'static>> {
     let keyfile = fs::File::open(key_path)?;
     let mut reader = io::BufReader::new(keyfile);
 
-    let mut keys = Vec::new();
-    loop {
-        match rustls_pemfile::read_one(&mut reader)? {
-            None => break,
-            Some(rustls_pemfile::Item::RSAKey(key)) => keys.push(key),
-            Some(rustls_pemfile::Item::PKCS8Key(key)) => keys.push(key),
-            Some(rustls_pemfile::Item::ECKey(key)) => keys.push(key),
-            _ => {}
-        }
-    }
+    let mut keys: Vec<io::Result<PrivatePkcs1KeyDer<'static>>> =
+        rustls_pemfile::rsa_private_keys(&mut reader).collect::<Vec<_>>();
+
     if keys.len() != 1 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -690,7 +704,7 @@ fn load_private_key(key_path: &str) -> io::Result<PrivateKey> {
         ));
     }
 
-    Ok(PrivateKey(keys[0].clone()))
+    keys.pop().unwrap().map(|key| key.into())
 }
 
 // enable TLS for AsyncPgConnection, see https://github.com/weiznich/diesel_async/blob/main/examples/postgres/pooled-with-rustls
@@ -699,7 +713,6 @@ fn establish_pg_ssl_connection(config: &str) -> BoxFuture<ConnectionResult<Async
     let fut = async {
         // We first set up the way we want rustls to work.
         let rustls_config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
             .with_root_certificates(root_certs())
             .with_no_client_auth();
         let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
@@ -720,11 +733,11 @@ fn root_certs() -> rustls::RootCertStore {
     let mut roots = rustls::RootCertStore::empty();
     let certs =
         rustls_native_certs::load_native_certs().expect("Failed to load native certificates");
-    roots.add_parsable_certificates(&certs);
+    roots.add_parsable_certificates(certs);
     if let Some(ref pg_ssl_cert_path) = *PG_SSL_CERT_PATH {
         let certs =
             load_certs(pg_ssl_cert_path.as_str()).expect("Failed to load pg ssl certificate");
-        roots.add_parsable_certificates(&certs);
+        roots.add_parsable_certificates(certs);
     }
     roots
 }

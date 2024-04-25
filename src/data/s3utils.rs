@@ -3,7 +3,7 @@ use std::{task::Poll, time::Duration};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{ready, stream::IntoAsyncRead, StreamExt, TryStream};
-use pin_project_lite::pin_project;
+use pin_project::pin_project;
 use ring::digest;
 use s3::{command::Command, error::S3Error, request::Reqwest, request_trait::Request, Bucket};
 use tokio::time::timeout;
@@ -11,14 +11,13 @@ use warp::hyper;
 
 use crate::{error::Error, model::S3Object, util::format_duration};
 
-pin_project! {
-    pub struct FileReader<R> {
-        #[pin]
-        pub(crate) async_read: R,
-        pub(crate) hasher: digest::Context,
-        pub(crate) file_size: usize,
-        pub(crate) upload_size: usize,
-    }
+#[pin_project]
+pub struct FileReader<R> {
+    #[pin]
+    pub(crate) async_read: R,
+    pub(crate) hasher: digest::Context,
+    pub(crate) file_size: usize,
+    pub(crate) upload_size: usize,
 }
 
 impl<S> tokio::io::AsyncRead for FileReader<IntoAsyncRead<S>>
