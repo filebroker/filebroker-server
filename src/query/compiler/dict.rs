@@ -234,7 +234,7 @@ lazy_static! {
                 return_type: Type::Number,
                 get_expression_fn: |vars| vars
                     .get("current_user_key")
-                    .map(String::clone)
+                    .cloned()
                     .unwrap_or_else(|| String::from("NULL"))
             })
         ),

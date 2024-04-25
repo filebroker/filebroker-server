@@ -1,6 +1,7 @@
 use std::{
     cmp::{max, min, Reverse},
     collections::HashSet,
+    fmt::Write,
     process::{Command, Output, Stdio},
     sync::Arc,
 };
@@ -179,11 +180,14 @@ pub async fn generate_hls_playlist(
     // e.g. [0:v]split=3[v1][v2][v3]; [v1]copy[v1out]; [v2]scale=w=1280:h=720[v2out]; [v3]scale=w=640:h=360[v3out]
     let mut split_string = String::from("[0:v]split=");
     split_string.push_str(&(downscaled_bitrates.len() + 1).to_string());
-    split_string.push_str(
-        &(0..=downscaled_bitrates.len())
-            .map(|idx| format!("[v{}]", idx + 1))
-            .collect::<String>(),
-    );
+    split_string.push_str(&(0..=downscaled_bitrates.len()).fold(
+        String::new(),
+        |mut output, idx| {
+            // writing to sting never fails
+            write!(output, "[v{}]", idx + 1).unwrap();
+            output
+        },
+    ));
     split_string.push_str("; [v1]format=yuv420p,fps=source_fps[v1out]");
     if !downscaled_bitrates.is_empty() {
         split_string.push_str("; ");

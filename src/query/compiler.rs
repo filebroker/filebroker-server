@@ -394,7 +394,7 @@ pub fn apply_ctes(sql_query: &mut String, ctes: &HashMap<String, Cte>) -> Result
 
 fn apply_where_conditions(
     sql_query: &mut String,
-    where_expressions: &mut Vec<String>,
+    where_expressions: &mut [String],
     query_parameters: &QueryParameters,
 ) {
     let where_expressions_len = where_expressions.len()
