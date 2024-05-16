@@ -165,7 +165,7 @@ pub async fn generate_hls_playlist(
     let object_url = join_api_url(["get-object", &source_object_key])?.to_string();
 
     let resolution = get_video_resolution(&source_object_key, &object_url).await?;
-    let has_audio = video_has_audio(&object_url).await?;
+    let has_audio = media_has_audio(&object_url).await?;
 
     let mut video_transcode_resolutions = VIDEO_TRANSCODE_RESOLUTIONS;
     video_transcode_resolutions.sort_by_key(|t| Reverse(t.resolution));
@@ -472,8 +472,12 @@ async fn get_video_resolution(source_object_key: &str, object_url: &str) -> Resu
     }
 }
 
-async fn video_has_audio(object_url: &str) -> Result<bool, Error> {
-    video_has_stream("a", object_url).await
+async fn media_has_video(object_url: &str) -> Result<bool, Error> {
+    media_has_stream("v", object_url).await
+}
+
+async fn media_has_audio(object_url: &str) -> Result<bool, Error> {
+    media_has_stream("a", object_url).await
 }
 
 /*
@@ -483,7 +487,7 @@ async fn video_has_subtitles(object_url: &str) -> Result<bool, Error> {
 }
 */
 
-async fn video_has_stream(stream: &str, object_url: &str) -> Result<bool, Error> {
+async fn media_has_stream(stream: &str, object_url: &str) -> Result<bool, Error> {
     let audio_probe_process = Command::new("ffprobe")
         .args([
             "-show_streams",
@@ -546,6 +550,20 @@ pub async fn generate_thumbnail(
     let thumbnail_content_type;
 
     if content_type_is_video || content_type_is_image || content_type_is_audio {
+        if content_type_is_audio && !media_has_video(&object_url).await? {
+            log::info!(
+                "Not creating thumbnail for audio object {} without video stream, marking as thumbnail_disabled",
+                &source_object_key
+            );
+            let mut connection = acquire_db_connection().await?;
+            diesel::update(s3_object::table)
+                .filter(s3_object::object_key.eq(&source_object_key))
+                .set(s3_object::thumbnail_disabled.eq(true))
+                .execute(&mut connection)
+                .await?;
+            return Ok(());
+        }
+
         let _locked_object_task_sentinel = if thumbnail_lock_acquired {
             None
         } else {
