@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     acquire_db_connection,
-    data::encode::{generate_hls_playlist, generate_thumbnail},
+    data::encode::{generate_hls_playlist, generate_thumbnail, load_object_metadata},
     diesel::{BoolExpressionMethods, ExpressionMethods},
     error::Error,
     model::{Broker, BrokerAccess, S3Object, User},
@@ -149,6 +149,8 @@ where
                     hls_fail_count: None,
                     thumbnail_fail_count: None,
                     thumbnail_disabled: false,
+                    metadata_locked_at: None,
+                    metadata_fail_count: None,
                 })
                 .get_result::<S3Object>(connection)
                 .await
@@ -197,7 +199,7 @@ where
     tokio::spawn(async move {
         if let Err(e) = generate_thumbnail(
             bucket_owned,
-            path,
+            path.clone(),
             uuid,
             content_type,
             broker_owned,
@@ -206,7 +208,14 @@ where
         )
         .await
         {
-            log::error!("Failed to generate thumbnail: {}", e);
+            log::error!("Failed to generate thumbnail for '{path}': {}", e);
+        }
+    });
+
+    let path = s3_object.object_key.clone();
+    tokio::spawn(async move {
+        if let Err(e) = load_object_metadata(path.clone(), false).await {
+            log::error!("Failed to load metadata for '{path}': {}", e);
         }
     });
 
@@ -216,11 +225,17 @@ where
     let user_owned = user.clone();
     if is_video && broker_hls_enabled && !hls_transcoding_disabled {
         tokio::spawn(async move {
-            if let Err(e) =
-                generate_hls_playlist(bucket_owned, path, uuid, broker_owned, user_owned, false)
-                    .await
+            if let Err(e) = generate_hls_playlist(
+                bucket_owned,
+                path.clone(),
+                uuid,
+                broker_owned,
+                user_owned,
+                false,
+            )
+            .await
             {
-                log::error!("Error occurred transcoding video to HLS: {}", e);
+                log::error!("Error occurred transcoding video '{path}' to HLS: {}", e);
             }
         });
     }

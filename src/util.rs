@@ -1,5 +1,6 @@
 use std::{fmt, net::SocketAddr, time::Duration};
 
+use serde::{Deserialize, Deserializer};
 use url::Url;
 
 use crate::{error::Error, API_BASE_URL};
@@ -150,4 +151,24 @@ pub fn dedup_vec<T: PartialEq + Ord>(vec: &mut Vec<T>) {
 
 pub fn dedup_vecs<T: PartialEq + Ord>(v1: &mut Vec<T>, v2: &[T]) {
     v1.retain(|e| !v2.contains(e));
+}
+
+pub fn deserialize_string_from_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNumber {
+        String(String),
+        Number(i64),
+        Float(f64),
+    }
+
+    match Option::<StringOrNumber>::deserialize(deserializer)? {
+        Some(StringOrNumber::String(s)) => Ok(Some(s)),
+        Some(StringOrNumber::Number(i)) => Ok(Some(i.to_string())),
+        Some(StringOrNumber::Float(f)) => Ok(Some(f.to_string())),
+        None => Ok(None),
+    }
 }

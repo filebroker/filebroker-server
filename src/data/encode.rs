@@ -7,13 +7,17 @@ use std::{
 };
 
 use chrono::Utc;
-use diesel::{sql_types::VarChar, OptionalExtension};
+use diesel::{
+    sql_types::VarChar, BoolExpressionMethods, NullableExpressionMethods, OptionalExtension,
+    QueryDsl,
+};
 use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
 use futures::{future::try_join_all, ready};
 use itertools::Itertools;
 use pin_project::pin_project;
 use rusty_pool::ThreadPool;
 use s3::Bucket;
+use serde::Deserialize;
 use tokio::{
     sync::{Mutex, Semaphore},
     task::JoinHandle,
@@ -26,10 +30,11 @@ use crate::{
     acquire_db_connection,
     diesel::ExpressionMethods,
     error::Error,
-    model::{Broker, HlsStream, S3Object, User},
+    model::{Broker, HlsStream, S3Object, S3ObjectMetadata, User},
+    query::functions::substring,
     retry_on_serialization_failure, run_retryable_transaction,
-    schema::{hls_stream, s3_object},
-    util::{format_duration, join_api_url},
+    schema::{hls_stream, post, s3_object, s3_object_metadata},
+    util::{deserialize_string_from_number, format_duration, join_api_url},
     CONCURRENT_VIDEO_TRANSCODE_LIMIT,
 };
 
@@ -629,7 +634,7 @@ pub async fn generate_thumbnail(
         if !process_output.status.success() || !process_output.stderr.is_empty() {
             let error_msg = String::from_utf8_lossy(&process_output.stderr);
             if process_output.status.success() {
-                log::warn!("ffmpeg reported error generating thumnail for {source_object_key}, going to check output for valid webp: {error_msg}");
+                log::warn!("ffmpeg reported error generating thumbnail for {source_object_key}, going to check output for valid webp: {error_msg}");
                 if webp::Decoder::new(&thumb_bytes).decode().is_none() {
                     return Err(Error::FfmpegProcessError(format!(
                             "ffmpeg output contains invalid webp data for thumbnail of {source_object_key}"
@@ -679,6 +684,8 @@ pub async fn generate_thumbnail(
                         hls_fail_count: None,
                         thumbnail_fail_count: None,
                         thumbnail_disabled: true,
+                        metadata_locked_at: None,
+                        metadata_fail_count: None,
                     })
                     .get_result::<S3Object>(connection)
                     .await
@@ -705,6 +712,404 @@ pub async fn generate_thumbnail(
         );
         Ok(())
     }
+}
+
+#[derive(Deserialize)]
+struct ExifToolOutput {
+    #[serde(rename = "FileType")]
+    file_type: Option<String>,
+    #[serde(rename = "FileTypeExtension")]
+    file_type_extension: Option<String>,
+    #[serde(rename = "MIMEType")]
+    mime_type: Option<String>,
+    #[serde(rename = "Title")]
+    title: Option<String>,
+    #[serde(rename = "Artist")]
+    artist: Option<String>,
+    #[serde(rename = "Album")]
+    album: Option<String>,
+    #[serde(rename = "Genre")]
+    genre: Option<String>,
+    #[serde(rename = "CreateDate")]
+    date: Option<String>,
+    #[serde(rename = "Albumartist")]
+    album_artist: Option<String>,
+    #[serde(rename = "Composer")]
+    composer: Option<String>,
+    #[serde(
+        default,
+        rename = "TrackNumber",
+        deserialize_with = "deserialize_string_from_number"
+    )]
+    track_number: Option<String>,
+    #[serde(
+        default,
+        rename = "Discnumber",
+        deserialize_with = "deserialize_string_from_number"
+    )]
+    disc_number: Option<String>,
+    #[serde(rename = "Duration")]
+    duration: Option<String>,
+    #[serde(rename = "ImageWidth")]
+    width: Option<i32>,
+    #[serde(rename = "ImageHeight")]
+    height: Option<i32>,
+    #[serde(rename = "VideoFrameRate")]
+    frame_rate: Option<f64>,
+    #[serde(rename = "AudioSampleRate")]
+    audio_sample_rate: Option<i32>,
+    #[serde(rename = "AudioChannels")]
+    audio_channels: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct FfprobeOutput {
+    streams: Vec<FfprobeStream>,
+    format: FfprobeFormat,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct FfprobeStream {
+    index: usize,
+    codec_type: String,
+    codec_name: String,
+    codec_long_name: String,
+    display_aspect_ratio: Option<String>,
+    #[serde(rename = "r_frame_rate")]
+    frame_rate: Option<String>,
+    width: Option<i32>,
+    height: Option<i32>,
+    duration: Option<String>,
+    bit_rate: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct FfprobeFormat {
+    format_name: String,
+    format_long_name: String,
+    size: String,
+    duration: Option<String>,
+    bit_rate: Option<String>,
+}
+
+pub async fn load_object_metadata(
+    source_object_key: String,
+    metadata_lock_acquired: bool,
+) -> Result<(), Error> {
+    let object_url = join_api_url(["get-object", &source_object_key])?.to_string();
+
+    let _locked_object_task_sentinel = if metadata_lock_acquired {
+        None
+    } else {
+        match LockedObjectTaskSentinel::new_with_condition(
+            "metadata_locked_at",
+            "NOT EXISTS(SELECT * FROM s3_object_metadata WHERE object_key = s3_object.object_key)",
+            source_object_key.clone(),
+        )
+        .await?
+        {
+            Some(sentinel) => Some(sentinel),
+            None => {
+                log::info!(
+                    "Aborting metadata extraction for object {} because it has already been locked",
+                    &source_object_key
+                );
+                return Ok(());
+            }
+        }
+    };
+
+    log::info!(
+        "Spawning exiftool process to extract metadata for {}",
+        &source_object_key
+    );
+
+    let cloned_object_url = object_url.clone();
+    let exif_proc_output = spawn_blocking(|| {
+        let curl_proc = Command::new("curl")
+            .arg("-s")
+            .arg(cloned_object_url)
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| Error::ChildProcessError(e.to_string()))?;
+        let exif_proc = Command::new("exiftool")
+            .arg("-j")
+            .arg("--struct")
+            .arg("--fast")
+            .arg("-")
+            .stdin(Stdio::from(curl_proc.stdout.ok_or_else(|| {
+                Error::ChildProcessError(String::from(
+                    "Failed to get stdout of curl process for exiftool",
+                ))
+            })?))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| Error::ChildProcessError(e.to_string()))?;
+
+        exif_proc
+            .wait_with_output()
+            .map_err(|e| Error::ChildProcessError(e.to_string()))
+    })
+    .await?;
+
+    if !exif_proc_output.status.success() {
+        let error_msg = String::from_utf8_lossy(&exif_proc_output.stderr);
+        return Err(Error::ChildProcessError(format!(
+            "exiftool failed with status {}: {error_msg}",
+            exif_proc_output.status
+        )));
+    }
+
+    let exif_output_str = String::from_utf8_lossy(&exif_proc_output.stdout);
+    let mut exif_output =
+        serde_json::from_str::<Vec<ExifToolOutput>>(&exif_output_str).map_err(|e| {
+            Error::ChildProcessError(format!("Failed to deserialize exiftool output: {e}"))
+        })?;
+
+    if exif_output.len() != 1 {
+        return Err(Error::ChildProcessError(format!(
+            "Expected exactly one exiftool output object, got {}",
+            exif_output.len()
+        )));
+    }
+    let exif_output = exif_output.pop().unwrap();
+
+    let content_type_is_video = exif_output
+        .mime_type
+        .as_deref()
+        .map(content_type_is_video)
+        .unwrap_or_default();
+    let content_type_is_image = exif_output
+        .mime_type
+        .as_deref()
+        .map(content_type_is_image)
+        .unwrap_or_default();
+    let content_type_is_audio = exif_output
+        .mime_type
+        .as_deref()
+        .map(content_type_is_audio)
+        .unwrap_or_default();
+
+    let (
+        format_name,
+        format_long_name,
+        size,
+        bit_rate,
+        video_stream_count,
+        video_codec_name,
+        video_codec_long_name,
+        video_bit_rate_max,
+        audio_stream_count,
+        audio_codec_name,
+        audio_codec_long_name,
+        audio_bit_rate_max,
+        ffprobe_output_str,
+    ) = if content_type_is_video || content_type_is_image || content_type_is_audio {
+        let ffprobe_proc = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_streams",
+                "-show_format",
+                "-print_format",
+                "json",
+                &object_url,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+
+        let ffprobe_proc_output = spawn_blocking(|| {
+            ffprobe_proc
+                .wait_with_output()
+                .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+        })
+        .await?;
+
+        if !ffprobe_proc_output.status.success() {
+            let error_msg = String::from_utf8_lossy(&ffprobe_proc_output.stderr);
+            return Err(Error::FfmpegProcessError(format!(
+                "ffprobe failed with status {}: {error_msg}",
+                ffprobe_proc_output.status
+            )));
+        }
+
+        let ffprobe_output_str = String::from_utf8_lossy(&ffprobe_proc_output.stdout).to_string();
+        let ffprobe_output =
+            serde_json::from_str::<FfprobeOutput>(&ffprobe_output_str).map_err(|e| {
+                Error::FfmpegProcessError(format!("Failed to deserialize ffprobe output: {e}"))
+            })?;
+
+        let format_name = ffprobe_output.format.format_name;
+        let format_long_name = ffprobe_output.format.format_long_name;
+        let size = ffprobe_output.format.size.parse::<i64>().map_err(|e| {
+            Error::FfmpegProcessError(format!("Failed to parse size from ffprobe output: {e}"))
+        })?;
+        let bit_rate = ffprobe_output
+            .format
+            .bit_rate
+            .map(|b| b.parse::<i64>())
+            .map_or(Ok(None), |v| v.map(Some))
+            .map_err(|e| {
+                Error::FfmpegProcessError(format!(
+                    "Failed to parse bit rate from ffprobe output: {e}"
+                ))
+            })?;
+
+        let mut video_stream_count = 0;
+        let mut video_codec_name: Option<String> = None;
+        let mut video_codec_long_name: Option<String> = None;
+        let mut video_bit_rate_max: Option<i64> = None;
+        let mut audio_stream_count = 0;
+        let mut audio_codec_name: Option<String> = None;
+        let mut audio_codec_long_name: Option<String> = None;
+        let mut audio_bit_rate_max: Option<i64> = None;
+
+        for stream in ffprobe_output.streams {
+            if stream.codec_type == "video" {
+                video_stream_count += 1;
+                video_codec_name = video_codec_name.or(Some(stream.codec_name));
+                video_codec_long_name = video_codec_long_name.or(Some(stream.codec_long_name));
+                if let Some(bit_rate) = stream.bit_rate {
+                    let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
+                        Error::FfmpegProcessError(format!(
+                            "Failed to parse stream bit rate from ffprobe output: {e}"
+                        ))
+                    })?;
+                    video_bit_rate_max = video_bit_rate_max
+                        .map(|b| b.max(bit_rate))
+                        .or(Some(bit_rate));
+                }
+            } else if stream.codec_type == "audio" {
+                audio_stream_count += 1;
+                audio_codec_name = audio_codec_name.or(Some(stream.codec_name));
+                audio_codec_long_name = audio_codec_long_name.or(Some(stream.codec_long_name));
+                if let Some(bit_rate) = stream.bit_rate {
+                    let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
+                        Error::FfmpegProcessError(format!(
+                            "Failed to parse stream bit rate from ffprobe output: {e}"
+                        ))
+                    })?;
+                    audio_bit_rate_max = audio_bit_rate_max
+                        .map(|b| b.max(bit_rate))
+                        .or(Some(bit_rate));
+                }
+            }
+        }
+
+        (
+            Some(format_name),
+            Some(format_long_name),
+            Some(size),
+            bit_rate,
+            video_stream_count,
+            video_codec_name,
+            video_codec_long_name,
+            video_bit_rate_max,
+            audio_stream_count,
+            audio_codec_name,
+            audio_codec_long_name,
+            audio_bit_rate_max,
+            Some(ffprobe_output_str),
+        )
+    } else {
+        (
+            None, None, None, None, 0, None, None, None, 0, None, None, None, None,
+        )
+    };
+
+    let raw = if let Some(ffprobe_output_str) = ffprobe_output_str {
+        serde_json::from_str(&format!(
+            "{{\"exiftool\": {exif_output_str}, \"ffprobe\": {ffprobe_output_str}}}"
+        ))
+        .map_err(|e| Error::SerialisationError(format!("Failed to serialize raw metadate: {e}")))?
+    } else {
+        serde_json::from_str(&format!("{{\"exiftool\": {exif_output_str}}}")).map_err(|e| {
+            Error::SerialisationError(format!("Failed to serialize raw metadate: {e}"))
+        })?
+    };
+
+    let mut connection = acquire_db_connection().await?;
+    let s3_object_metadata = run_retryable_transaction(&mut connection, |connection| {
+        async move {
+            let object = s3_object::table
+                .filter(s3_object::object_key.eq(&source_object_key))
+                .get_result::<S3Object>(connection)
+                .await?;
+
+            let s3_object_metadata = diesel::insert_into(s3_object_metadata::table)
+                .values(S3ObjectMetadata {
+                    object_key: object.object_key,
+                    file_type: exif_output.file_type,
+                    file_type_extension: exif_output.file_type_extension,
+                    mime_type: exif_output.mime_type.or(Some(object.mime_type)),
+                    title: exif_output.title,
+                    artist: exif_output.artist,
+                    album: exif_output.album,
+                    album_artist: exif_output.album_artist,
+                    composer: exif_output.composer,
+                    genre: exif_output.genre,
+                    date: exif_output.date,
+                    track_number: exif_output.track_number,
+                    disc_number: exif_output.disc_number,
+                    duration: exif_output.duration,
+                    width: exif_output.width,
+                    height: exif_output.height,
+                    size: size.or(Some(object.size_bytes)),
+                    bit_rate,
+                    format_name,
+                    format_long_name,
+                    video_stream_count,
+                    video_codec_name,
+                    video_codec_long_name,
+                    video_frame_rate: exif_output.frame_rate,
+                    video_bit_rate_max,
+                    audio_stream_count,
+                    audio_codec_name,
+                    audio_codec_long_name,
+                    audio_sample_rate: exif_output.audio_sample_rate,
+                    audio_channels: exif_output.audio_channels,
+                    audio_bit_rate_max,
+                    raw,
+                })
+                .get_result::<S3ObjectMetadata>(connection)
+                .await?;
+
+            if let Some(ref title) = s3_object_metadata.title {
+                let post_update_count = diesel::update(post::table)
+                    .filter(
+                        post::s3_object
+                            .eq(&s3_object_metadata.object_key)
+                            .and(post::title.is_null()),
+                    )
+                    .set(post::title.eq(substring(title, 1, 300).nullable()))
+                    .execute(connection)
+                    .await?;
+
+                if post_update_count > 0 {
+                    log::info!(
+                        "Updated {} posts with title from metadata for object {}",
+                        post_update_count,
+                        &s3_object_metadata.object_key
+                    );
+                }
+            }
+            Ok(s3_object_metadata)
+        }
+        .scope_boxed()
+    })
+    .await?;
+
+    log::info!(
+        "Completed metadata extraction for {}",
+        &s3_object_metadata.object_key
+    );
+
+    Ok(())
 }
 
 #[inline]
@@ -799,6 +1204,8 @@ async fn persist_hls_transcode_results(
         hls_fail_count: None,
         thumbnail_fail_count: None,
         thumbnail_disabled: true,
+        metadata_locked_at: None,
+        metadata_fail_count: None,
     }];
 
     let mut hls_streams = Vec::new();
@@ -824,6 +1231,8 @@ async fn persist_hls_transcode_results(
             hls_fail_count: None,
             thumbnail_fail_count: None,
             thumbnail_disabled: true,
+            metadata_locked_at: None,
+            metadata_fail_count: None,
         });
 
         s3_objects.push(S3Object {
@@ -843,6 +1252,8 @@ async fn persist_hls_transcode_results(
             hls_fail_count: None,
             thumbnail_fail_count: None,
             thumbnail_disabled: true,
+            metadata_locked_at: None,
+            metadata_fail_count: None,
         });
     }
 
@@ -1155,9 +1566,17 @@ impl LockedObjectTaskSentinel {
         locked_column: &'static str,
         object_key: String,
     ) -> Result<Option<Self>, Error> {
+        Self::new_with_condition(lock_column, &format!("{locked_column} IS NULL"), object_key).await
+    }
+
+    async fn new_with_condition(
+        lock_column: &'static str,
+        condition: &str,
+        object_key: String,
+    ) -> Result<Option<Self>, Error> {
         let mut connection = acquire_db_connection().await?;
         let update_result = diesel::sql_query(format!(
-            "UPDATE s3_object SET {lock_column} = NOW() WHERE object_key = $1 AND {lock_column} IS NULL AND {locked_column} IS NULL RETURNING *",
+            "UPDATE s3_object SET {lock_column} = NOW() WHERE object_key = $1 AND {lock_column} IS NULL AND {condition} RETURNING *",
         ))
         .bind::<VarChar, _>(&object_key)
         .get_result::<S3Object>(&mut connection)

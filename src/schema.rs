@@ -3,10 +3,15 @@
 diesel::table! {
     broker (pk) {
         pk -> Int8,
+        #[max_length = 255]
         name -> Varchar,
+        #[max_length = 255]
         bucket -> Varchar,
+        #[max_length = 2048]
         endpoint -> Varchar,
+        #[max_length = 255]
         access_key -> Varchar,
+        #[max_length = 255]
         secret_key -> Varchar,
         is_aws_region -> Bool,
         remove_duplicate_files -> Bool,
@@ -30,6 +35,7 @@ diesel::table! {
 
 diesel::table! {
     deferred_s3_object_deletion (object_key) {
+        #[max_length = 255]
         object_key -> Varchar,
         locked_at -> Nullable<Timestamptz>,
         fail_count -> Nullable<Int4>,
@@ -48,19 +54,27 @@ diesel::table! {
 
 diesel::table! {
     hls_stream (stream_playlist) {
+        #[max_length = 255]
         stream_playlist -> Varchar,
+        #[max_length = 255]
         stream_file -> Varchar,
+        #[max_length = 255]
         master_playlist -> Varchar,
         resolution -> Int4,
+        #[max_length = 255]
         x264_preset -> Varchar,
+        #[max_length = 255]
         target_bitrate -> Nullable<Varchar>,
+        #[max_length = 255]
         min_bitrate -> Nullable<Varchar>,
+        #[max_length = 255]
         max_bitrate -> Nullable<Varchar>,
     }
 }
 
 diesel::table! {
     one_time_password (fk_user) {
+        #[max_length = 255]
         password -> Varchar,
         expiry -> Timestamptz,
         invalidated -> Bool,
@@ -71,13 +85,18 @@ diesel::table! {
 diesel::table! {
     post (pk) {
         pk -> Int8,
+        #[max_length = 2048]
         data_url -> Nullable<Varchar>,
+        #[max_length = 2048]
         source_url -> Nullable<Varchar>,
+        #[max_length = 300]
         title -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
         fk_create_user -> Int8,
         score -> Int4,
+        #[max_length = 255]
         s3_object -> Nullable<Varchar>,
+        #[max_length = 2048]
         thumbnail_url -> Nullable<Varchar>,
         public -> Bool,
         public_edit -> Bool,
@@ -88,11 +107,13 @@ diesel::table! {
 diesel::table! {
     post_collection (pk) {
         pk -> Int8,
+        #[max_length = 255]
         title -> Varchar,
         fk_create_user -> Int8,
         creation_timestamp -> Timestamptz,
         public -> Bool,
         public_edit -> Bool,
+        #[max_length = 255]
         poster_object_key -> Nullable<Varchar>,
         description -> Nullable<Text>,
     }
@@ -155,12 +176,17 @@ diesel::table! {
 diesel::table! {
     registered_user (pk) {
         pk -> Int8,
+        #[max_length = 25]
         user_name -> Varchar,
+        #[max_length = 255]
         password -> Varchar,
+        #[max_length = 320]
         email -> Nullable<Varchar>,
+        #[max_length = 2048]
         avatar_url -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
         email_confirmed -> Bool,
+        #[max_length = 32]
         display_name -> Nullable<Varchar>,
         jwt_version -> Int4,
         password_fail_count -> Int4,
@@ -169,15 +195,21 @@ diesel::table! {
 
 diesel::table! {
     s3_object (object_key) {
+        #[max_length = 255]
         object_key -> Varchar,
+        #[max_length = 64]
         sha256_hash -> Nullable<Bpchar>,
         size_bytes -> Int8,
+        #[max_length = 255]
         mime_type -> Varchar,
         fk_broker -> Int8,
         fk_uploader -> Int8,
+        #[max_length = 255]
         thumbnail_object_key -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
+        #[max_length = 255]
         filename -> Nullable<Varchar>,
+        #[max_length = 255]
         hls_master_playlist -> Nullable<Varchar>,
         hls_disabled -> Bool,
         hls_locked_at -> Nullable<Timestamptz>,
@@ -185,12 +217,53 @@ diesel::table! {
         hls_fail_count -> Nullable<Int4>,
         thumbnail_fail_count -> Nullable<Int4>,
         thumbnail_disabled -> Bool,
+        metadata_locked_at -> Nullable<Timestamptz>,
+        metadata_fail_count -> Nullable<Int4>,
+    }
+}
+
+diesel::table! {
+    s3_object_metadata (object_key) {
+        #[max_length = 255]
+        object_key -> Varchar,
+        file_type -> Nullable<Text>,
+        file_type_extension -> Nullable<Text>,
+        mime_type -> Nullable<Text>,
+        title -> Nullable<Text>,
+        artist -> Nullable<Text>,
+        album -> Nullable<Text>,
+        album_artist -> Nullable<Text>,
+        composer -> Nullable<Text>,
+        genre -> Nullable<Text>,
+        date -> Nullable<Text>,
+        track_number -> Nullable<Text>,
+        disc_number -> Nullable<Text>,
+        duration -> Nullable<Text>,
+        width -> Nullable<Int4>,
+        height -> Nullable<Int4>,
+        size -> Nullable<Int8>,
+        bit_rate -> Nullable<Int8>,
+        format_name -> Nullable<Text>,
+        format_long_name -> Nullable<Text>,
+        video_stream_count -> Int4,
+        video_codec_name -> Nullable<Text>,
+        video_codec_long_name -> Nullable<Text>,
+        video_frame_rate -> Nullable<Float8>,
+        video_bit_rate_max -> Nullable<Int8>,
+        audio_stream_count -> Int4,
+        audio_codec_name -> Nullable<Text>,
+        audio_codec_long_name -> Nullable<Text>,
+        audio_sample_rate -> Nullable<Int4>,
+        audio_channels -> Nullable<Int4>,
+        audio_bit_rate_max -> Nullable<Int8>,
+        raw -> Jsonb,
     }
 }
 
 diesel::table! {
     tag (pk) {
         pk -> Int8,
+        #[max_length = 50]
         tag_name -> Varchar,
         creation_timestamp -> Timestamptz,
     }
@@ -222,6 +295,7 @@ diesel::table! {
 diesel::table! {
     user_group (pk) {
         pk -> Int8,
+        #[max_length = 255]
         name -> Varchar,
         public -> Bool,
         hidden -> Bool,
@@ -268,6 +342,7 @@ diesel::joinable!(post_tag -> tag (fk_tag));
 diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
 diesel::joinable!(s3_object -> registered_user (fk_uploader));
+diesel::joinable!(s3_object_metadata -> s3_object (object_key));
 diesel::joinable!(user_group -> registered_user (fk_owner));
 diesel::joinable!(user_group_membership -> user_group (fk_group));
 
@@ -288,6 +363,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     refresh_token,
     registered_user,
     s3_object,
+    s3_object_metadata,
     tag,
     tag_alias,
     tag_closure_table,

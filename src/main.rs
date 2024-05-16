@@ -787,6 +787,12 @@ fn configure_scheduler() -> Scheduler<Utc> {
             task::generate_missing_thumbnails,
         )
     });
+    scheduler.every(clokwerk::Interval::Minutes(20)).run(|| {
+        task::submit_task(
+            "load_missing_object_metadata",
+            task::load_missing_object_metadata,
+        )
+    });
     scheduler.every(clokwerk::Interval::Hours(1)).run(|| {
         task::submit_task("clear_old_object_locks", task::clear_old_object_locks);
     });

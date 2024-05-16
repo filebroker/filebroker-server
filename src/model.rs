@@ -862,6 +862,8 @@ pub struct S3Object {
     pub hls_fail_count: Option<i32>,
     pub thumbnail_fail_count: Option<i32>,
     pub thumbnail_disabled: bool,
+    pub metadata_locked_at: Option<DateTime<Utc>>,
+    pub metadata_fail_count: Option<i32>,
 }
 
 #[derive(Associations, Debug, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -1083,4 +1085,42 @@ pub struct DeferredS3ObjectDeletion {
     pub locked_at: Option<DateTime<Utc>>,
     pub fail_count: Option<i32>,
     pub fk_broker: i64,
+}
+
+#[derive(Identifiable, Insertable, Queryable, QueryableByName)]
+#[diesel(table_name = s3_object_metadata)]
+#[diesel(primary_key(object_key))]
+pub struct S3ObjectMetadata {
+    pub object_key: String,
+    pub file_type: Option<String>,
+    pub file_type_extension: Option<String>,
+    pub mime_type: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub album_artist: Option<String>,
+    pub composer: Option<String>,
+    pub genre: Option<String>,
+    pub date: Option<String>,
+    pub track_number: Option<String>,
+    pub disc_number: Option<String>,
+    pub duration: Option<String>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub size: Option<i64>,
+    pub bit_rate: Option<i64>,
+    pub format_name: Option<String>,
+    pub format_long_name: Option<String>,
+    pub video_stream_count: i32,
+    pub video_codec_name: Option<String>,
+    pub video_codec_long_name: Option<String>,
+    pub video_frame_rate: Option<f64>,
+    pub video_bit_rate_max: Option<i64>,
+    pub audio_stream_count: i32,
+    pub audio_codec_name: Option<String>,
+    pub audio_codec_long_name: Option<String>,
+    pub audio_sample_rate: Option<i32>,
+    pub audio_channels: Option<i32>,
+    pub audio_bit_rate_max: Option<i64>,
+    pub raw: serde_json::Value,
 }

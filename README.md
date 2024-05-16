@@ -57,6 +57,8 @@ videos uploaded to this server directly will still get transcoded.
 `FILEBROKER_DISABLE_GENERATE_MISSING_THUMBNAILS` (optional, boolean): Disable task that generates missing thumbnails in
 the background, thumbnails for objects uploaded to this server will still be created.
 
+`FILEBROKER_DISABLE_LOAD_MISSING_METADATA` (optional, boolean): Disable task that loads missing s3 object metadata.
+
 `FILEBROKER_CAPTCHA_SITE_KEY` (optional, string): The site key for hCaptcha.
 
 `FILEBROKER_CAPTCHA_SECRET` (optional, string): The secret for hCaptcha. If empty then captchas are disabled.

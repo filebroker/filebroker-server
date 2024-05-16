@@ -1,0 +1,37 @@
+ALTER TABLE s3_object ADD COLUMN metadata_locked_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE s3_object ADD COLUMN metadata_fail_count INTEGER;
+
+CREATE TABLE s3_object_metadata(
+    object_key VARCHAR(255) PRIMARY KEY REFERENCES s3_object(object_key) ON DELETE CASCADE,
+    file_type TEXT,
+    file_type_extension TEXT,
+    mime_type TEXT,
+    title TEXT,
+    artist TEXT,
+    album TEXT,
+    album_artist TEXT,
+    composer TEXT,
+    genre TEXT,
+    date TEXT,
+    track_number TEXT,
+    disc_number TEXT,
+    duration TEXT,
+    width INTEGER,
+    height INTEGER,
+    size BIGINT,
+    bit_rate BIGINT,
+    format_name TEXT,
+    format_long_name TEXT,
+    video_stream_count INTEGER NOT NULL DEFAULT 0,
+    video_codec_name TEXT,
+    video_codec_long_name TEXT,
+    video_frame_rate DOUBLE PRECISION,
+    video_bit_rate_max BIGINT,
+    audio_stream_count INTEGER NOT NULL DEFAULT 0,
+    audio_codec_name TEXT,
+    audio_codec_long_name TEXT,
+    audio_sample_rate INTEGER,
+    audio_channels INTEGER,
+    audio_bit_rate_max BIGINT,
+    raw JSONB NOT NULL
+);

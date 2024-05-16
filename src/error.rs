@@ -107,6 +107,8 @@ pub enum Error {
     InvalidUrlError(String),
     #[error("Reqwest error occurred: {0}")]
     ReqwestError(String),
+    #[error("Error occurred in child process: {0}")]
+    ChildProcessError(String),
 
     #[error("Received error response code from S3: {0}")]
     S3ResponseError(u16),
@@ -157,7 +159,8 @@ impl Error {
             | Error::CancellationError
             | Error::IoError(_)
             | Error::InvalidUrlError(_)
-            | Error::ReqwestError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | Error::ReqwestError(_)
+            | Error::ChildProcessError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::IllegalRangeError(..) => StatusCode::RANGE_NOT_SATISFIABLE,
             Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => {
                 StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -213,6 +216,7 @@ impl Error {
             Self::IoError(_) => 500_012,
             Self::InvalidUrlError(_) => 500_013,
             Self::ReqwestError(_) => 500_014,
+            Self::ChildProcessError(_) => 500_015,
 
             Self::S3ResponseError(_) => 600_001,
             Self::S3ResponseErrorMsg(..) => 600_002,

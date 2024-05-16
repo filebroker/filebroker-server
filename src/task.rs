@@ -56,6 +56,12 @@ lazy_static! {
                 .parse::<bool>()
                 .expect("FILEBROKER_DISABLE_GENERATE_MISSING_THUMBNAILS is invalid"))
             .unwrap_or(false);
+    pub static ref DISABLE_LOAD_MISSING_METADATA: bool =
+        std::env::var("FILEBROKER_DISABLE_LOAD_MISSING_METADATA")
+            .map(|s| s
+                .parse::<bool>()
+                .expect("FILEBROKER_DISABLE_LOAD_MISSING_METADATA is invalid"))
+            .unwrap_or(false);
 }
 
 pub fn submit_task(
@@ -337,6 +343,71 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
     })
 }
 
+pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
+    if *DISABLE_LOAD_MISSING_METADATA {
+        log::info!("load_missing_object_metadata disabled");
+        return Ok(());
+    }
+
+    tokio_handle.block_on(async {
+        loop {
+            let mut connection = acquire_db_connection().await?;
+            let relevant_objects = run_serializable_transaction(&mut connection, |connection| async {
+                diesel::sql_query("
+                WITH relevant_s3objects AS(
+                    SELECT * FROM s3_object AS obj
+                    WHERE NOT EXISTS(SELECT * FROM s3_object_metadata WHERE object_key = obj.object_key)
+                    AND metadata_locked_at IS NULL
+                    AND NOT (object_key LIKE 'thumb_%')
+                    AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)
+                    AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
+                    AND NOT EXISTS(SELECT * FROM hls_stream WHERE stream_playlist = obj.object_key OR stream_file = obj.object_key OR master_playlist = obj.object_key)
+                    AND (metadata_fail_count IS NULL OR metadata_fail_count < 3)
+                    ORDER BY metadata_fail_count ASC NULLS FIRST, creation_timestamp ASC
+                    LIMIT 100
+                )
+                UPDATE s3_object SET metadata_locked_at = NOW() WHERE metadata_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
+            ")
+            .load::<S3Object>(connection)
+            .await
+            .map_err(retry_on_serialization_failure)
+            }.scope_boxed()).await?;
+            drop(connection);
+
+            if relevant_objects.is_empty() {
+                break;
+            }
+
+            let _sentinel = LockedObjectsTaskSentinel::new(
+                "metadata_locked_at",
+                relevant_objects
+                    .iter()
+                    .map(|o| o.object_key.clone())
+                    .collect::<Vec<_>>(),
+                &tokio_handle,
+            ).await;
+
+            log::info!("Found {} objects with missing metadata", relevant_objects.len());
+            for object in relevant_objects {
+                if let Err(e) = encode::load_object_metadata(object.object_key.clone(), true).await {
+                    log::error!("Failed to load metadata for object {}: {}", &object.object_key, e);
+                    if let Ok(mut connection) = acquire_db_connection().await {
+                        if let Err(e) = diesel::sql_query("UPDATE s3_object SET metadata_fail_count = coalesce(metadata_fail_count, 0) + 1 WHERE object_key = $1")
+                            .bind::<VarChar, _>(&object.object_key)
+                            .execute(&mut connection).await {
+                                log::error!("Failed to increment metadata_fail_count: {e}");
+                            }
+                    }
+                } else {
+                    log::info!("Loaded missing metadata for object {}", &object.object_key);
+                }
+            }
+        }
+
+        Ok(())
+    })
+}
+
 async fn load_object_relations(
     broker_pk: i64,
     user_pk: i64,
@@ -374,6 +445,11 @@ pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
                 .map_err(retry_on_serialization_failure)?;
 
             diesel::sql_query("UPDATE s3_object SET thumbnail_locked_at = NULL WHERE thumbnail_locked_at < NOW() - interval '1 day'")
+                .execute(connection)
+                .await
+                .map_err(retry_on_serialization_failure)?;
+
+            diesel::sql_query("UPDATE s3_object SET metadata_locked_at = NULL WHERE metadata_locked_at < NOW() - interval '1 day'")
                 .execute(connection)
                 .await
                 .map_err(retry_on_serialization_failure)?;

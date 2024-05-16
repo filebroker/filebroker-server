@@ -1098,7 +1098,9 @@ fn find_nested_expression(
 }
 
 pub mod functions {
+    use diesel::sql_types::Integer;
     use diesel::sql_types::Text;
     sql_function!(fn lower(x: Text) -> Text);
     sql_function!(fn char_length(x: Text) -> Integer);
+    sql_function!(fn substring(s: Text, start: Integer, len: Integer) -> Text);
 }

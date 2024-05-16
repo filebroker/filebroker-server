@@ -1,5 +1,5 @@
 use chrono::Utc;
-use diesel::QueryDsl;
+use diesel::{OptionalExtension, QueryDsl};
 use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
 use serde::Deserialize;
 use validator::Validate;
@@ -15,10 +15,11 @@ use crate::{
     },
     perms,
     query::{self, report_missing_pks, PostCollectionDetailed, PostDetailed},
-    run_retryable_transaction,
+    run_retryable_transaction, run_serializable_transaction,
     schema::{
         post, post_collection, post_collection_group_access, post_collection_item,
-        post_collection_tag, post_group_access, post_tag, registered_user, s3_object, user_group,
+        post_collection_tag, post_group_access, post_tag, registered_user, s3_object,
+        s3_object_metadata, user_group,
     },
     tags::{handle_entered_and_selected_tags, validate_tags},
     util::dedup_vec_optional,
@@ -78,7 +79,7 @@ pub async fn create_post_handler(
 
     // run as repeatable read transaction and retry serialisation errors when a concurrent transaction
     // deletes or creates relevant tags
-    run_retryable_transaction(&mut connection, |connection| {
+    run_serializable_transaction(&mut connection, |connection| {
         async move {
             let set_tags = handle_entered_and_selected_tags(
                 &create_post_request.selected_tags,
@@ -87,11 +88,28 @@ pub async fn create_post_handler(
             )
             .await?;
 
+            let metadata_title: Option<String> =
+                if let Some(ref object_key) = create_post_request.s3_object {
+                    if create_post_request.title.is_none() {
+                        s3_object_metadata::table
+                            .select(s3_object_metadata::title)
+                            .filter(s3_object_metadata::object_key.eq(object_key))
+                            .get_result::<Option<String>>(connection)
+                            .await
+                            .optional()?
+                            .flatten()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
             let post = diesel::insert_into(post::table)
                 .values(NewPost {
                     data_url: create_post_request.data_url.clone(),
                     source_url: create_post_request.source_url.clone(),
-                    title: create_post_request.title.clone(),
+                    title: create_post_request.title.clone().or(metadata_title),
                     fk_create_user: user.pk,
                     s3_object: create_post_request.s3_object.clone(),
                     thumbnail_url: create_post_request.thumbnail_url.clone(),
