@@ -380,6 +380,11 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(warp::body::stream())
         .and_then(data::upload_handler);
 
+    let get_object_metadata_route = warp::path("get-object-metadata")
+        .and(warp::get())
+        .and(warp::filters::path::peek())
+        .and_then(data::get_object_metadata_handler);
+
     let get_object_route = warp::path("get-object")
         .and(warp::get())
         .and(warp::filters::path::peek())
@@ -525,6 +530,7 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .or(search_route)
         .or(get_post_route)
         .or(upload_route)
+        .or(get_object_metadata_route)
         .or(get_object_route)
         .boxed()
         .or(get_object_head_route)

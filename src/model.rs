@@ -1087,7 +1087,7 @@ pub struct DeferredS3ObjectDeletion {
     pub fk_broker: i64,
 }
 
-#[derive(Identifiable, Insertable, Queryable, QueryableByName)]
+#[derive(Identifiable, Insertable, Queryable, QueryableByName, Serialize)]
 #[diesel(table_name = s3_object_metadata)]
 #[diesel(primary_key(object_key))]
 pub struct S3ObjectMetadata {

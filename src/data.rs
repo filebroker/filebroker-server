@@ -20,11 +20,11 @@ use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension},
     error::Error,
-    model::{Broker, NewBroker, S3Object, User},
+    model::{Broker, NewBroker, S3Object, S3ObjectMetadata, User},
     perms::{self, PostJoinedS3Object},
     post,
     query::PostDetailed,
-    schema::{broker, s3_object},
+    schema::{broker, s3_object, s3_object_metadata},
 };
 
 pub mod down;
@@ -177,6 +177,20 @@ pub async fn upload_handler(
     Err(warp::reject::custom(Error::InvalidFileError(String::from(
         "No file specified, no multipart form field found for name 'file'",
     ))))
+}
+
+pub async fn get_object_metadata_handler(requested_path: Peek) -> Result<impl Reply, Rejection> {
+    let object_key = requested_path.as_str();
+    let mut connection = acquire_db_connection().await?;
+    let metadata = s3_object_metadata::table
+        .filter(s3_object_metadata::object_key.eq(object_key))
+        .get_result::<S3ObjectMetadata>(&mut connection)
+        .await
+        .optional()
+        .map_err(Error::from)?
+        .ok_or_else(|| Error::InaccessibleS3ObjectError(String::from(object_key)))?;
+
+    Ok(warp::reply::json(&metadata))
 }
 
 pub async fn get_object_handler(
