@@ -26,8 +26,15 @@ use rustls::{
     ServerConfig,
 };
 use std::{
-    convert::Infallible, fs, future::ready, io, pin::Pin, str::FromStr, sync::Arc,
+    convert::Infallible,
+    fs,
+    future::ready,
+    io,
+    pin::Pin,
+    str::FromStr,
+    sync::{atomic::AtomicBool, Arc},
     thread::JoinHandle,
+    time::Duration,
 };
 use tls_listener::{AsyncTls, TlsListener};
 use tokio::{
@@ -168,9 +175,15 @@ fn main() {
         log::info!("Done running diesel migrations");
     }
 
-    let _task_scheduler = start_task_scheduler_runtime(configure_scheduler());
+    let task_scheduler = start_task_scheduler_runtime(configure_scheduler());
 
-    setup_tokio_runtime();
+    let http_worker_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to start http server worker runtime");
+    let http_worker_rt = Arc::new(http_worker_rt);
+    setup_tokio_runtime(http_worker_rt.clone());
+    let _ = task_scheduler.join();
 }
 
 pub async fn acquire_db_connection() -> Result<DbConnection, Error> {
@@ -267,7 +280,7 @@ pub fn retry_on_serialization_failure(e: diesel::result::Error) -> TransactionRu
 
 /// Start a tokio runtime that runs a warp server.
 #[tokio::main(flavor = "current_thread")]
-async fn setup_tokio_runtime() {
+async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
     let login_route = warp::path("login")
         .and(warp::post())
         .and(warp::body::json())
@@ -607,11 +620,11 @@ async fn setup_tokio_runtime() {
             }
         });
         log::info!("Enabled TLS");
-        run_server(accept::from_stream(incoming), filter)
+        run_server(accept::from_stream(incoming), filter, http_worker_rt)
             .await
             .expect("Failed running server");
     } else {
-        run_server(incoming, filter)
+        run_server(incoming, filter, http_worker_rt)
             .await
             .expect("Failed running server");
     }
@@ -650,7 +663,11 @@ where
     }
 }
 
-async fn run_server<I, F>(incoming: I, filter: F) -> Result<(), warp::hyper::Error>
+async fn run_server<I, F>(
+    incoming: I,
+    filter: F,
+    http_worker_rt: Arc<Runtime>,
+) -> Result<(), warp::hyper::Error>
 where
     I: Accept,
     I::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -658,10 +675,6 @@ where
     F: Filter + Clone + Send + 'static,
     <F::Future as TryFuture>::Ok: Reply,
 {
-    let http_worker_rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to start http server worker runtime");
     let warp_service = warp::service(filter);
     let service_fn = hyper::service::make_service_fn(move |_| {
         let warp_service = warp_service.clone();
@@ -675,10 +688,22 @@ where
     });
     let server = Server::builder(incoming)
         .executor(HttpRequestExecutor {
-            worker_rt: Arc::new(http_worker_rt),
+            worker_rt: http_worker_rt,
         })
         .serve(service_fn);
     log::info!("Server listening on port {}", *PORT);
+    let server = server.with_graceful_shutdown(async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for ctrl-c signal");
+        log::info!("Shutting down server");
+        log::info!("Waiting for scheduled tasks to finish");
+        tokio::runtime::Handle::current()
+            .spawn_blocking(task::shutdown_join)
+            .await
+            .expect("Failed to join scheduled tasks");
+        log::info!("Shutting down http server worker runtime");
+    });
     server.await
 }
 
@@ -829,10 +854,15 @@ fn start_task_scheduler_runtime(scheduler: Scheduler<Utc>) -> JoinHandle<()> {
 
             runtime.block_on(async {
                 loop {
+                    if AtomicBool::load(&task::IS_SHUTDOWN, std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
                     task_scheduler_sentinel.scheduler.run_pending();
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             });
+
+            runtime.shutdown_timeout(Duration::from_secs(10));
         })
         .expect("Failed to spawn task scheduler thread")
 }

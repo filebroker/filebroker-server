@@ -1,4 +1,10 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use chrono::Utc;
 use diesel::{
@@ -62,14 +68,24 @@ lazy_static! {
                 .parse::<bool>()
                 .expect("FILEBROKER_DISABLE_LOAD_MISSING_METADATA is invalid"))
             .unwrap_or(false);
+    pub static ref IS_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 }
 
 pub fn submit_task(
     task_id: &'static str,
     task: impl Fn(Handle) -> Result<(), Error> + Send + 'static,
 ) {
+    if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+        log::warn!("Skipping task {task_id} because the task pool is shutting down");
+        return;
+    }
     let tokio_handle = Handle::current();
     ThreadPool::execute(&TASK_POOL, move || {
+        // check again when running in pool
+        if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+            log::warn!("Skipping task {task_id} because the task pool is shutting down");
+            return;
+        }
         let running_task_ids = RUNNING_TASK_IDS.pin();
         // only run task if not already running
         if running_task_ids.insert(task_id) {
@@ -88,6 +104,11 @@ pub fn submit_task(
             log::warn!("Skipping task {task_id} because it is already running")
         }
     })
+}
+
+pub fn shutdown_join() {
+    IS_SHUTDOWN.store(true, Ordering::Relaxed);
+    TASK_POOL.join();
 }
 
 struct TaskSentinel<'a> {
@@ -166,6 +187,10 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                 relevant_objects.len()
             );
             for object in relevant_objects {
+                if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                    log::warn!("Stopping task generate_missing_hls_streams because the task pool is shutting down");
+                    return Ok(());
+                }
                 let mut connection = acquire_db_connection().await?;
 
                 let (bucket, broker, user) =
@@ -215,6 +240,10 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                         &object.object_key,
                         e
                     );
+                    if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                        log::warn!("Stopping task generate_missing_hls_streams because the task pool is shutting down");
+                        return Ok(());
+                    }
                     if let Ok(mut connection) = acquire_db_connection().await {
                         if let Err(e) = diesel::sql_query("UPDATE s3_object SET hls_fail_count = coalesce(hls_fail_count, 0) + 1 WHERE object_key = $1")
                             .bind::<VarChar, _>(&object.object_key)
@@ -286,6 +315,10 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                 relevant_objects.len()
             );
             for object in relevant_objects {
+                if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                    log::warn!("Stopping task generate_missing_thumbnails because the task pool is shutting down");
+                    return Ok(());
+                }
                 let mut connection = acquire_db_connection().await?;
 
                 let (bucket, broker, user) =
@@ -336,6 +369,10 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                         &object.object_key,
                         e
                     );
+                    if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                        log::warn!("Stopping task generate_missing_thumbnails because the task pool is shutting down");
+                        return Ok(());
+                    }
                     if let Ok(mut connection) = acquire_db_connection().await {
                         if let Err(e) = diesel::sql_query("UPDATE s3_object SET thumbnail_fail_count = coalesce(thumbnail_fail_count, 0) + 1 WHERE object_key = $1")
                             .bind::<VarChar, _>(&object.object_key)
@@ -402,8 +439,17 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
 
             log::info!("Found {} objects with missing metadata", relevant_objects.len());
             for object in relevant_objects {
+                if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                    log::warn!("Stopping task load_missing_object_metadata because the task pool is shutting down");
+                    return Ok(());
+                }
+
                 if let Err(e) = encode::load_object_metadata(object.object_key.clone(), true).await {
                     log::error!("Failed to load metadata for object {}: {}", &object.object_key, e);
+                    if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                        log::warn!("Stopping task load_missing_object_metadata because the task pool is shutting down");
+                        return Ok(());
+                    }
                     if let Ok(mut connection) = acquire_db_connection().await {
                         if let Err(e) = diesel::sql_query("UPDATE s3_object SET metadata_fail_count = coalesce(metadata_fail_count, 0) + 1 WHERE object_key = $1")
                             .bind::<VarChar, _>(&object.object_key)
@@ -547,6 +593,10 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
             ).await;
 
             for deferred_deletion in deferred_deletions {
+                if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                    log::warn!("Stopping task execute_deferred_s3_object_deletions because the task pool is shutting down");
+                    return Ok(());
+                }
                 let mut connection = acquire_db_connection().await?;
                 let broker = broker::table
                     .filter(broker::pk.eq(deferred_deletion.fk_broker))
@@ -572,6 +622,10 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
                             }
                     }
                     Ok(response) => {
+                        if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                            log::warn!("Stopping task execute_deferred_s3_object_deletions because the task pool is shutting down");
+                            return Ok(());
+                        }
                         log::error!("Failed to delete object {} from s3 with status code {}", &deferred_deletion.object_key, response.status_code());
                         if let Err(e) = diesel::sql_query("UPDATE deferred_s3_object_deletion SET fail_count = coalesce(fail_count, 0) + 1 WHERE object_key = $1")
                         .bind::<VarChar, _>(&deferred_deletion.object_key)
@@ -580,6 +634,10 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
                         }
                     }
                     Err(e) => {
+                        if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                            log::warn!("Stopping task execute_deferred_s3_object_deletions because the task pool is shutting down");
+                            return Ok(());
+                        }
                         log::error!("Failed to delete object {} from s3 with error: {e}", &deferred_deletion.object_key);
                         if let Err(e) = diesel::sql_query("UPDATE deferred_s3_object_deletion SET fail_count = coalesce(fail_count, 0) + 1 WHERE object_key = $1")
                         .bind::<VarChar, _>(&deferred_deletion.object_key)
