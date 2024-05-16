@@ -253,7 +253,7 @@ diesel::table! {
         audio_stream_count -> Int4,
         audio_codec_name -> Nullable<Text>,
         audio_codec_long_name -> Nullable<Text>,
-        audio_sample_rate -> Nullable<Int4>,
+        audio_sample_rate -> Nullable<Float8>,
         audio_channels -> Nullable<Int4>,
         audio_bit_rate_max -> Nullable<Int8>,
         raw -> Jsonb,

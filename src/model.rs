@@ -1119,7 +1119,7 @@ pub struct S3ObjectMetadata {
     pub audio_stream_count: i32,
     pub audio_codec_name: Option<String>,
     pub audio_codec_long_name: Option<String>,
-    pub audio_sample_rate: Option<i32>,
+    pub audio_sample_rate: Option<f64>,
     pub audio_channels: Option<i32>,
     pub audio_bit_rate_max: Option<i64>,
     pub raw: serde_json::Value,

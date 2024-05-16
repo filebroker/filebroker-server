@@ -780,7 +780,7 @@ struct ExifToolOutput {
     #[serde(rename = "VideoFrameRate")]
     frame_rate: Option<f64>,
     #[serde(rename = "AudioSampleRate")]
-    audio_sample_rate: Option<i32>,
+    audio_sample_rate: Option<f64>,
     #[serde(rename = "AudioChannels")]
     audio_channels: Option<i32>,
 }
