@@ -775,13 +775,13 @@ fn setup_logger() {
 
 fn configure_scheduler() -> Scheduler<Utc> {
     let mut scheduler = Scheduler::with_tz(Utc);
-    scheduler.every(clokwerk::Interval::Hours(2)).run(|| {
+    scheduler.every(clokwerk::Interval::Minutes(40)).run(|| {
         task::submit_task(
             "generate_missing_hls_streams",
             task::generate_missing_hls_streams,
         )
     });
-    scheduler.every(clokwerk::Interval::Hours(2)).run(|| {
+    scheduler.every(clokwerk::Interval::Minutes(30)).run(|| {
         task::submit_task(
             "generate_missing_thumbnails",
             task::generate_missing_thumbnails,
@@ -799,7 +799,7 @@ fn configure_scheduler() -> Scheduler<Utc> {
     scheduler.every(clokwerk::Interval::Minutes(30)).run(|| {
         task::submit_task("clear_old_tokens", task::clear_old_tokens);
     });
-    scheduler.every(clokwerk::Interval::Minutes(5)).run(|| {
+    scheduler.every(clokwerk::Interval::Minutes(15)).run(|| {
         task::submit_task(
             "execute_deferred_s3_object_deletions",
             task::execute_deferred_s3_object_deletions,

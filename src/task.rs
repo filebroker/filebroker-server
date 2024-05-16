@@ -115,112 +115,119 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         log::debug!("Waiting to acquire permit to start HLS transcoding");
         let _semaphore = VIDEO_TRANSCODE_SEMAPHORE.acquire().await
             .map_err(|_| Error::CancellationError)?;
-        let mut connection = acquire_db_connection().await?;
 
-        let submitted_hls_transcodings_guard = SUBMITTED_HLS_TRANSCODINGS.lock();
-        let submitted_hls_transcodings = submitted_hls_transcodings_guard.iter().collect::<Vec<_>>();
-        let relevant_objects = run_serializable_transaction(&mut connection, |connection| async move {
-            diesel::sql_query("
-            WITH relevant_s3objects AS(
-                SELECT * FROM s3_object AS obj
-                WHERE NOT hls_disabled
-                AND NOT(obj.object_key = ANY($1))
-                AND hls_master_playlist IS NULL
-                AND LOWER(mime_type) LIKE 'video/%'
-                AND hls_locked_at IS NULL
-                AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)
-                AND EXISTS(SELECT * FROM broker WHERE pk = obj.fk_broker AND hls_enabled)
-                AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
-                AND NOT EXISTS(SELECT * FROM hls_stream WHERE stream_playlist = obj.object_key OR stream_file = obj.object_key OR master_playlist = obj.object_key)
-                AND (hls_fail_count IS NULL OR hls_fail_count < 3)
-                ORDER BY hls_fail_count ASC NULLS FIRST, creation_timestamp ASC
-                LIMIT 25
-            )
-            UPDATE s3_object SET hls_locked_at = NOW() WHERE hls_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
-        ")
-        .bind::<Array<VarChar>, _>(submitted_hls_transcodings)
-        .load::<S3Object>(connection)
-        .await
-        .map_err(retry_on_serialization_failure)
-        }.scope_boxed()).await?;
-        drop(submitted_hls_transcodings_guard);
-        drop(connection);
-
-        let _sentinel = LockedObjectsTaskSentinel::new(
-            "hls_locked_at",
-            relevant_objects
-                .iter()
-                .map(|o| o.object_key.clone())
-                .collect::<Vec<_>>(),
-            &tokio_handle,
-        ).await;
-
-        log::info!(
-            "Found {} objects with missing HLS playlists",
-            relevant_objects.len()
-        );
-        for object in relevant_objects {
+        loop {
             let mut connection = acquire_db_connection().await?;
 
-            let (bucket, broker, user) =
-                match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection).await {
-                    Ok(res) => res,
-                    Err(e) => {
-                        log::error!("Failed to load data for {}: {}", &object.object_key, e);
-                        continue;
-                    }
-                };
+            let submitted_hls_transcodings_guard = SUBMITTED_HLS_TRANSCODINGS.lock();
+            let submitted_hls_transcodings = submitted_hls_transcodings_guard.iter().collect::<Vec<_>>();
+            let relevant_objects = run_serializable_transaction(&mut connection, |connection| async move {
+                diesel::sql_query("
+                WITH relevant_s3objects AS(
+                    SELECT * FROM s3_object AS obj
+                    WHERE NOT hls_disabled
+                    AND NOT(obj.object_key = ANY($1))
+                    AND hls_master_playlist IS NULL
+                    AND LOWER(mime_type) LIKE 'video/%'
+                    AND hls_locked_at IS NULL
+                    AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)
+                    AND EXISTS(SELECT * FROM broker WHERE pk = obj.fk_broker AND hls_enabled)
+                    AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
+                    AND NOT EXISTS(SELECT * FROM hls_stream WHERE stream_playlist = obj.object_key OR stream_file = obj.object_key OR master_playlist = obj.object_key)
+                    AND (hls_fail_count IS NULL OR hls_fail_count < 3)
+                    ORDER BY hls_fail_count ASC NULLS FIRST, creation_timestamp ASC
+                    LIMIT 25
+                )
+                UPDATE s3_object SET hls_locked_at = NOW() WHERE hls_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
+            ")
+            .bind::<Array<VarChar>, _>(submitted_hls_transcodings)
+            .load::<S3Object>(connection)
+            .await
+            .map_err(retry_on_serialization_failure)
+            }.scope_boxed()).await?;
+            drop(submitted_hls_transcodings_guard);
             drop(connection);
 
-            let file_id = match Path::new(&object.object_key)
-                .file_stem()
-                .map(|o| o.to_string_lossy().to_string())
-            {
-                Some(file_id) => match Uuid::parse_str(&file_id) {
-                    Ok(uuid) => uuid,
-                    Err(e) => {
+            if relevant_objects.is_empty() {
+                break;
+            }
+
+            let _sentinel = LockedObjectsTaskSentinel::new(
+                "hls_locked_at",
+                relevant_objects
+                    .iter()
+                    .map(|o| o.object_key.clone())
+                    .collect::<Vec<_>>(),
+                &tokio_handle,
+            ).await;
+
+            log::info!(
+                "Found {} objects with missing HLS playlists",
+                relevant_objects.len()
+            );
+            for object in relevant_objects {
+                let mut connection = acquire_db_connection().await?;
+
+                let (bucket, broker, user) =
+                    match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            log::error!("Failed to load data for {}: {}", &object.object_key, e);
+                            continue;
+                        }
+                    };
+                drop(connection);
+
+                let file_id = match Path::new(&object.object_key)
+                    .file_stem()
+                    .map(|o| o.to_string_lossy().to_string())
+                {
+                    Some(file_id) => match Uuid::parse_str(&file_id) {
+                        Ok(uuid) => uuid,
+                        Err(e) => {
+                            log::error!(
+                                "Failed to get file stem for object key '{}': {}",
+                                &object.object_key,
+                                e
+                            );
+                            continue;
+                        }
+                    },
+                    None => {
                         log::error!(
-                            "Failed to get file stem for object key '{}': {}",
-                            &object.object_key,
-                            e
+                            "Failed to get file stem for object key '{}'",
+                            &object.object_key
                         );
                         continue;
                     }
-                },
-                None => {
+                };
+
+                if let Err(e) = encode::generate_hls_playlist(
+                    bucket,
+                    object.object_key.clone(),
+                    file_id,
+                    broker,
+                    user,
+                    true,
+                ).await {
                     log::error!(
-                        "Failed to get file stem for object key '{}'",
+                        "Failed HLS transcoding of object {}: {}",
+                        &object.object_key,
+                        e
+                    );
+                    if let Ok(mut connection) = acquire_db_connection().await {
+                        if let Err(e) = diesel::sql_query("UPDATE s3_object SET hls_fail_count = coalesce(hls_fail_count, 0) + 1 WHERE object_key = $1")
+                            .bind::<VarChar, _>(&object.object_key)
+                            .execute(&mut connection).await {
+                                log::error!("Failed to increment hls_fail_count: {e}");
+                            }
+                    }
+                } else {
+                    log::info!(
+                        "Generated missing HLS stream for object {}",
                         &object.object_key
                     );
-                    continue;
                 }
-            };
-
-            if let Err(e) = encode::generate_hls_playlist(
-                bucket,
-                object.object_key.clone(),
-                file_id,
-                broker,
-                user,
-                true,
-            ).await {
-                log::error!(
-                    "Failed HLS transcoding of object {}: {}",
-                    &object.object_key,
-                    e
-                );
-                if let Ok(mut connection) = acquire_db_connection().await {
-                    if let Err(e) = diesel::sql_query("UPDATE s3_object SET hls_fail_count = coalesce(hls_fail_count, 0) + 1 WHERE object_key = $1")
-                        .bind::<VarChar, _>(&object.object_key)
-                        .execute(&mut connection).await {
-                            log::error!("Failed to increment hls_fail_count: {e}");
-                        }
-                }
-            } else {
-                log::info!(
-                    "Generated missing HLS stream for object {}",
-                    &object.object_key
-                );
             }
         }
 
@@ -234,108 +241,114 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
         return Ok(());
     }
     tokio_handle.block_on(async {
-        let mut connection = acquire_db_connection().await?;
-
-        let relevant_objects = run_serializable_transaction(&mut connection, |connection| async move {
-            diesel::sql_query("
-            WITH relevant_s3objects AS(
-                SELECT * FROM s3_object AS obj
-                WHERE NOT thumbnail_disabled
-                AND thumbnail_object_key IS NULL
-                AND (LOWER(mime_type) LIKE 'video/%' OR LOWER(mime_type) LIKE 'image/%' OR LOWER(mime_type) LIKE 'audio/%')
-                AND thumbnail_locked_at IS NULL
-                AND NOT (object_key LIKE 'thumb_%')
-                AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)
-                AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
-                AND NOT EXISTS(SELECT * FROM hls_stream WHERE stream_playlist = obj.object_key OR stream_file = obj.object_key OR master_playlist = obj.object_key)
-                AND (thumbnail_fail_count IS NULL OR thumbnail_fail_count < 3)
-                ORDER BY thumbnail_fail_count ASC NULLS FIRST, creation_timestamp ASC
-                LIMIT 100
-            )
-            UPDATE s3_object SET thumbnail_locked_at = NOW() WHERE thumbnail_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
-        ")
-        .load::<S3Object>(connection)
-        .await
-        .map_err(retry_on_serialization_failure)
-        }.scope_boxed()).await?;
-        drop(connection);
-
-        let _sentinel = LockedObjectsTaskSentinel::new(
-            "thumbnail_locked_at",
-            relevant_objects
-                .iter()
-                .map(|o| o.object_key.clone())
-                .collect::<Vec<_>>(),
-            &tokio_handle,
-        ).await;
-
-        log::info!(
-            "Found {} objects with missing thumbnails",
-            relevant_objects.len()
-        );
-        for object in relevant_objects {
+        loop {
             let mut connection = acquire_db_connection().await?;
 
-            let (bucket, broker, user) =
-                match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection).await {
-                    Ok(res) => res,
-                    Err(e) => {
-                        log::error!("Failed to load data for {}: {}", &object.object_key, e);
-                        continue;
-                    }
-                };
+            let relevant_objects = run_serializable_transaction(&mut connection, |connection| async move {
+                diesel::sql_query("
+                WITH relevant_s3objects AS(
+                    SELECT * FROM s3_object AS obj
+                    WHERE NOT thumbnail_disabled
+                    AND thumbnail_object_key IS NULL
+                    AND (LOWER(mime_type) LIKE 'video/%' OR LOWER(mime_type) LIKE 'image/%' OR LOWER(mime_type) LIKE 'audio/%')
+                    AND thumbnail_locked_at IS NULL
+                    AND NOT (object_key LIKE 'thumb_%')
+                    AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)
+                    AND NOT EXISTS(SELECT * FROM s3_object WHERE thumbnail_object_key = obj.object_key)
+                    AND NOT EXISTS(SELECT * FROM hls_stream WHERE stream_playlist = obj.object_key OR stream_file = obj.object_key OR master_playlist = obj.object_key)
+                    AND (thumbnail_fail_count IS NULL OR thumbnail_fail_count < 3)
+                    ORDER BY thumbnail_fail_count ASC NULLS FIRST, creation_timestamp ASC
+                    LIMIT 100
+                )
+                UPDATE s3_object SET thumbnail_locked_at = NOW() WHERE thumbnail_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
+            ")
+            .load::<S3Object>(connection)
+            .await
+            .map_err(retry_on_serialization_failure)
+            }.scope_boxed()).await?;
             drop(connection);
 
-            let file_id = match Path::new(&object.object_key)
-                .file_stem()
-                .map(|o| o.to_string_lossy().to_string())
-            {
-                Some(file_id) => match Uuid::parse_str(&file_id) {
-                    Ok(uuid) => uuid,
-                    Err(e) => {
+            if relevant_objects.is_empty() {
+                break;
+            }
+
+            let _sentinel = LockedObjectsTaskSentinel::new(
+                "thumbnail_locked_at",
+                relevant_objects
+                    .iter()
+                    .map(|o| o.object_key.clone())
+                    .collect::<Vec<_>>(),
+                &tokio_handle,
+            ).await;
+
+            log::info!(
+                "Found {} objects with missing thumbnails",
+                relevant_objects.len()
+            );
+            for object in relevant_objects {
+                let mut connection = acquire_db_connection().await?;
+
+                let (bucket, broker, user) =
+                    match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            log::error!("Failed to load data for {}: {}", &object.object_key, e);
+                            continue;
+                        }
+                    };
+                drop(connection);
+
+                let file_id = match Path::new(&object.object_key)
+                    .file_stem()
+                    .map(|o| o.to_string_lossy().to_string())
+                {
+                    Some(file_id) => match Uuid::parse_str(&file_id) {
+                        Ok(uuid) => uuid,
+                        Err(e) => {
+                            log::error!(
+                                "Failed to get file stem for object key '{}': {}",
+                                &object.object_key,
+                                e
+                            );
+                            continue;
+                        }
+                    },
+                    None => {
                         log::error!(
-                            "Failed to get file stem for object key '{}': {}",
-                            &object.object_key,
-                            e
+                            "Failed to get file stem for object key '{}'",
+                            &object.object_key
                         );
                         continue;
                     }
-                },
-                None => {
+                };
+
+                if let Err(e) = encode::generate_thumbnail(
+                    bucket,
+                    object.object_key.clone(),
+                    file_id,
+                    object.mime_type,
+                    broker,
+                    user,
+                    true,
+                ).await {
                     log::error!(
-                        "Failed to get file stem for object key '{}'",
+                        "Failed generating thumbnail for object {}: {}",
+                        &object.object_key,
+                        e
+                    );
+                    if let Ok(mut connection) = acquire_db_connection().await {
+                        if let Err(e) = diesel::sql_query("UPDATE s3_object SET thumbnail_fail_count = coalesce(thumbnail_fail_count, 0) + 1 WHERE object_key = $1")
+                            .bind::<VarChar, _>(&object.object_key)
+                            .execute(&mut connection).await {
+                                log::error!("Failed to increment thumbnail_fail_count: {e}");
+                            }
+                    }
+                } else {
+                    log::info!(
+                        "Generated missing thumbnail for object {}",
                         &object.object_key
                     );
-                    continue;
                 }
-            };
-
-            if let Err(e) = encode::generate_thumbnail(
-                bucket,
-                object.object_key.clone(),
-                file_id,
-                object.mime_type,
-                broker,
-                user,
-                true,
-            ).await {
-                log::error!(
-                    "Failed generating thumbnail for object {}: {}",
-                    &object.object_key,
-                    e
-                );
-                if let Ok(mut connection) = acquire_db_connection().await {
-                    if let Err(e) = diesel::sql_query("UPDATE s3_object SET thumbnail_fail_count = coalesce(thumbnail_fail_count, 0) + 1 WHERE object_key = $1")
-                        .bind::<VarChar, _>(&object.object_key)
-                        .execute(&mut connection).await {
-                            log::error!("Failed to increment thumbnail_fail_count: {e}");
-                        }
-                }
-            } else {
-                log::info!(
-                    "Generated missing thumbnail for object {}",
-                    &object.object_key
-                );
             }
         }
 
@@ -439,17 +452,19 @@ pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
         let mut connection = acquire_db_connection().await?;
 
         run_serializable_transaction(&mut connection, |connection| async {
-            diesel::sql_query("UPDATE s3_object SET hls_locked_at = NULL WHERE hls_locked_at < NOW() - interval '1 day'")
+            // clear locks older than 1 hour in case a task failed to release them due to unexpected termination
+            // locks are refreshed every 15 minutes, so locks older than 1 hour should be considered stale
+            diesel::sql_query("UPDATE s3_object SET hls_locked_at = NULL WHERE hls_locked_at < NOW() - interval '1 hour'")
                 .execute(connection)
                 .await
                 .map_err(retry_on_serialization_failure)?;
 
-            diesel::sql_query("UPDATE s3_object SET thumbnail_locked_at = NULL WHERE thumbnail_locked_at < NOW() - interval '1 day'")
+            diesel::sql_query("UPDATE s3_object SET thumbnail_locked_at = NULL WHERE thumbnail_locked_at < NOW() - interval '1 hour'")
                 .execute(connection)
                 .await
                 .map_err(retry_on_serialization_failure)?;
 
-            diesel::sql_query("UPDATE s3_object SET metadata_locked_at = NULL WHERE metadata_locked_at < NOW() - interval '1 day'")
+            diesel::sql_query("UPDATE s3_object SET metadata_locked_at = NULL WHERE metadata_locked_at < NOW() - interval '1 hour'")
                 .execute(connection)
                 .await
                 .map_err(retry_on_serialization_failure)?;
