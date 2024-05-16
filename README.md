@@ -5,6 +5,11 @@ the api server, the react fronted, the postgres server and the nginx reverse pro
 
 To host the filebroker-client frontend it should be installed to `../filebroker-client`.
 
+## Dependencies
+
+* Requires [ffmpeg](https://trac.ffmpeg.org/wiki/CompilationGuide) to generate thumbnails and transcode media, make sure to enable webp using `--enable-libwebp`
+* Requires [exiftool](https://exiftool.org/) for file metadata extraction
+
 ## Setup
 
 The configuration is managed via the `.env` files, which need to be created in the root directory of this project:
