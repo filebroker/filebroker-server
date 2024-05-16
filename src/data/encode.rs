@@ -223,7 +223,8 @@ pub async fn generate_hls_playlist(
     let mut output_reader_join_handles = Vec::new();
 
     #[cfg(unix)]
-    let fifo_dir = tempfile::tempdir().map_err(|e| Error::IoError(e.to_string()))?;
+    let fifo_dir = tempfile::tempdir()
+        .map_err(|e| Error::IoError(format!("Failed to create tempdir: {e}")))?;
 
     for i in 0..=downscaled_bitrates.len() {
         transcode_args.push(String::from("-map"));
@@ -345,7 +346,7 @@ pub async fn generate_hls_playlist(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+        .map_err(|e| Error::FfmpegProcessError(format!("Failed to spawn ffmpeg process: {e}")))
     {
         Ok(process) => process,
         Err(e) => {
@@ -353,14 +354,16 @@ pub async fn generate_hls_playlist(
             for handle in output_reader_join_handles {
                 handle.abort();
             }
-            return Err(Error::FfmpegProcessError(e.to_string()));
+            return Err(Error::FfmpegProcessError(format!(
+                "Error in ffmpeg process: {e}"
+            )));
         }
     };
 
     let process_output = spawn_blocking(|| {
-        process
-            .wait_with_output()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+        process.wait_with_output().map_err(|e| {
+            Error::FfmpegProcessError(format!("Failed to get ffmpeg process output: {e}"))
+        })
     })
     .await;
     let process_output = match process_output {
@@ -395,7 +398,7 @@ pub async fn generate_hls_playlist(
     )
     .await
     {
-        log::error!("Failed to await and persist HLS transcode results to db with error: {}. Going to delete created objects", e.to_string());
+        log::error!("Failed to await and persist HLS transcode results to db with error: {e}. Going to delete created objects");
         // ignore deletion results for files that have never been created
         let _ = bucket
             .delete_object(&format!("{}/master.m3u8", &file_id))
@@ -437,12 +440,12 @@ async fn get_video_resolution(source_object_key: &str, object_url: &str) -> Resu
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+        .map_err(|e| Error::FfmpegProcessError(format!("Failed to spawn ffprobe process: {e}")))?;
 
     let process_output = spawn_blocking(|| {
-        resolution_probe_process
-            .wait_with_output()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+        resolution_probe_process.wait_with_output().map_err(|e| {
+            Error::FfmpegProcessError(format!("Failed to get ffprobe process output: {e}"))
+        })
     })
     .await;
     match process_output {
@@ -501,12 +504,12 @@ async fn media_has_stream(stream: &str, object_url: &str) -> Result<bool, Error>
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+        .map_err(|e| Error::FfmpegProcessError(format!("Failed to spawn ffprobe process: {e}")))?;
 
     let process_output = spawn_blocking(|| {
-        audio_probe_process
-            .wait_with_output()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+        audio_probe_process.wait_with_output().map_err(|e| {
+            Error::FfmpegProcessError(format!("Failed to get ffprobe process output: {e}"))
+        })
     })
     .await;
     match process_output {
@@ -639,12 +642,14 @@ pub async fn generate_thumbnail(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+            .map_err(|e| {
+                Error::FfmpegProcessError(format!("Failed to spawn ffmpeg process: {e}"))
+            })?;
 
         let process_output = spawn_blocking(|| {
-            process
-                .wait_with_output()
-                .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+            process.wait_with_output().map_err(|e| {
+                Error::FfmpegProcessError(format!("Failed to get ffmpeg process output: {e}"))
+            })
         })
         .await?;
 
@@ -851,7 +856,7 @@ pub async fn load_object_metadata(
             .arg(cloned_object_url)
             .stdout(Stdio::piped())
             .spawn()
-            .map_err(|e| Error::ChildProcessError(e.to_string()))?;
+            .map_err(|e| Error::ChildProcessError(format!("Failed to spawn curl process: {e}")))?;
         let exif_proc = Command::new("exiftool")
             .arg("-j")
             .arg("--struct")
@@ -865,11 +870,13 @@ pub async fn load_object_metadata(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| Error::ChildProcessError(e.to_string()))?;
+            .map_err(|e| {
+                Error::ChildProcessError(format!("Failed to spawn exiftool process: {e}"))
+            })?;
 
-        exif_proc
-            .wait_with_output()
-            .map_err(|e| Error::ChildProcessError(e.to_string()))
+        exif_proc.wait_with_output().map_err(|e| {
+            Error::ChildProcessError(format!("Failed to get exiftool process output: {e}"))
+        })
     })
     .await?;
 
@@ -939,12 +946,14 @@ pub async fn load_object_metadata(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+            .map_err(|e| {
+                Error::FfmpegProcessError(format!("Failed to spawn ffprobe process: {e}"))
+            })?;
 
         let ffprobe_proc_output = spawn_blocking(|| {
-            ffprobe_proc
-                .wait_with_output()
-                .map_err(|e| Error::FfmpegProcessError(e.to_string()))
+            ffprobe_proc.wait_with_output().map_err(|e| {
+                Error::FfmpegProcessError(format!("Failed to get ffprobe process output: {e}"))
+            })
         })
         .await?;
 
@@ -1382,7 +1391,7 @@ async fn get_object_duration(object_url: &str) -> Result<ObjectDuration, Error> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| Error::FfmpegProcessError(e.to_string()))?;
+        .map_err(|e| Error::FfmpegProcessError(format!("Failed to spawn ffprobe process: {e}")))?;
     let ffprobe_output = spawn_blocking(|| {
         process
             .wait_with_output()
@@ -1427,12 +1436,12 @@ fn spawn_hls_output_reader(
         .path()
         .join(hls_stream.stream_file.split('/').last().unwrap());
     nix::unistd::mkfifo(&hls_stream_pipe, nix::sys::stat::Mode::S_IRWXU)
-        .map_err(|e| Error::IoError(e.to_string()))?;
+        .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
     let hls_playlist_pipe = fifo_dir
         .path()
         .join(hls_stream.stream_playlist.split('/').last().unwrap());
     nix::unistd::mkfifo(&hls_playlist_pipe, nix::sys::stat::Mode::S_IRWXU)
-        .map_err(|e| Error::IoError(e.to_string()))?;
+        .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
 
     let join_handle = tokio::spawn(async move {
         let stream_file_target_path = hls_stream.stream_file.clone();
@@ -1503,7 +1512,7 @@ fn spawn_hls_master_playlist_reader(
         .path()
         .join(master_playlist_path.split('/').last().unwrap());
     nix::unistd::mkfifo(&master_playlist_pipe, nix::sys::stat::Mode::S_IRWXU)
-        .map_err(|e| Error::IoError(e.to_string()))?;
+        .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
 
     let join_handle = tokio::spawn(async move {
         let res = upload_tokio_file(
@@ -1553,13 +1562,13 @@ fn upload_tokio_file(
 ) -> impl futures::Future<Output = Result<S3UploadResult, Error>> {
     use futures::TryFutureExt;
     tokio::fs::File::open(file_path)
-        .map_err(|e| Error::IoError(e.to_string()))
+        .map_err(|e| Error::IoError(format!("Failed to open pipe file: {e}")))
         .and_then(|f| async move {
             let mut reader = ByteCountingTokioFileReader::new(f);
-            log::debug!("Beginning upload for HLS stream or file {}", &s3_path);
+            log::debug!("Beginning upload for HLS stream for file {s3_path}");
             let res = bucket
                 .put_object_stream_with_content_type(&mut reader, &s3_path, &content_type)
-                .map_err(|e| Error::S3Error(e.to_string()))
+                .map_err(|e| Error::S3Error(format!("Failed to upload file '{s3_path}': {e}")))
                 .await?;
 
             Ok(S3UploadResult {
