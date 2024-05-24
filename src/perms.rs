@@ -14,13 +14,14 @@ use crate::{
     diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension},
     error::{Error, TransactionRuntimeError},
     model::{
-        Broker, NewUserGroup, Post, PostCollection, PostCollectionItem, S3Object, User, UserGroup,
+        Broker, NewUserGroup, Post, PostCollection, PostCollectionItem, S3Object, S3ObjectMetadata,
+        User, UserGroup,
     },
     run_retryable_transaction,
     schema::{
         self, broker, broker_access, post, post_collection, post_collection_group_access,
-        post_collection_item, post_group_access, registered_user, s3_object, user_group,
-        user_group_membership,
+        post_collection_item, post_group_access, registered_user, s3_object, s3_object_metadata,
+        user_group, user_group_membership,
     },
 };
 
@@ -156,7 +157,8 @@ pub(crate) use get_group_access_write_condition;
 pub struct PostJoined {
     pub post: Post,
     pub create_user: User,
-    pub s3_object: Option<S3Object>,
+    pub s3_object: S3Object,
+    pub s3_object_metadata: S3ObjectMetadata,
 }
 
 pub struct PostCollectionJoined {
@@ -180,7 +182,10 @@ pub async fn load_post_secured(
     let user_pk = user.map(|u| u.pk);
     post::table
         .inner_join(registered_user::table)
-        .left_join(s3_object::table)
+        .inner_join(s3_object::table)
+        .inner_join(
+            s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
+        )
         .filter(
             post::pk.eq(post_pk).and(
                 post::fk_create_user
@@ -197,7 +202,7 @@ pub async fn load_post_secured(
                     ))),
             ),
         )
-        .get_result::<(Post, User, Option<S3Object>)>(connection)
+        .get_result::<(Post, User, S3Object, S3ObjectMetadata)>(connection)
         .await
         .optional()?
         .ok_or(Error::InaccessibleObjectError(post_pk))
@@ -205,6 +210,7 @@ pub async fn load_post_secured(
             post: tuple.0,
             create_user: tuple.1,
             s3_object: tuple.2,
+            s3_object_metadata: tuple.3,
         })
 }
 
@@ -234,9 +240,8 @@ pub async fn load_post_collection_item_secured(
             post_create_user
                 .on(post::fk_create_user.eq(post_create_user.field(registered_user::pk))),
         )
-        .left_join(
-            post_s3_object
-                .on(post::s3_object.eq(post_s3_object.field(s3_object::object_key).nullable())),
+        .inner_join(
+            post_s3_object.on(post::s3_object.eq(post_s3_object.field(s3_object::object_key))),
         )
         .inner_join(
             post_collection::table
@@ -252,6 +257,11 @@ pub async fn load_post_collection_item_secured(
                     .field(s3_object::object_key)
                     .nullable(),
             )),
+        )
+        .inner_join(
+            s3_object_metadata::table.on(post_s3_object
+                .field(s3_object::object_key)
+                .eq(s3_object_metadata::object_key)),
         )
         .filter(
             post_collection_item::pk
@@ -291,10 +301,11 @@ pub async fn load_post_collection_item_secured(
             User,
             Post,
             User,
-            Option<S3Object>,
+            S3Object,
             PostCollection,
             User,
             Option<S3Object>,
+            S3ObjectMetadata,
         )>(connection)
         .await
         .optional()?
@@ -306,6 +317,7 @@ pub async fn load_post_collection_item_secured(
                 post: tuple.2,
                 create_user: tuple.3,
                 s3_object: tuple.4,
+                s3_object_metadata: tuple.8,
             },
             post_collection: PostCollectionJoined {
                 post_collection: tuple.5,
@@ -323,7 +335,10 @@ pub async fn load_posts_secured(
     let user_pk = user.map(|u| u.pk);
     let results = post::table
         .inner_join(registered_user::table)
-        .left_join(s3_object::table)
+        .inner_join(s3_object::table)
+        .inner_join(
+            s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
+        )
         .filter(
             post::pk.eq_any(post_pks).and(
                 post::fk_create_user
@@ -340,7 +355,7 @@ pub async fn load_posts_secured(
                     ))),
             ),
         )
-        .load::<(Post, User, Option<S3Object>)>(connection)
+        .load::<(Post, User, S3Object, S3ObjectMetadata)>(connection)
         .await?;
 
     let found_pks = results.iter().map(|res| res.0.pk).collect::<HashSet<_>>();
@@ -356,6 +371,7 @@ pub async fn load_posts_secured(
                 post: tuple.0,
                 create_user: tuple.1,
                 s3_object: tuple.2,
+                s3_object_metadata: tuple.3,
             })
             .collect::<Vec<_>>())
     } else {
@@ -403,6 +419,7 @@ pub struct PostJoinedS3Object {
     pub post: Post,
     pub create_user: User,
     pub s3_object: S3Object,
+    pub s3_object_metadata: S3ObjectMetadata,
 }
 
 pub async fn load_s3_object_posts(
@@ -413,6 +430,9 @@ pub async fn load_s3_object_posts(
     post::table
         .inner_join(registered_user::table)
         .inner_join(s3_object::table)
+        .inner_join(
+            s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
+        )
         .filter(
             post::s3_object.eq(s3_object_key).and(
                 post::fk_create_user
@@ -429,7 +449,7 @@ pub async fn load_s3_object_posts(
                     ))),
             ),
         )
-        .load::<(Post, User, S3Object)>(connection)
+        .load::<(Post, User, S3Object, S3ObjectMetadata)>(connection)
         .await
         .map_err(|e| Error::QueryError(e.to_string()))
         .map(|tuples| {
@@ -439,6 +459,7 @@ pub async fn load_s3_object_posts(
                     post: tuple.0,
                     create_user: tuple.1,
                     s3_object: tuple.2,
+                    s3_object_metadata: tuple.3,
                 })
                 .collect::<Vec<_>>()
         })

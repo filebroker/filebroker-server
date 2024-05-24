@@ -6,15 +6,16 @@ use std::{
     sync::Arc,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use diesel::{
-    sql_types::VarChar, BoolExpressionMethods, NullableExpressionMethods, OptionalExtension,
-    QueryDsl,
+    sql_types::{Text, VarChar},
+    BoolExpressionMethods, NullableExpressionMethods, OptionalExtension, QueryDsl,
 };
 use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
 use futures::{future::try_join_all, ready};
 use itertools::Itertools;
 use pin_project::pin_project;
+use regex::Regex;
 use rusty_pool::ThreadPool;
 use s3::Bucket;
 use serde::Deserialize;
@@ -30,7 +31,9 @@ use crate::{
     acquire_db_connection,
     diesel::ExpressionMethods,
     error::Error,
-    model::{Broker, HlsStream, S3Object, S3ObjectMetadata, User},
+    model::{
+        Broker, HlsStream, PgIntervalQuery, PgIntervalWrapper, S3Object, S3ObjectMetadata, User,
+    },
     query::functions::substring,
     retry_on_serialization_failure, run_retryable_transaction,
     schema::{hls_stream, post, s3_object, s3_object_metadata},
@@ -102,6 +105,9 @@ lazy_static! {
     };
     pub static ref SUBMITTED_HLS_TRANSCODINGS: parking_lot::Mutex<HashSet<String>> =
         parking_lot::Mutex::new(HashSet::new());
+    pub static ref EXIF_DATE_FORMAT_REGEX: Regex =
+        Regex::new(r"(\d+):(\d+):(\d+) (\d+):(\d+)(:\d+)?(\+\d+:\d+)?")
+            .expect("Failed to compile EXIF date format regex");
 }
 
 async fn spawn_blocking<R: Send + 'static>(
@@ -753,7 +759,7 @@ struct ExifToolOutput {
     album: Option<String>,
     #[serde(rename = "Genre")]
     genre: Option<String>,
-    #[serde(rename = "CreateDate")]
+    #[serde(rename = "CreateDate", alias = "DateTimeOriginal")]
     date: Option<String>,
     #[serde(rename = "Albumartist")]
     album_artist: Option<String>,
@@ -779,7 +785,7 @@ struct ExifToolOutput {
     height: Option<i32>,
     #[serde(rename = "VideoFrameRate")]
     frame_rate: Option<f64>,
-    #[serde(rename = "AudioSampleRate")]
+    #[serde(rename = "AudioSampleRate", alias = "SampleRate")]
     audio_sample_rate: Option<f64>,
     #[serde(rename = "AudioChannels")]
     audio_channels: Option<i32>,
@@ -828,7 +834,7 @@ pub async fn load_object_metadata(
     } else {
         match LockedObjectTaskSentinel::new_with_condition(
             "metadata_locked_at",
-            "NOT EXISTS(SELECT * FROM s3_object_metadata WHERE object_key = s3_object.object_key)",
+            "NOT EXISTS(SELECT * FROM s3_object_metadata WHERE object_key = s3_object.object_key AND loaded)",
             source_object_key.clone(),
         )
         .await?
@@ -1060,7 +1066,42 @@ pub async fn load_object_metadata(
         })?
     };
 
+    let date = exif_output
+        .date
+        .as_ref()
+        .map(|d| {
+            let postgres_date = EXIF_DATE_FORMAT_REGEX
+                .replace(d, "$1-$2-$3 $4:$5$6$7")
+                .to_string();
+            let parsed_date = DateTime::parse_from_str(&postgres_date, "%Y-%m-%d %H:%M:%S%.f%#z")?;
+            Ok(parsed_date.with_timezone(&Utc))
+        })
+        .map_or(Ok(None), |v| v.map(Some))
+        .map_err(|e: chrono::ParseError| {
+            Error::ChildProcessError(format!(
+                "Failed to parse date '{:?}' from exiftool output: {e}",
+                &exif_output.date
+            ))
+        })?;
+
     let mut connection = acquire_db_connection().await?;
+
+    let duration = if let Some(ref duration_str) = exif_output.duration {
+        let pg_interval = diesel::sql_query("SELECT $1::interval AS pg_interval")
+            .bind::<Text, _>(duration_str)
+            .get_result::<PgIntervalQuery>(&mut connection)
+            .await
+            .map_err(|e| {
+                Error::ChildProcessError(format!(
+                    "Failed to cast duration '{:?}' to postgres interval: {e}",
+                    &exif_output.duration
+                ))
+            })?;
+        Some(pg_interval.interval)
+    } else {
+        None
+    };
+
     let s3_object_metadata = run_retryable_transaction(&mut connection, |connection| {
         async move {
             let object = s3_object::table
@@ -1068,41 +1109,47 @@ pub async fn load_object_metadata(
                 .get_result::<S3Object>(connection)
                 .await?;
 
+            let metadata_to_insert = S3ObjectMetadata {
+                object_key: object.object_key,
+                file_type: exif_output.file_type,
+                file_type_extension: exif_output.file_type_extension,
+                mime_type: exif_output.mime_type.or(Some(object.mime_type)),
+                title: exif_output.title,
+                artist: exif_output.artist,
+                album: exif_output.album,
+                album_artist: exif_output.album_artist,
+                composer: exif_output.composer,
+                genre: exif_output.genre,
+                date,
+                track_number: exif_output.track_number,
+                disc_number: exif_output.disc_number,
+                duration: duration.map(PgIntervalWrapper),
+                width: exif_output.width,
+                height: exif_output.height,
+                size: size.or(Some(object.size_bytes)),
+                bit_rate,
+                format_name,
+                format_long_name,
+                video_stream_count,
+                video_codec_name,
+                video_codec_long_name,
+                video_frame_rate: exif_output.frame_rate,
+                video_bit_rate_max,
+                audio_stream_count,
+                audio_codec_name,
+                audio_codec_long_name,
+                audio_sample_rate: exif_output.audio_sample_rate,
+                audio_channels: exif_output.audio_channels,
+                audio_bit_rate_max,
+                raw,
+                loaded: true,
+            };
+
             let s3_object_metadata = diesel::insert_into(s3_object_metadata::table)
-                .values(S3ObjectMetadata {
-                    object_key: object.object_key,
-                    file_type: exif_output.file_type,
-                    file_type_extension: exif_output.file_type_extension,
-                    mime_type: exif_output.mime_type.or(Some(object.mime_type)),
-                    title: exif_output.title,
-                    artist: exif_output.artist,
-                    album: exif_output.album,
-                    album_artist: exif_output.album_artist,
-                    composer: exif_output.composer,
-                    genre: exif_output.genre,
-                    date: exif_output.date,
-                    track_number: exif_output.track_number,
-                    disc_number: exif_output.disc_number,
-                    duration: exif_output.duration,
-                    width: exif_output.width,
-                    height: exif_output.height,
-                    size: size.or(Some(object.size_bytes)),
-                    bit_rate,
-                    format_name,
-                    format_long_name,
-                    video_stream_count,
-                    video_codec_name,
-                    video_codec_long_name,
-                    video_frame_rate: exif_output.frame_rate,
-                    video_bit_rate_max,
-                    audio_stream_count,
-                    audio_codec_name,
-                    audio_codec_long_name,
-                    audio_sample_rate: exif_output.audio_sample_rate,
-                    audio_channels: exif_output.audio_channels,
-                    audio_bit_rate_max,
-                    raw,
-                })
+                .values(&metadata_to_insert)
+                .on_conflict(s3_object_metadata::object_key)
+                .do_update()
+                .set(&metadata_to_insert)
                 .get_result::<S3ObjectMetadata>(connection)
                 .await?;
 

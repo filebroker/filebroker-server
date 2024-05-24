@@ -95,7 +95,7 @@ diesel::table! {
         fk_create_user -> Int8,
         score -> Int4,
         #[max_length = 255]
-        s3_object -> Nullable<Varchar>,
+        s3_object -> Varchar,
         #[max_length = 2048]
         thumbnail_url -> Nullable<Varchar>,
         public -> Bool,
@@ -235,10 +235,10 @@ diesel::table! {
         album_artist -> Nullable<Text>,
         composer -> Nullable<Text>,
         genre -> Nullable<Text>,
-        date -> Nullable<Text>,
+        date -> Nullable<Timestamptz>,
         track_number -> Nullable<Text>,
         disc_number -> Nullable<Text>,
-        duration -> Nullable<Text>,
+        duration -> Nullable<Interval>,
         width -> Nullable<Int4>,
         height -> Nullable<Int4>,
         size -> Nullable<Int8>,
@@ -257,6 +257,7 @@ diesel::table! {
         audio_channels -> Nullable<Int4>,
         audio_bit_rate_max -> Nullable<Int8>,
         raw -> Jsonb,
+        loaded -> Bool,
     }
 }
 

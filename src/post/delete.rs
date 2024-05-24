@@ -117,7 +117,7 @@ pub async fn delete_posts_handler(
                 let deleted_objects = if request.delete_unreferenced_objects.unwrap_or(true) {
                     let s3_object_keys_to_del = deleted_posts
                         .iter()
-                        .filter_map(|post| post.s3_object.as_ref())
+                        .map(|post| &post.s3_object)
                         .collect::<Vec<_>>();
                     if !s3_object_keys_to_del.is_empty() {
                         delete_unreferenced_objects(&s3_object_keys_to_del, &user, connection)
@@ -157,9 +157,9 @@ async fn delete_unreferenced_objects(
         .filter(
             s3_object::object_key
                 .eq_any(object_keys)
-                .and(not(exists(post::table.filter(
-                    post::s3_object.eq(s3_object::object_key.nullable()),
-                ))))
+                .and(not(exists(
+                    post::table.filter(post::s3_object.eq(s3_object::object_key)),
+                )))
                 .and(not(exists(post_collection::table.filter(
                     post_collection::poster_object_key.eq(s3_object::object_key.nullable()),
                 )))),

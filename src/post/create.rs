@@ -11,7 +11,8 @@ use crate::{
     error::{Error, TransactionRuntimeError},
     model::{
         NewPost, NewPostCollection, NewPostCollectionItem, Post, PostCollection,
-        PostCollectionGroupAccess, PostCollectionTag, PostGroupAccess, PostTag, S3Object, User,
+        PostCollectionGroupAccess, PostCollectionTag, PostGroupAccess, PostTag, S3Object,
+        S3ObjectMetadata, User,
     },
     perms,
     query::{self, report_missing_pks, PostCollectionDetailed, PostDetailed},
@@ -171,17 +172,12 @@ pub async fn create_post_handler(
                 .map_err(Error::from)?;
             let is_editable = post.is_editable(Some(&user), connection).await?;
             let is_deletable = post.is_deletable(Some(&user), connection).await?;
-            let s3_object = if let Some(ref s3_object_key) = post.s3_object {
-                Some(
-                    s3_object::table
-                        .filter(s3_object::object_key.eq(s3_object_key))
-                        .get_result::<S3Object>(connection)
-                        .await
-                        .map_err(Error::from)?,
-                )
-            } else {
-                None
-            };
+            let (s3_object, s3_object_metadata) = s3_object::table
+                .filter(s3_object::object_key.eq(&post.s3_object))
+                .inner_join(s3_object_metadata::table)
+                .get_result::<(S3Object, S3ObjectMetadata)>(connection)
+                .await
+                .map_err(Error::from)?;
 
             Ok(warp::reply::json(&PostDetailed {
                 pk: post.pk,
@@ -192,6 +188,7 @@ pub async fn create_post_handler(
                 create_user,
                 score: post.score,
                 s3_object,
+                s3_object_metadata,
                 thumbnail_url: post.thumbnail_url,
                 prev_post: None,
                 next_post: None,

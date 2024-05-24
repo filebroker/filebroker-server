@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 use warp::{Rejection, Reply};
 
-use crate::model::{PostCollectionFull, PostCollectionItemQueryObject, PostCollectionQueryObject};
+use crate::model::{
+    PostCollectionFull, PostCollectionItemQueryObject, PostCollectionQueryObject, S3ObjectMetadata,
+};
 use crate::perms::{PostCollectionItemJoined, PostCollectionJoined};
 use crate::post::PostCollectionGroupAccessDetailed;
 use crate::{
@@ -124,7 +126,7 @@ pub struct QueryParameters {
     pub select_statements: Vec<String>,
     pub join_statements: Vec<String>,
     pub max_limit: u32,
-    pub fallback_ordering: Ordering,
+    pub fallback_orderings: Vec<Ordering>,
     pub from_table_override: Option<&'static str>,
     pub predefined_where_conditions: Option<Vec<String>>,
 }
@@ -134,6 +136,7 @@ pub struct Ordering {
     pub expression: String,
     pub direction: Direction,
     pub nullable: bool,
+    pub table: &'static str,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -237,7 +240,8 @@ pub struct PostDetailed {
     pub creation_timestamp: DateTime<Utc>,
     pub create_user: User,
     pub score: i32,
-    pub s3_object: Option<S3Object>,
+    pub s3_object: S3Object,
+    pub s3_object_metadata: S3ObjectMetadata,
     pub thumbnail_url: Option<String>,
     pub prev_post: Option<PostWindowObject>,
     pub next_post: Option<PostWindowObject>,
@@ -331,6 +335,7 @@ pub async fn get_post_handler(
         post,
         create_user,
         s3_object,
+        s3_object_metadata,
     } = post;
 
     let page = query_parameters_filter.page;
@@ -409,6 +414,7 @@ pub async fn get_post_handler(
         create_user,
         score: post.score,
         s3_object,
+        s3_object_metadata,
         thumbnail_url: post.thumbnail_url,
         prev_post,
         next_post,
@@ -572,10 +578,12 @@ async fn get_search_result<
     max_limit: u32,
     connection: &mut AsyncPgConnection,
 ) -> Result<SearchResult, Error> {
+    let instant = std::time::Instant::now();
     let objects = diesel::sql_query(sql_query)
         .load::<T>(connection)
         .await
         .map_err(|e| Error::QueryError(e.to_string()))?;
+    log::debug!("Query took {}ms", instant.elapsed().as_millis());
 
     T::get_search_result(objects, max_limit)
 }
@@ -650,19 +658,61 @@ fn prepare_query_parameters(
                 String::from("s3_object.hls_fail_count AS post_s3_object_hls_fail_count"),
                 String::from("s3_object.thumbnail_fail_count AS post_s3_object_thumbnail_fail_count"),
                 String::from("s3_object.thumbnail_disabled AS post_s3_object_thumbnail_disabled"),
+                String::from("s3_object_metadata.object_key AS post_s3_object_metadata_object_key"),
+                String::from("s3_object_metadata.file_type AS post_s3_object_metadata_file_type"),
+                String::from("s3_object_metadata.file_type_extension AS post_s3_object_metadata_file_type_extension"),
+                String::from("s3_object_metadata.mime_type AS post_s3_object_metadata_mime_type"),
+                String::from("s3_object_metadata.title AS post_s3_object_metadata_title"),
+                String::from("s3_object_metadata.artist AS post_s3_object_metadata_artist"),
+                String::from("s3_object_metadata.album AS post_s3_object_metadata_album"),
+                String::from("s3_object_metadata.album_artist AS post_s3_object_metadata_album_artist"),
+                String::from("s3_object_metadata.composer AS post_s3_object_metadata_composer"),
+                String::from("s3_object_metadata.genre AS post_s3_object_metadata_genre"),
+                String::from("s3_object_metadata.date AS post_s3_object_metadata_date"),
+                String::from("s3_object_metadata.track_number AS post_s3_object_metadata_track_number"),
+                String::from("s3_object_metadata.disc_number AS post_s3_object_metadata_disc_number"),
+                String::from("s3_object_metadata.duration::varchar AS post_s3_object_metadata_duration"),
+                String::from("s3_object_metadata.width AS post_s3_object_metadata_width"),
+                String::from("s3_object_metadata.height AS post_s3_object_metadata_height"),
+                String::from("s3_object_metadata.size AS post_s3_object_metadata_size"),
+                String::from("s3_object_metadata.bit_rate AS post_s3_object_metadata_bit_rate"),
+                String::from("s3_object_metadata.format_name AS post_s3_object_metadata_format_name"),
+                String::from("s3_object_metadata.format_long_name AS post_s3_object_metadata_format_long_name"),
+                String::from("s3_object_metadata.video_stream_count AS post_s3_object_metadata_video_stream_count"),
+                String::from("s3_object_metadata.video_codec_name AS post_s3_object_metadata_video_codec_name"),
+                String::from("s3_object_metadata.video_codec_long_name AS post_s3_object_metadata_video_codec_long_name"),
+                String::from("s3_object_metadata.video_frame_rate AS post_s3_object_metadata_video_frame_rate"),
+                String::from("s3_object_metadata.video_bit_rate_max AS post_s3_object_metadata_video_bit_rate_max"),
+                String::from("s3_object_metadata.audio_stream_count AS post_s3_object_metadata_audio_stream_count"),
+                String::from("s3_object_metadata.audio_codec_name AS post_s3_object_metadata_audio_codec_name"),
+                String::from("s3_object_metadata.audio_codec_long_name AS post_s3_object_metadata_audio_codec_long_name"),
+                String::from("s3_object_metadata.audio_sample_rate AS post_s3_object_metadata_audio_sample_rate"),
+                String::from("s3_object_metadata.audio_channels AS post_s3_object_metadata_audio_channels"),
+                String::from("s3_object_metadata.audio_bit_rate_max AS post_s3_object_metadata_audio_bit_rate_max"),
+                String::from("s3_object_metadata.raw AS post_s3_object_metadata_raw"),
             ],
             join_statements: vec![
-                String::from("LEFT JOIN s3_object ON s3_object.object_key = post.s3_object"),
+                String::from("INNER JOIN s3_object ON s3_object.object_key = post.s3_object"),
+                String::from("INNER JOIN s3_object_metadata ON s3_object_metadata.object_key = post.s3_object"),
                 String::from(
                     "INNER JOIN registered_user create_user ON create_user.pk = post.fk_create_user",
                 ),
             ],
             max_limit: MAX_LIMIT,
-            fallback_ordering: Ordering {
-                expression: String::from("post.pk"),
-                direction: Direction::Descending,
-                nullable: false,
-            },
+            fallback_orderings: vec![
+                Ordering {
+                    expression: String::from("post.pk"),
+                    direction: Direction::Descending,
+                    nullable: false,
+                    table: "post",
+                },
+                Ordering {
+                    expression: String::from("s3_object_metadata.object_key"),
+                    direction: Direction::Ascending,
+                    nullable: false,
+                    table: "s3_object_metadata",
+                },
+            ],
             from_table_override: None,
             predefined_where_conditions: None,
         }),
@@ -713,11 +763,12 @@ fn prepare_query_parameters(
                 String::from("INNER JOIN registered_user create_user ON create_user.pk = post_collection.fk_create_user"),
             ],
             max_limit: MAX_LIMIT,
-            fallback_ordering: Ordering {
+            fallback_orderings: vec![Ordering {
                 expression: String::from("post_collection.pk"),
                 direction: Direction::Descending,
                 nullable: false,
-            },
+                table: "post_collection",
+            }],
             from_table_override: None,
             predefined_where_conditions: None,
         }),
@@ -779,6 +830,38 @@ fn prepare_query_parameters(
                 String::from("post_s3_object.hls_fail_count AS post_s3_object_hls_fail_count"),
                 String::from("post_s3_object.thumbnail_fail_count AS post_s3_object_thumbnail_fail_count"),
                 String::from("post_s3_object.thumbnail_disabled AS post_s3_object_thumbnail_disabled"),
+                String::from("s3_object_metadata.object_key AS post_s3_object_metadata_object_key"),
+                String::from("s3_object_metadata.file_type AS post_s3_object_metadata_file_type"),
+                String::from("s3_object_metadata.file_type_extension AS post_s3_object_metadata_file_type_extension"),
+                String::from("s3_object_metadata.mime_type AS post_s3_object_metadata_mime_type"),
+                String::from("s3_object_metadata.title AS post_s3_object_metadata_title"),
+                String::from("s3_object_metadata.artist AS post_s3_object_metadata_artist"),
+                String::from("s3_object_metadata.album AS post_s3_object_metadata_album"),
+                String::from("s3_object_metadata.album_artist AS post_s3_object_metadata_album_artist"),
+                String::from("s3_object_metadata.composer AS post_s3_object_metadata_composer"),
+                String::from("s3_object_metadata.genre AS post_s3_object_metadata_genre"),
+                String::from("s3_object_metadata.date AS post_s3_object_metadata_date"),
+                String::from("s3_object_metadata.track_number AS post_s3_object_metadata_track_number"),
+                String::from("s3_object_metadata.disc_number AS post_s3_object_metadata_disc_number"),
+                String::from("s3_object_metadata.duration::varchar AS post_s3_object_metadata_duration"),
+                String::from("s3_object_metadata.width AS post_s3_object_metadata_width"),
+                String::from("s3_object_metadata.height AS post_s3_object_metadata_height"),
+                String::from("s3_object_metadata.size AS post_s3_object_metadata_size"),
+                String::from("s3_object_metadata.bit_rate AS post_s3_object_metadata_bit_rate"),
+                String::from("s3_object_metadata.format_name AS post_s3_object_metadata_format_name"),
+                String::from("s3_object_metadata.format_long_name AS post_s3_object_metadata_format_long_name"),
+                String::from("s3_object_metadata.video_stream_count AS post_s3_object_metadata_video_stream_count"),
+                String::from("s3_object_metadata.video_codec_name AS post_s3_object_metadata_video_codec_name"),
+                String::from("s3_object_metadata.video_codec_long_name AS post_s3_object_metadata_video_codec_long_name"),
+                String::from("s3_object_metadata.video_frame_rate AS post_s3_object_metadata_video_frame_rate"),
+                String::from("s3_object_metadata.video_bit_rate_max AS post_s3_object_metadata_video_bit_rate_max"),
+                String::from("s3_object_metadata.audio_stream_count AS post_s3_object_metadata_audio_stream_count"),
+                String::from("s3_object_metadata.audio_codec_name AS post_s3_object_metadata_audio_codec_name"),
+                String::from("s3_object_metadata.audio_codec_long_name AS post_s3_object_metadata_audio_codec_long_name"),
+                String::from("s3_object_metadata.audio_sample_rate AS post_s3_object_metadata_audio_sample_rate"),
+                String::from("s3_object_metadata.audio_channels AS post_s3_object_metadata_audio_channels"),
+                String::from("s3_object_metadata.audio_bit_rate_max AS post_s3_object_metadata_audio_bit_rate_max"),
+                String::from("s3_object_metadata.raw AS post_s3_object_metadata_raw"),
                 // collection data
                 String::from("post_collection.pk AS post_collection_pk"),
                 String::from("post_collection.title AS post_collection_title"),
@@ -816,17 +899,19 @@ fn prepare_query_parameters(
                 String::from("INNER JOIN post ON post_collection_item.fk_post = post.pk"),
                 String::from("INNER JOIN post_collection ON post_collection_item.fk_post_collection = post_collection.pk"),
                 String::from("INNER JOIN registered_user post_collection_item_added_user ON post_collection_item.fk_added_by = post_collection_item_added_user.pk"),
-                String::from("LEFT JOIN s3_object post_s3_object ON post_s3_object.object_key = post.s3_object"),
+                String::from("INNER JOIN s3_object post_s3_object ON post_s3_object.object_key = post.s3_object"),
+                String::from("INNER JOIN s3_object_metadata ON s3_object_metadata.object_key = post.s3_object"),
                 String::from("INNER JOIN registered_user post_create_user ON post_create_user.pk = post.fk_create_user"),
                 String::from("LEFT JOIN s3_object AS poster_object ON poster_object.object_key = post_collection.poster_object_key"),
                 String::from("INNER JOIN registered_user post_collection_create_user ON post_collection_create_user.pk = post_collection.fk_create_user"),
             ],
             max_limit: MAX_LIMIT,
-            fallback_ordering: Ordering {
+            fallback_orderings: vec![Ordering {
                 expression: String::from("post_collection_item.ordinal"),
                 direction: Direction::Ascending,
                 nullable: false,
-            },
+                table: "post_collection_item",
+            }],
             from_table_override: Some("post_collection_item"),
             predefined_where_conditions: Some(vec![format!("post_collection_item.fk_post_collection = {collection_pk}")]),
         }),
@@ -874,7 +959,7 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
 
     let mut log = Log { errors: Vec::new() };
     let query_len = request.query.len();
-    let ast = match compiler::compile_ast(request.query, &mut log, false) {
+    let mut ast = match compiler::compile_ast(request.query, &mut log, false) {
         Ok(ast) => ast,
         Err(Error::QueryCompilationError(phase, errors)) => {
             return Ok(warp::reply::json(&AnalyzeQueryResponse {

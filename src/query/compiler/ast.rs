@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt::Debug};
 
 use downcast_rs::{impl_downcast, Downcast};
+use lazy_static::lazy_static;
 
 use crate::query::{Direction, Ordering, QueryParameters};
 
@@ -125,6 +126,14 @@ impl Operator {
             Self::LessEqual if both_of_type_or_null(left, right, Type::Number) => {
                 Some(Type::Boolean)
             }
+            Self::Greater if both_of_type_or_null(left, right, Type::String) => Some(Type::Boolean),
+            Self::GreaterEqual if both_of_type_or_null(left, right, Type::String) => {
+                Some(Type::Boolean)
+            }
+            Self::Less if both_of_type_or_null(left, right, Type::String) => Some(Type::Boolean),
+            Self::LessEqual if both_of_type_or_null(left, right, Type::String) => {
+                Some(Type::Boolean)
+            }
             Self::Minus if both_of_type_or_null(left, right, Type::Number) => Some(Type::Number),
             Self::Modulo if both_of_type_or_null(left, right, Type::Number) => Some(Type::Number),
             // Not is a unary operator only
@@ -147,9 +156,24 @@ impl Operator {
             {
                 Some(Type::Boolean)
             }
+            // allow interval to string comparisons (validated in #visit_binary_expression_node)
+            Self::Greater
+            | Self::GreaterEqual
+            | Self::Less
+            | Self::LessEqual
+            | Self::Equal
+            | Self::Unequal
+                if (is_type_or_null(left, Type::Interval)
+                    || is_type_or_null(left, Type::String))
+                    && (is_type_or_null(right, Type::Interval)
+                        || is_type_or_null(right, Type::String)) =>
+            {
+                Some(Type::Boolean)
+            }
             // allow date interval additions and subtractions (validated in #visit_binary_expression_node)
             Self::Minus | Self::Plus
-                if (left == Type::Date || left == Type::DateTime) && right == Type::String =>
+                if (left == Type::Date || left == Type::DateTime || left == Type::Interval)
+                    && (right == Type::String || right == Type::Interval) =>
             {
                 Some(left)
             }
@@ -186,7 +210,7 @@ fn both_of_type_or_null(l: Type, r: Type, t: Type) -> bool {
 pub trait Visitor {
     fn visit_query_node(
         &mut self,
-        query_node: &QueryNode,
+        query_node: &mut QueryNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -194,7 +218,7 @@ pub trait Visitor {
 
     fn visit_expression_statement(
         &mut self,
-        expression_statement: &ExpressionStatement,
+        expression_statement: &mut ExpressionStatement,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -202,14 +226,14 @@ pub trait Visitor {
 
     fn visit_post_tag_node(
         &mut self,
-        post_tag_node: &PostTagNode,
+        post_tag_node: &mut PostTagNode,
         log: &mut Log,
         location: Location,
     );
 
     fn visit_binary_expression_node(
         &mut self,
-        binary_expression_node: &BinaryExpressionNode,
+        binary_expression_node: &mut BinaryExpressionNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -217,35 +241,35 @@ pub trait Visitor {
 
     fn visit_integer_literal_node(
         &mut self,
-        integer_literal_node: &IntegerLiteralNode,
+        integer_literal_node: &mut IntegerLiteralNode,
         log: &mut Log,
         location: Location,
     );
 
     fn visit_string_literal_node(
         &mut self,
-        string_literal_node: &StringLiteralNode,
+        string_literal_node: &mut StringLiteralNode,
         log: &mut Log,
         location: Location,
     );
 
     fn visit_boolean_literal_node(
         &mut self,
-        boolean_literal_node: &BooleanLiteralNode,
+        boolean_literal_node: &mut BooleanLiteralNode,
         log: &mut Log,
         location: Location,
     );
 
     fn visit_null_literal_node(
         &mut self,
-        null_literal_node: &NullLiteralNode,
+        null_literal_node: &mut NullLiteralNode,
         log: &mut Log,
         location: Location,
     );
 
     fn visit_unary_expression_node(
         &mut self,
-        unary_expression_node: &UnaryExpressionNode,
+        unary_expression_node: &mut UnaryExpressionNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -253,7 +277,7 @@ pub trait Visitor {
 
     fn visit_attribute_node(
         &mut self,
-        attribute_node: &AttributeNode,
+        attribute_node: &mut AttributeNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -261,7 +285,7 @@ pub trait Visitor {
 
     fn visit_function_call_node(
         &mut self,
-        function_call_node: &FunctionCallNode,
+        function_call_node: &mut FunctionCallNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -269,7 +293,7 @@ pub trait Visitor {
 
     fn visit_modifier_node(
         &mut self,
-        modifier_node: &ModifierNode,
+        modifier_node: &mut ModifierNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -277,7 +301,7 @@ pub trait Visitor {
 
     fn visit_variable_node(
         &mut self,
-        variable_node: &VariableNode,
+        variable_node: &mut VariableNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -289,19 +313,19 @@ pub struct SemanticAnalysisVisitor {}
 impl Visitor for SemanticAnalysisVisitor {
     fn visit_query_node(
         &mut self,
-        query_node: &QueryNode,
+        query_node: &mut QueryNode,
         scope: &Scope,
         log: &mut Log,
         _location: Location,
     ) {
-        for node in query_node.statements.iter() {
+        for node in query_node.statements.iter_mut() {
             node.accept(self, scope, log);
         }
     }
 
     fn visit_expression_statement(
         &mut self,
-        expression_statement: &ExpressionStatement,
+        expression_statement: &mut ExpressionStatement,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -323,7 +347,7 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_post_tag_node(
         &mut self,
-        _post_tag_node: &PostTagNode,
+        _post_tag_node: &mut PostTagNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -331,14 +355,14 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_binary_expression_node(
         &mut self,
-        binary_expression_node: &BinaryExpressionNode,
+        binary_expression_node: &mut BinaryExpressionNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         let op = binary_expression_node.op;
-        let left = &binary_expression_node.left;
-        let right = &binary_expression_node.right;
+        let left = &mut binary_expression_node.left;
+        let right = &mut binary_expression_node.right;
         let left_type = left.node_type.get_return_type(scope);
         let right_type = right.node_type.get_return_type(scope);
 
@@ -356,6 +380,15 @@ impl Visitor for SemanticAnalysisVisitor {
                     &op, &left_type, &right_type
                 ),
             });
+        }
+
+        if op == Operator::FuzzyEqual {
+            // if the patter does not contain any wildcards (% or _) explicitly, then wrap it in % to make it a fuzzy search
+            if let Some(string_literal) = right.node_type.downcast_mut::<StringLiteralNode>() {
+                if !string_literal.val.contains('%') && !string_literal.val.contains('_') {
+                    string_literal.val = format!("%{}%", string_literal.val);
+                }
+            }
         }
 
         fn validate_date_string(
@@ -389,25 +422,60 @@ impl Visitor for SemanticAnalysisVisitor {
             }
         }
 
-        // handle date comparisons and interval additions or subtractions
-        if (op == Operator::Plus || op == Operator::Minus)
-            && (left_type == Type::Date || left_type == Type::DateTime)
-            && right_type == Type::String
-        {
-            let string_literal = right.node_type.downcast_ref::<StringLiteralNode>();
+        fn validate_interval_string(expression_node: &mut Node<dyn ExpressionNode>, log: &mut Log) {
+            let string_literal = expression_node
+                .node_type
+                .downcast_mut::<StringLiteralNode>();
+
+            lazy_static! {
+                static ref SQL_INTERVAL_REGEX: regex::Regex =
+                    regex::Regex::new(r#"^((\d{1,8}):)?([0-5]?\d):([0-5]?\d)$"#)
+                        .expect("Failed to compile SQL_INTERVAL_REGEX");
+                static ref MM_SS_REGEX: regex::Regex =
+                    regex::Regex::new(r#"^(\d+):(\d+)$"#).expect("Failed to compile MM_SS_REGEX");
+            }
+
             if let Some(string_literal) = string_literal {
-                if pg_interval::Interval::from_postgres(&string_literal.val).is_err() {
+                let is_sql_interval_regex = SQL_INTERVAL_REGEX.is_match(&string_literal.val);
+                // convert interval '3:21' to '00:03:21', overriding the default sql behaviour that would make it '03:21:00' and making it MM:SS instead of HH:MM
+                if is_sql_interval_regex {
+                    let interval_string = MM_SS_REGEX.replace(&string_literal.val, "00:$1:$2");
+                    log::debug!(
+                        "Converted MM:SS interval string '{}' to '{}'",
+                        &string_literal.val,
+                        &interval_string
+                    );
+                    string_literal.val = interval_string.to_string();
+                }
+
+                if !is_sql_interval_regex
+                    && pg_interval::Interval::from_iso(&string_literal.val).is_err()
+                    && pg_interval::Interval::from_postgres(&string_literal.val).is_err()
+                {
                     log.errors.push(Error {
-                        location: right.location,
-                        msg: format!("'{}' is not a valid postgres interval", &string_literal.val),
+                        location: expression_node.location,
+                        msg: format!(
+                            "'{}' is not a valid postgres, SQL or ISO 8601 interval",
+                            &string_literal.val
+                        ),
                     });
                 }
             } else {
                 log.errors.push(Error {
-                    location: right.location,
-                    msg: String::from("Strings added to dates must be interval string literals"),
+                    location: expression_node.location,
+                    msg: String::from("Strings used as interval must be a string literal"),
                 });
             }
+        }
+
+        // handle date comparisons and interval additions or subtractions
+        if (op == Operator::Plus || op == Operator::Minus)
+            && (left_type == Type::Date
+                || left_type == Type::DateTime
+                || left_type == Type::Interval)
+            && right_type == Type::String
+        {
+            validate_interval_string(right, log);
         } else if left_type == Type::String
             && (right_type == Type::Date || right_type == Type::DateTime)
         {
@@ -416,12 +484,16 @@ impl Visitor for SemanticAnalysisVisitor {
             && (left_type == Type::Date || left_type == Type::DateTime)
         {
             validate_date_string(right, left_type, log);
+        } else if left_type == Type::String && right_type == Type::Interval {
+            validate_interval_string(left, log);
+        } else if right_type == Type::String && left_type == Type::Interval {
+            validate_interval_string(right, log);
         }
     }
 
     fn visit_integer_literal_node(
         &mut self,
-        _integer_literal_node: &IntegerLiteralNode,
+        _integer_literal_node: &mut IntegerLiteralNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -429,7 +501,7 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_string_literal_node(
         &mut self,
-        _string_literal_node: &StringLiteralNode,
+        _string_literal_node: &mut StringLiteralNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -437,7 +509,7 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_boolean_literal_node(
         &mut self,
-        _boolean_literal_node: &BooleanLiteralNode,
+        _boolean_literal_node: &mut BooleanLiteralNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -445,7 +517,7 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_null_literal_node(
         &mut self,
-        _null_literal_node: &NullLiteralNode,
+        _null_literal_node: &mut NullLiteralNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -453,12 +525,12 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_unary_expression_node(
         &mut self,
-        unary_expression_node: &UnaryExpressionNode,
+        unary_expression_node: &mut UnaryExpressionNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
-        let operand = &unary_expression_node.operand;
+        let operand = &mut unary_expression_node.operand;
         let expression_type = operand.node_type.get_return_type(scope);
         let op = unary_expression_node.op;
 
@@ -476,7 +548,7 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_attribute_node(
         &mut self,
-        attribute_node: &AttributeNode,
+        attribute_node: &mut AttributeNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -492,12 +564,12 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_function_call_node(
         &mut self,
-        function_call_node: &FunctionCallNode,
+        function_call_node: &mut FunctionCallNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
-        for argument in function_call_node.arguments.iter() {
+        for argument in function_call_node.arguments.iter_mut() {
             argument.accept(self, scope, log);
         }
 
@@ -515,12 +587,12 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_modifier_node(
         &mut self,
-        modifier_node: &ModifierNode,
+        modifier_node: &mut ModifierNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
-        for argument in modifier_node.arguments.iter() {
+        for argument in modifier_node.arguments.iter_mut() {
             argument.accept(self, scope, log);
         }
 
@@ -538,7 +610,7 @@ impl Visitor for SemanticAnalysisVisitor {
 
     fn visit_variable_node(
         &mut self,
-        variable_node: &VariableNode,
+        variable_node: &mut VariableNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -574,7 +646,7 @@ impl<'p> QueryBuilderVisitor<'p> {
 impl QueryBuilderVisitor<'_> {
     pub fn visit_limit_modifier(
         &mut self,
-        arguments: &[Box<Node<dyn ExpressionNode>>],
+        arguments: &mut [Box<Node<dyn ExpressionNode>>],
         scope: &Scope,
         log: &mut Log,
     ) {
@@ -587,7 +659,7 @@ impl QueryBuilderVisitor<'_> {
 
     pub fn visit_sort_modifier(
         &mut self,
-        arguments: &[Box<Node<dyn ExpressionNode>>],
+        arguments: &mut [Box<Node<dyn ExpressionNode>>],
         scope: &Scope,
         log: &mut Log,
         location: Location,
@@ -601,15 +673,30 @@ impl QueryBuilderVisitor<'_> {
             }
             self.buffer = Some(String::new());
             let attr_arg = &arguments[0];
-            let is_string = attr_arg.node_type.get_return_type(scope) == Type::String;
-            let nullable = match attr_arg.node_type.downcast_ref::<AttributeNode>() {
-                Some(attr_arg) => scope
+            let attribute_node = attr_arg.node_type.downcast_ref::<AttributeNode>();
+            let attribute = attribute_node.and_then(|attribute_node| {
+                scope
                     .get_attributes()
-                    .get(attr_arg.identifier.as_str())
-                    .map(|attr| attr.nullable)
-                    .unwrap_or(true),
-                None => true,
-            };
+                    .get(attribute_node.identifier.as_str())
+                    .cloned()
+            });
+            let is_string = attr_arg.node_type.get_return_type(scope) == Type::String;
+            let nullable = attribute
+                .as_ref()
+                .map_or(false, |attribute| attribute.nullable);
+            let table = attribute.map_or("--invalid--", |attribute| attribute.table);
+            if !self.query_parameters.ordering.is_empty() {
+                let last_ordering = &self.query_parameters.ordering[0];
+                if last_ordering.table != table {
+                    log.errors.push(Error {
+                        location,
+                        msg: format!(
+                            "Cannot sort by attributes from different tables ({} and {})",
+                            last_ordering.table, table
+                        ),
+                    });
+                }
+            }
 
             if is_string {
                 self.write_buff("LOWER(");
@@ -637,6 +724,7 @@ impl QueryBuilderVisitor<'_> {
                 expression,
                 direction,
                 nullable,
+                table,
             });
         }
     }
@@ -652,19 +740,19 @@ impl QueryBuilderVisitor<'_> {
 impl Visitor for QueryBuilderVisitor<'_> {
     fn visit_query_node(
         &mut self,
-        query_node: &QueryNode,
+        query_node: &mut QueryNode,
         scope: &Scope,
         log: &mut Log,
         _location: Location,
     ) {
-        for node in query_node.statements.iter() {
+        for node in query_node.statements.iter_mut() {
             node.accept(self, scope, log);
         }
     }
 
     fn visit_expression_statement(
         &mut self,
-        expression_statement: &ExpressionStatement,
+        expression_statement: &mut ExpressionStatement,
         scope: &Scope,
         log: &mut Log,
         _location: Location,
@@ -679,7 +767,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_post_tag_node(
         &mut self,
-        post_tag_node: &PostTagNode,
+        post_tag_node: &mut PostTagNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -711,27 +799,35 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_binary_expression_node(
         &mut self,
-        binary_expression_node: &BinaryExpressionNode,
+        binary_expression_node: &mut BinaryExpressionNode,
         scope: &Scope,
         log: &mut Log,
         _location: Location,
     ) {
         let op = binary_expression_node.op;
-        let left = &binary_expression_node.left;
+        let left = &mut binary_expression_node.left;
         let left_type = left.node_type.get_return_type(scope);
-        let right = &binary_expression_node.right;
+        let right = &mut binary_expression_node.right;
         let right_type = right.node_type.get_return_type(scope);
         let binary_types = (left_type, right_type);
 
         self.write_buff("(");
 
         if (op == Operator::Plus || op == Operator::Minus)
-            && (left_type == Type::Date || left_type == Type::DateTime)
+            && (left_type == Type::Date
+                || left_type == Type::DateTime
+                || left_type == Type::Interval)
             && right_type == Type::String
         {
             // add explicit types for date interval addition / subtraction
             left.accept(self, scope, log);
-            self.write_buff("::date ");
+            if left_type == Type::DateTime {
+                self.write_buff("::timestamp ");
+            } else if left_type == Type::Interval {
+                self.write_buff("::interval ");
+            } else {
+                self.write_buff("::date ");
+            }
             self.write_buff(op.get_sql_string(Some(binary_types)));
             self.write_buff(" interval ");
             right.accept(self, scope, log);
@@ -777,7 +873,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_integer_literal_node(
         &mut self,
-        integer_literal_node: &IntegerLiteralNode,
+        integer_literal_node: &mut IntegerLiteralNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -786,7 +882,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_string_literal_node(
         &mut self,
-        string_literal_node: &StringLiteralNode,
+        string_literal_node: &mut StringLiteralNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -798,7 +894,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_boolean_literal_node(
         &mut self,
-        boolean_literal_node: &BooleanLiteralNode,
+        boolean_literal_node: &mut BooleanLiteralNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -807,7 +903,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_null_literal_node(
         &mut self,
-        _null_literal_node: &NullLiteralNode,
+        _null_literal_node: &mut NullLiteralNode,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -816,7 +912,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_unary_expression_node(
         &mut self,
-        unary_expression_node: &UnaryExpressionNode,
+        unary_expression_node: &mut UnaryExpressionNode,
         scope: &Scope,
         log: &mut Log,
         _location: Location,
@@ -829,7 +925,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_attribute_node(
         &mut self,
-        attribute_node: &AttributeNode,
+        attribute_node: &mut AttributeNode,
         scope: &Scope,
         _log: &mut Log,
         _location: Location,
@@ -844,14 +940,14 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_function_call_node(
         &mut self,
-        function_call_node: &FunctionCallNode,
+        function_call_node: &mut FunctionCallNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         let identifier: &str = &function_call_node.identifier;
         if let Some(function) = scope.get_functions().get(identifier) {
-            let arguments = &function_call_node.arguments;
+            let arguments = &mut function_call_node.arguments;
             (function.write_expression_fn)(self, arguments, scope, location, log);
         } else {
             self.write_buff("NULL");
@@ -860,20 +956,26 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
     fn visit_modifier_node(
         &mut self,
-        modifier_node: &ModifierNode,
+        modifier_node: &mut ModifierNode,
         scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
         let identifier: &str = &modifier_node.identifier;
         if let Some(modifier) = scope.get_modifiers().get(identifier) {
-            (modifier.visit_query_builder)(self, &modifier_node.arguments, scope, log, location);
+            (modifier.visit_query_builder)(
+                self,
+                &mut modifier_node.arguments,
+                scope,
+                log,
+                location,
+            );
         }
     }
 
     fn visit_variable_node(
         &mut self,
-        variable_node: &VariableNode,
+        variable_node: &mut VariableNode,
         scope: &Scope,
         _log: &mut Log,
         _location: Location,
@@ -901,13 +1003,19 @@ pub struct Node<T: NodeType + Send + ?Sized> {
 }
 
 impl<T: NodeType + Send + ?Sized> Node<T> {
-    pub fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log) {
+    pub fn accept(&mut self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log) {
         self.node_type.accept(visitor, scope, log, self.location);
     }
 }
 
 pub trait NodeType: Downcast + Debug {
-    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location);
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    );
 }
 
 impl_downcast!(NodeType);
@@ -918,7 +1026,13 @@ pub struct QueryNode {
 }
 
 impl NodeType for QueryNode {
-    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_query_node(self, scope, log, location);
     }
 }
@@ -938,7 +1052,13 @@ pub struct ExpressionStatement {
 }
 
 impl NodeType for ExpressionStatement {
-    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_expression_statement(self, scope, log, location);
     }
 }
@@ -959,7 +1079,13 @@ pub struct ModifierNode {
 }
 
 impl NodeType for ModifierNode {
-    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_modifier_node(self, scope, log, location);
     }
 }
@@ -1083,7 +1209,13 @@ pub struct PostTagNode {
 }
 
 impl NodeType for PostTagNode {
-    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        _scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_post_tag_node(self, log, location);
     }
 }
@@ -1100,7 +1232,13 @@ pub struct AttributeNode {
 }
 
 impl NodeType for AttributeNode {
-    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_attribute_node(self, scope, log, location);
     }
 }
@@ -1123,7 +1261,13 @@ pub struct FunctionCallNode {
 }
 
 impl NodeType for FunctionCallNode {
-    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_function_call_node(self, scope, log, location);
     }
 }
@@ -1154,7 +1298,13 @@ pub struct BinaryExpressionNode {
 }
 
 impl NodeType for BinaryExpressionNode {
-    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_binary_expression_node(self, scope, log, location);
     }
 }
@@ -1184,7 +1334,13 @@ pub struct IntegerLiteralNode {
 }
 
 impl NodeType for IntegerLiteralNode {
-    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        _scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_integer_literal_node(self, log, location);
     }
 }
@@ -1201,7 +1357,13 @@ pub struct StringLiteralNode {
 }
 
 impl NodeType for StringLiteralNode {
-    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        _scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_string_literal_node(self, log, location);
     }
 }
@@ -1218,7 +1380,13 @@ pub struct BooleanLiteralNode {
 }
 
 impl NodeType for BooleanLiteralNode {
-    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        _scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_boolean_literal_node(self, log, location);
     }
 }
@@ -1233,7 +1401,13 @@ impl ExpressionNode for BooleanLiteralNode {
 pub struct NullLiteralNode {}
 
 impl NodeType for NullLiteralNode {
-    fn accept(&self, visitor: &mut dyn Visitor, _scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        _scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_null_literal_node(self, log, location);
     }
 }
@@ -1251,7 +1425,13 @@ pub struct UnaryExpressionNode {
 }
 
 impl NodeType for UnaryExpressionNode {
-    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_unary_expression_node(self, scope, log, location);
     }
 }
@@ -1277,7 +1457,13 @@ pub struct VariableNode {
 }
 
 impl NodeType for VariableNode {
-    fn accept(&self, visitor: &mut dyn Visitor, scope: &Scope, log: &mut Log, location: Location) {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
         visitor.visit_variable_node(self, scope, log, location);
     }
 }

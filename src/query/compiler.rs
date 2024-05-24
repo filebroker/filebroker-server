@@ -122,7 +122,7 @@ pub fn compile_sql(
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
-            query_parameters.fallback_ordering.clone(),
+            &query_parameters.fallback_orderings,
         )?;
         sql_query.push_str(" LIMIT ");
         sql_query.push_str(MAX_SHUFFLE_LIMIT_STR);
@@ -155,7 +155,7 @@ pub fn compile_sql(
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
-            query_parameters.fallback_ordering.clone(),
+            &query_parameters.fallback_orderings,
         )?;
     }
     apply_pagination(&mut sql_query, &query_parameters, limit, false)?;
@@ -202,7 +202,7 @@ pub fn compile_window_query(
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
-            query_parameters.fallback_ordering.clone(),
+            &query_parameters.fallback_orderings,
         )?;
         sql_query.push_str(" ) AS row_number, lag(");
         sql_query.push_str(from_table_name);
@@ -210,7 +210,7 @@ pub fn compile_window_query(
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
-            query_parameters.fallback_ordering.clone(),
+            &query_parameters.fallback_orderings,
         )?;
         sql_query.push_str(" ) AS prev, ");
         sql_query.push_str(from_table_name);
@@ -220,7 +220,7 @@ pub fn compile_window_query(
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
-            query_parameters.fallback_ordering.clone(),
+            &query_parameters.fallback_orderings,
         )?;
         sql_query.push_str(" ) AS next, ");
 
@@ -244,7 +244,7 @@ pub fn compile_window_query(
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
-            query_parameters.fallback_ordering.clone(),
+            &query_parameters.fallback_orderings,
         )?;
 
         apply_pagination(&mut sql_query, &query_parameters, limit, true)?;
@@ -271,7 +271,7 @@ pub fn compile_window_query(
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
-            query_parameters.fallback_ordering,
+            &query_parameters.fallback_orderings,
         )?;
         sql_query.push_str(" LIMIT ");
         sql_query.push_str(MAX_SHUFFLE_LIMIT_STR);
@@ -346,7 +346,7 @@ fn compile_expressions(
     scope: &Scope,
 ) -> Result<(HashMap<String, Cte>, Vec<String>), crate::Error> {
     let mut log = Log { errors: Vec::new() };
-    let ast = compile_ast(query, &mut log, true)?;
+    let mut ast = compile_ast(query, &mut log, true)?;
     let mut semantic_analysis_visitor = SemanticAnalysisVisitor {};
     ast.accept(&mut semantic_analysis_visitor, scope, &mut log);
     if !log.errors.is_empty() {
@@ -426,20 +426,26 @@ fn apply_where_conditions(
 pub fn apply_ordering(
     sql_query: &mut String,
     ordering: &mut Vec<Ordering>,
-    fallback_ordering: Ordering,
+    fallback_orderings: &[Ordering],
 ) -> Result<(), crate::Error> {
-    let ordered_by_fallback = ordering
-        .last()
-        .map(|ord| ord == &fallback_ordering)
-        .unwrap_or(false);
-    if (ordered_by_fallback && ordering.len() > 3) || (!ordered_by_fallback && ordering.len() > 2) {
-        return Err(crate::Error::IllegalQueryInputError(String::from(
-            "Cannot sort by more than two attributes",
-        )));
-    }
-    // always sort by pk desc last for consistent sorting
-    if !ordered_by_fallback {
-        ordering.push(fallback_ordering);
+    let fallback_ordering = if let Some(o) = ordering.first() {
+        fallback_orderings
+            .iter()
+            .find(|f| o.table == f.table)
+            .or(fallback_orderings.first())
+    } else {
+        fallback_orderings.first()
+    };
+    let ordered_by_fallback = fallback_ordering.is_some()
+        && ordering
+            .last()
+            .map(|ord| ord == fallback_ordering.unwrap())
+            .unwrap_or(false);
+    match fallback_ordering {
+        Some(fallback_ordering) if !ordered_by_fallback => {
+            ordering.push(fallback_ordering.clone());
+        }
+        _ => {}
     }
 
     let ordering_len = ordering.len();

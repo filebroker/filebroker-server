@@ -1,10 +1,17 @@
 #![allow(clippy::extra_unused_lifetimes)]
 
 use chrono::{offset::Utc, DateTime};
-use diesel::sql_types::{BigInt, Bool, Int4, Int8, Nullable, Timestamptz, Varchar};
+use diesel::data_types::PgInterval;
+use diesel::deserialize::{self, FromSql, FromSqlRow};
+use diesel::expression::AsExpression;
+use diesel::pg::{Pg, PgValue};
+use diesel::serialize::{self, Output, ToSql};
+use diesel::sql_types::{
+    BigInt, Bool, Float8, Int4, Int8, Integer, Interval, Jsonb, Nullable, Timestamptz, Varchar,
+};
 use diesel::{Associations, Identifiable, Insertable, Queryable};
 use diesel_async::AsyncPgConnection;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::error::Error;
 use crate::query::{SearchQueryResultObject, SearchResult};
@@ -73,7 +80,7 @@ pub struct Post {
     pub creation_timestamp: DateTime<Utc>,
     pub fk_create_user: i64,
     pub score: i32,
-    pub s3_object: Option<String>,
+    pub s3_object: String,
     pub thumbnail_url: Option<String>,
     #[serde(rename = "is_public")]
     pub public: bool,
@@ -249,6 +256,107 @@ impl From<S3Object> for PostS3Object {
 }
 
 #[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = s3_object_metadata)]
+pub struct PostS3ObjectMetadata {
+    #[diesel(sql_type = Varchar)]
+    #[diesel(column_name = "post_s3_object_metadata_object_key")]
+    pub object_key: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_file_type")]
+    pub file_type: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_file_type_extension")]
+    pub file_type_extension: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_mime_type")]
+    pub mime_type: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_title")]
+    pub title: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_artist")]
+    pub artist: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_album")]
+    pub album: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_album_artist")]
+    pub album_artist: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_composer")]
+    pub composer: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_genre")]
+    pub genre: Option<String>,
+    #[diesel(sql_type = Nullable<Timestamptz>)]
+    #[diesel(column_name = "post_s3_object_metadata_date")]
+    pub date: Option<DateTime<Utc>>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_track_number")]
+    pub track_number: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_disc_number")]
+    pub disc_number: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_duration")]
+    pub duration: Option<String>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    #[diesel(column_name = "post_s3_object_metadata_width")]
+    pub width: Option<i32>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    #[diesel(column_name = "post_s3_object_metadata_height")]
+    pub height: Option<i32>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    #[diesel(column_name = "post_s3_object_metadata_size")]
+    pub size: Option<i64>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    #[diesel(column_name = "post_s3_object_metadata_bit_rate")]
+    pub bit_rate: Option<i64>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_format_name")]
+    pub format_name: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_format_long_name")]
+    pub format_long_name: Option<String>,
+    #[diesel(sql_type = Integer)]
+    #[diesel(column_name = "post_s3_object_metadata_video_stream_count")]
+    pub video_stream_count: i32,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_video_codec_name")]
+    pub video_codec_name: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_video_codec_long_name")]
+    pub video_codec_long_name: Option<String>,
+    #[diesel(sql_type = Nullable<Float8>)]
+    #[diesel(column_name = "post_s3_object_metadata_video_frame_rate")]
+    pub video_frame_rate: Option<f64>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    #[diesel(column_name = "post_s3_object_metadata_video_bit_rate_max")]
+    pub video_bit_rate_max: Option<i64>,
+    #[diesel(sql_type = Integer)]
+    #[diesel(column_name = "post_s3_object_metadata_audio_stream_count")]
+    pub audio_stream_count: i32,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_audio_codec_name")]
+    pub audio_codec_name: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_s3_object_metadata_audio_codec_long_name")]
+    pub audio_codec_long_name: Option<String>,
+    #[diesel(sql_type = Nullable<Float8>)]
+    #[diesel(column_name = "post_s3_object_metadata_audio_sample_rate")]
+    pub audio_sample_rate: Option<f64>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    #[diesel(column_name = "post_s3_object_metadata_audio_channels")]
+    pub audio_channels: Option<i32>,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    #[diesel(column_name = "post_s3_object_metadata_audio_bit_rate_max")]
+    pub audio_bit_rate_max: Option<i64>,
+    #[diesel(sql_type = Jsonb)]
+    #[diesel(column_name = "post_s3_object_metadata_raw")]
+    pub raw: serde_json::Value,
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
 #[diesel(table_name = post)]
 pub struct PostFull {
     #[diesel(sql_type = BigInt)]
@@ -273,6 +381,8 @@ pub struct PostFull {
     pub score: i32,
     #[diesel(embed)]
     pub s3_object: Option<PostS3Object>,
+    #[diesel(embed)]
+    pub s3_object_metadata: Option<PostS3ObjectMetadata>,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_thumbnail_url")]
     pub thumbnail_url: Option<String>,
@@ -316,6 +426,8 @@ pub struct PostQueryObject {
     pub score: i32,
     #[diesel(embed)]
     pub s3_object: Option<PostS3Object>,
+    #[diesel(embed)]
+    pub s3_object_metadata: Option<PostS3ObjectMetadata>,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_thumbnail_url")]
     pub thumbnail_url: Option<String>,
@@ -1087,7 +1199,7 @@ pub struct DeferredS3ObjectDeletion {
     pub fk_broker: i64,
 }
 
-#[derive(Identifiable, Insertable, Queryable, QueryableByName, Serialize)]
+#[derive(AsChangeset, Identifiable, Insertable, Queryable, QueryableByName, Serialize)]
 #[diesel(table_name = s3_object_metadata)]
 #[diesel(primary_key(object_key))]
 pub struct S3ObjectMetadata {
@@ -1101,10 +1213,10 @@ pub struct S3ObjectMetadata {
     pub album_artist: Option<String>,
     pub composer: Option<String>,
     pub genre: Option<String>,
-    pub date: Option<String>,
+    pub date: Option<DateTime<Utc>>,
     pub track_number: Option<String>,
     pub disc_number: Option<String>,
-    pub duration: Option<String>,
+    pub duration: Option<PgIntervalWrapper>,
     pub width: Option<i32>,
     pub height: Option<i32>,
     pub size: Option<i64>,
@@ -1123,4 +1235,41 @@ pub struct S3ObjectMetadata {
     pub audio_channels: Option<i32>,
     pub audio_bit_rate_max: Option<i64>,
     pub raw: serde_json::Value,
+    pub loaded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
+#[diesel(sql_type = Interval)]
+pub struct PgIntervalWrapper(pub PgInterval);
+
+impl Serialize for PgIntervalWrapper {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        pg_interval::Interval::new(self.0.months, self.0.days, self.0.microseconds)
+            .to_postgres()
+            .serialize(serializer)
+    }
+}
+
+impl ToSql<Interval, Pg> for PgIntervalWrapper {
+    fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Pg>) -> serialize::Result {
+        <PgInterval as ToSql<Interval, Pg>>::to_sql(&self.0, out)
+    }
+}
+
+impl FromSql<Interval, Pg> for PgIntervalWrapper {
+    fn from_sql(value: PgValue<'_>) -> deserialize::Result<Self> {
+        Ok(PgIntervalWrapper(
+            <PgInterval as FromSql<Interval, Pg>>::from_sql(value)?,
+        ))
+    }
+}
+
+#[derive(QueryableByName)]
+pub struct PgIntervalQuery {
+    #[diesel(sql_type = Interval)]
+    #[diesel(column_name = "pg_interval")]
+    pub interval: PgInterval,
 }

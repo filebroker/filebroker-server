@@ -17,9 +17,11 @@ pub enum Type {
     Number,
     String,
     Void,
+    Interval,
 }
 
 pub struct Attribute {
+    pub table: &'static str,
     pub selection_expression: String,
     pub return_type: Type,
     pub allow_sorting: bool,
@@ -32,8 +34,13 @@ pub struct Function {
     pub return_type: Type,
     pub accept_arguments:
         fn(&[Parameter], &[Box<Node<dyn ExpressionNode>>], &Scope, Location, &mut Log),
-    pub write_expression_fn:
-        fn(&mut QueryBuilderVisitor, &[Box<Node<dyn ExpressionNode>>], &Scope, Location, &mut Log),
+    pub write_expression_fn: fn(
+        &mut QueryBuilderVisitor,
+        &mut [Box<Node<dyn ExpressionNode>>],
+        &Scope,
+        Location,
+        &mut Log,
+    ),
 }
 
 #[allow(clippy::type_complexity)]
@@ -41,8 +48,13 @@ pub struct Modifier {
     pub params: Vec<Parameter>,
     pub accept_arguments:
         fn(&[Parameter], &[Box<Node<dyn ExpressionNode>>], &Scope, Location, &mut Log),
-    pub visit_query_builder:
-        fn(&mut QueryBuilderVisitor, &[Box<Node<dyn ExpressionNode>>], &Scope, &mut Log, Location),
+    pub visit_query_builder: fn(
+        &mut QueryBuilderVisitor,
+        &mut [Box<Node<dyn ExpressionNode>>],
+        &Scope,
+        &mut Log,
+        Location,
+    ),
 }
 
 pub struct Variable {
@@ -81,6 +93,7 @@ impl Scope {
                 post_attributes.insert(
                     "ordinal",
                     Arc::new(Attribute {
+                        table: "post_collection_item",
                         selection_expression: String::from("post_collection_item.ordinal"),
                         return_type: Type::Number,
                         allow_sorting: true,
@@ -271,8 +284,9 @@ lazy_static! {
 lazy_static! {
     pub static ref POST_ATTRIBUTES: HashMap<&'static str, Arc<Attribute>> = HashMap::from([
         (
-            "creation_timestamp",
+            "date",
             Arc::new(Attribute {
+                table: "post",
                 selection_expression: String::from("post.creation_timestamp"),
                 return_type: Type::DateTime,
                 allow_sorting: true,
@@ -282,6 +296,7 @@ lazy_static! {
         (
             "title",
             Arc::new(Attribute {
+                table: "post",
                 selection_expression: String::from("post.title"),
                 return_type: Type::String,
                 allow_sorting: true,
@@ -291,6 +306,7 @@ lazy_static! {
         (
             "uploader",
             Arc::new(Attribute {
+                table: "post",
                 selection_expression: String::from("post.fk_create_user"),
                 return_type: Type::Number,
                 allow_sorting: true,
@@ -300,17 +316,139 @@ lazy_static! {
         (
             "description",
             Arc::new(Attribute {
+                table: "post",
                 selection_expression: String::from("post.description"),
                 return_type: Type::String,
                 allow_sorting: false,
                 nullable: true
             })
-        )
+        ),
+        (
+            "type",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.mime_type"),
+                return_type: Type::String,
+                allow_sorting: false,
+                nullable: true
+            })
+        ),
+        (
+            "artist",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.artist"),
+                return_type: Type::String,
+                allow_sorting: true,
+                nullable: true
+            })
+        ),
+        (
+            "album",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.album"),
+                return_type: Type::String,
+                allow_sorting: true,
+                nullable: true
+            })
+        ),
+        (
+            "composer",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.composer"),
+                return_type: Type::String,
+                allow_sorting: false,
+                nullable: true
+            })
+        ),
+        (
+            "genre",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.genre"),
+                return_type: Type::String,
+                allow_sorting: false,
+                nullable: true
+            })
+        ),
+        (
+            "date_meta",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.date"),
+                return_type: Type::DateTime,
+                allow_sorting: true,
+                nullable: true
+            })
+        ),
+        (
+            "duration",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.duration"),
+                return_type: Type::Interval,
+                allow_sorting: true,
+                nullable: true
+            })
+        ),
+        (
+            "track",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.track_number"),
+                return_type: Type::String,
+                allow_sorting: true,
+                nullable: true
+            })
+        ),
+        (
+            "disc",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.disc_number"),
+                return_type: Type::String,
+                allow_sorting: true,
+                nullable: true
+            })
+        ),
+        (
+            "width",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.width"),
+                return_type: Type::Number,
+                allow_sorting: true,
+                nullable: true
+            })
+        ),
+        (
+            "height",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.height"),
+                return_type: Type::Number,
+                allow_sorting: true,
+                nullable: true
+            })
+        ),
+        (
+            "size",
+            Arc::new(Attribute {
+                table: "s3_object_metadata",
+                selection_expression: String::from("s3_object_metadata.size"),
+                return_type: Type::Number,
+                allow_sorting: true,
+                nullable: true
+            })
+        ),
     ]);
     pub static ref COLLECTION_ATTRIBUTES: HashMap<&'static str, Arc<Attribute>> = HashMap::from([
         (
-            "creation_timestamp",
+            "date",
             Arc::new(Attribute {
+                table: "post_collection",
                 selection_expression: String::from("post_collection.creation_timestamp"),
                 return_type: Type::DateTime,
                 allow_sorting: true,
@@ -320,6 +458,7 @@ lazy_static! {
         (
             "title",
             Arc::new(Attribute {
+                table: "post_collection",
                 selection_expression: String::from("post_collection.title"),
                 return_type: Type::String,
                 allow_sorting: true,
@@ -329,6 +468,7 @@ lazy_static! {
         (
             "owner",
             Arc::new(Attribute {
+                table: "post_collection",
                 selection_expression: String::from("post_collection.fk_create_user"),
                 return_type: Type::Number,
                 allow_sorting: true,
@@ -338,6 +478,7 @@ lazy_static! {
         (
             "description",
             Arc::new(Attribute {
+                table: "post_collection",
                 selection_expression: String::from("post_collection.description"),
                 return_type: Type::String,
                 allow_sorting: false,
@@ -428,7 +569,7 @@ fn write_subquery_function_expr(
     column: &str,
     is_string: bool,
     visitor: &mut QueryBuilderVisitor,
-    args: &[Box<Node<dyn ExpressionNode>>],
+    args: &mut [Box<Node<dyn ExpressionNode>>],
     scope: &Scope,
     location: Location,
     log: &mut Log,
@@ -467,7 +608,7 @@ fn write_subquery_function_expr(
 fn write_post_aggregate_function_expr(
     identifier: &str,
     visitor: &mut QueryBuilderVisitor,
-    args: &[Box<Node<dyn ExpressionNode>>],
+    args: &mut [Box<Node<dyn ExpressionNode>>],
     scope: &Scope,
     log: &mut Log,
 ) {
@@ -476,7 +617,7 @@ fn write_post_aggregate_function_expr(
     visitor.write_buff("(");
 
     let argument_count = args.len();
-    for (i, argument) in args.iter().enumerate() {
+    for (i, argument) in args.iter_mut().enumerate() {
         argument.accept(visitor, scope, log);
 
         if i < argument_count - 1 {
@@ -539,6 +680,14 @@ fn accept_sort_modifier_arguments(
                     msg: format!("Expected sorting direction to be 'asc', 'ascending', 'desc', 'descending' but got '{}'", &direction) 
                 })
             }
+        } else {
+            log.errors.push(Error {
+                location: direction_arg_location,
+                msg: format!(
+                    "Expected argument to be a string literal but got expression {:?}",
+                    &direction_arg.node_type
+                ),
+            });
         }
     }
 }

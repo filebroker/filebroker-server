@@ -406,7 +406,7 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
                 diesel::sql_query("
                 WITH relevant_s3objects AS(
                     SELECT * FROM s3_object AS obj
-                    WHERE NOT EXISTS(SELECT * FROM s3_object_metadata WHERE object_key = obj.object_key)
+                    WHERE NOT EXISTS(SELECT * FROM s3_object_metadata WHERE object_key = obj.object_key AND loaded)
                     AND metadata_locked_at IS NULL
                     AND NOT (object_key LIKE 'thumb_%')
                     AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)

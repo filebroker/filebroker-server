@@ -233,7 +233,7 @@ async fn load_post_collection_poster_object(
 ) -> Result<Option<S3Object>, Error> {
     post_collection_item::table
         .inner_join(post::table)
-        .inner_join(s3_object::table.on(s3_object::object_key.nullable().eq(post::s3_object)))
+        .inner_join(s3_object::table.on(s3_object::object_key.eq(post::s3_object)))
         .select(s3_object::table::all_columns())
         .filter(
             post_collection_item::fk_post_collection
