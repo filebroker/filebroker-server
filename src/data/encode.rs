@@ -1066,7 +1066,7 @@ pub async fn load_object_metadata(
         })?
     };
 
-    let date = exif_output
+    let date: Result<Option<DateTime<Utc>>, chrono::ParseError> = exif_output
         .date
         .as_ref()
         .map(|d| {
@@ -1076,13 +1076,18 @@ pub async fn load_object_metadata(
             let parsed_date = DateTime::parse_from_str(&postgres_date, "%Y-%m-%d %H:%M:%S%.f%#z")?;
             Ok(parsed_date.with_timezone(&Utc))
         })
-        .map_or(Ok(None), |v| v.map(Some))
-        .map_err(|e: chrono::ParseError| {
-            Error::ChildProcessError(format!(
-                "Failed to parse date '{:?}' from exiftool output: {e}",
-                &exif_output.date
-            ))
-        })?;
+        .map_or(Ok(None), |v| v.map(Some));
+    let date = match date {
+        Ok(date) => date,
+        Err(e) => {
+            log::error!(
+                "Failed to parse '{:?}' as date from exiftool output for {}: {e}",
+                &exif_output.date,
+                &source_object_key
+            );
+            None
+        }
+    };
 
     let mut connection = acquire_db_connection().await?;
 
@@ -1090,14 +1095,17 @@ pub async fn load_object_metadata(
         let pg_interval = diesel::sql_query("SELECT $1::interval AS pg_interval")
             .bind::<Text, _>(duration_str)
             .get_result::<PgIntervalQuery>(&mut connection)
-            .await
-            .map_err(|e| {
-                Error::ChildProcessError(format!(
+            .await;
+        match pg_interval {
+            Ok(pg_interval) => Some(pg_interval.interval),
+            Err(e) => {
+                log::error!(
                     "Failed to cast duration '{:?}' to postgres interval: {e}",
                     &exif_output.duration
-                ))
-            })?;
-        Some(pg_interval.interval)
+                );
+                None
+            }
+        }
     } else {
         None
     };
