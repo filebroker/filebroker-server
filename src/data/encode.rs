@@ -802,8 +802,8 @@ struct FfprobeOutput {
 struct FfprobeStream {
     index: usize,
     codec_type: String,
-    codec_name: String,
-    codec_long_name: String,
+    codec_name: Option<String>,
+    codec_long_name: Option<String>,
     display_aspect_ratio: Option<String>,
     #[serde(rename = "r_frame_rate")]
     frame_rate: Option<String>,
@@ -1007,8 +1007,8 @@ pub async fn load_object_metadata(
         for stream in ffprobe_output.streams {
             if stream.codec_type == "video" {
                 video_stream_count += 1;
-                video_codec_name = video_codec_name.or(Some(stream.codec_name));
-                video_codec_long_name = video_codec_long_name.or(Some(stream.codec_long_name));
+                video_codec_name = video_codec_name.or(stream.codec_name);
+                video_codec_long_name = video_codec_long_name.or(stream.codec_long_name);
                 if let Some(bit_rate) = stream.bit_rate {
                     let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
                         Error::FfmpegProcessError(format!(
@@ -1021,8 +1021,8 @@ pub async fn load_object_metadata(
                 }
             } else if stream.codec_type == "audio" {
                 audio_stream_count += 1;
-                audio_codec_name = audio_codec_name.or(Some(stream.codec_name));
-                audio_codec_long_name = audio_codec_long_name.or(Some(stream.codec_long_name));
+                audio_codec_name = audio_codec_name.or(stream.codec_name);
+                audio_codec_long_name = audio_codec_long_name.or(stream.codec_long_name);
                 if let Some(bit_rate) = stream.bit_rate {
                     let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
                         Error::FfmpegProcessError(format!(
