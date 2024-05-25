@@ -1071,7 +1071,20 @@ pub async fn load_object_metadata(
         .as_ref()
         .map(|d| {
             let postgres_date = EXIF_DATE_FORMAT_REGEX
-                .replace(d, "$1-$2-$3 $4:$5$6$7")
+                .replace(d, |caps: &regex::Captures| {
+                    // format as $1-$2-$3 $4:$5$6$7 with $6 falling back to :00 if missing and $7 falling back to timezone Z if missing
+                    let year = &caps[1];
+                    let month = &caps[2];
+                    let day = &caps[3];
+                    let hour = &caps[4];
+                    let minute = &caps[5];
+                    let second = caps.get(6).map_or(":00", |m| m.as_str()); // Fallback to ":00" if $6 / seconds is not present
+                    let timezone = caps.get(7).map_or("Z", |m| m.as_str()); // Fallback to Z if $7 / timezone is not present
+                    format!(
+                        "{}-{}-{} {}:{}{}{}",
+                        year, month, day, hour, minute, second, timezone
+                    )
+                })
                 .to_string();
             let parsed_date = DateTime::parse_from_str(&postgres_date, "%Y-%m-%d %H:%M:%S%.f%#z")?;
             Ok(parsed_date.with_timezone(&Utc))
