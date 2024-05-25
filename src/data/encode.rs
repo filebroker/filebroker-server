@@ -867,6 +867,8 @@ pub async fn load_object_metadata(
             .arg("-j")
             .arg("--struct")
             .arg("--fast")
+            .arg("-api")
+            .arg("largefilesupport=1")
             .arg("-")
             .stdin(Stdio::from(curl_proc.stdout.ok_or_else(|| {
                 Error::ChildProcessError(String::from(
