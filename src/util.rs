@@ -1,4 +1,9 @@
-use std::{fmt, net::SocketAddr, time::Duration};
+use std::{
+    fmt,
+    net::SocketAddr,
+    ops::{Deref, DerefMut},
+    time::Duration,
+};
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -176,5 +181,59 @@ where
         Some(StringOrNumber::Number(i)) => Ok(Some(i.to_string())),
         Some(StringOrNumber::Float(f)) => Ok(Some(f.to_string())),
         None => Ok(None),
+    }
+}
+
+/// Wrapper type used for deserializing a value using `Default` if the deserialization fails.
+#[derive(Debug, Default)]
+pub struct DeserializeOrDefault<T: Default>(pub T);
+
+impl<T: Default> DeserializeOrDefault<T> {
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
+impl<'de, T: Default + Deserialize<'de>> Deserialize<'de> for DeserializeOrDefault<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let result = T::deserialize(deserializer);
+        if let Err(ref e) = result {
+            log::warn!("Failed to deserialize value: {e}");
+        }
+        result
+            .or_else(|_| Ok(T::default()))
+            .map(DeserializeOrDefault)
+    }
+}
+
+impl<T> Clone for DeserializeOrDefault<T>
+where
+    T: Clone + Default,
+{
+    fn clone(&self) -> Self {
+        DeserializeOrDefault(self.0.clone())
+    }
+}
+
+impl<T> Deref for DeserializeOrDefault<T>
+where
+    T: Default,
+{
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> DerefMut for DeserializeOrDefault<T>
+where
+    T: Default,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }

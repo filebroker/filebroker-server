@@ -37,7 +37,7 @@ use crate::{
     query::functions::substring,
     retry_on_serialization_failure, run_retryable_transaction,
     schema::{hls_stream, post, s3_object, s3_object_metadata},
-    util::{deserialize_string_from_number, format_duration, join_api_url},
+    util::{deserialize_string_from_number, format_duration, join_api_url, DeserializeOrDefault},
     CONCURRENT_VIDEO_TRANSCODE_LIMIT,
 };
 
@@ -746,25 +746,25 @@ pub async fn generate_thumbnail(
 #[derive(Deserialize)]
 struct ExifToolOutput {
     #[serde(rename = "FileType")]
-    file_type: Option<String>,
+    file_type: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "FileTypeExtension")]
-    file_type_extension: Option<String>,
+    file_type_extension: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "MIMEType")]
-    mime_type: Option<String>,
+    mime_type: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Title")]
-    title: Option<String>,
+    title: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Artist")]
-    artist: Option<String>,
+    artist: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Album")]
-    album: Option<String>,
+    album: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Genre")]
-    genre: Option<String>,
+    genre: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "CreateDate", alias = "DateTimeOriginal")]
-    date: Option<String>,
+    date: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Albumartist")]
-    album_artist: Option<String>,
+    album_artist: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Composer")]
-    composer: Option<String>,
+    composer: DeserializeOrDefault<Option<String>>,
     #[serde(
         default,
         rename = "TrackNumber",
@@ -778,17 +778,17 @@ struct ExifToolOutput {
     )]
     disc_number: Option<String>,
     #[serde(rename = "Duration")]
-    duration: Option<String>,
+    duration: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "ImageWidth")]
-    width: Option<i32>,
+    width: DeserializeOrDefault<Option<i32>>,
     #[serde(rename = "ImageHeight")]
-    height: Option<i32>,
+    height: DeserializeOrDefault<Option<i32>>,
     #[serde(rename = "VideoFrameRate")]
-    frame_rate: Option<f64>,
+    frame_rate: DeserializeOrDefault<Option<f64>>,
     #[serde(rename = "AudioSampleRate", alias = "SampleRate")]
-    audio_sample_rate: Option<f64>,
+    audio_sample_rate: DeserializeOrDefault<Option<f64>>,
     #[serde(rename = "AudioChannels")]
-    audio_channels: Option<i32>,
+    audio_channels: DeserializeOrDefault<Option<i32>>,
 }
 
 #[derive(Deserialize)]
@@ -801,16 +801,16 @@ struct FfprobeOutput {
 #[allow(dead_code)]
 struct FfprobeStream {
     index: usize,
-    codec_type: String,
-    codec_name: Option<String>,
-    codec_long_name: Option<String>,
-    display_aspect_ratio: Option<String>,
+    codec_type: DeserializeOrDefault<String>,
+    codec_name: DeserializeOrDefault<Option<String>>,
+    codec_long_name: DeserializeOrDefault<Option<String>>,
+    display_aspect_ratio: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "r_frame_rate")]
-    frame_rate: Option<String>,
-    width: Option<i32>,
-    height: Option<i32>,
-    duration: Option<String>,
-    bit_rate: Option<String>,
+    frame_rate: DeserializeOrDefault<Option<String>>,
+    width: DeserializeOrDefault<Option<i32>>,
+    height: DeserializeOrDefault<Option<i32>>,
+    duration: DeserializeOrDefault<Option<String>>,
+    bit_rate: DeserializeOrDefault<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -1005,11 +1005,12 @@ pub async fn load_object_metadata(
         let mut audio_bit_rate_max: Option<i64> = None;
 
         for stream in ffprobe_output.streams {
-            if stream.codec_type == "video" {
+            if *stream.codec_type == "video" {
                 video_stream_count += 1;
-                video_codec_name = video_codec_name.or(stream.codec_name);
-                video_codec_long_name = video_codec_long_name.or(stream.codec_long_name);
-                if let Some(bit_rate) = stream.bit_rate {
+                video_codec_name = video_codec_name.or(stream.codec_name.into_inner());
+                video_codec_long_name =
+                    video_codec_long_name.or(stream.codec_long_name.into_inner());
+                if let Some(bit_rate) = stream.bit_rate.into_inner() {
                     let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
                         Error::FfmpegProcessError(format!(
                             "Failed to parse stream bit rate from ffprobe output: {e}"
@@ -1019,11 +1020,12 @@ pub async fn load_object_metadata(
                         .map(|b| b.max(bit_rate))
                         .or(Some(bit_rate));
                 }
-            } else if stream.codec_type == "audio" {
+            } else if *stream.codec_type == "audio" {
                 audio_stream_count += 1;
-                audio_codec_name = audio_codec_name.or(stream.codec_name);
-                audio_codec_long_name = audio_codec_long_name.or(stream.codec_long_name);
-                if let Some(bit_rate) = stream.bit_rate {
+                audio_codec_name = audio_codec_name.or(stream.codec_name.into_inner());
+                audio_codec_long_name =
+                    audio_codec_long_name.or(stream.codec_long_name.into_inner());
+                if let Some(bit_rate) = stream.bit_rate.into_inner() {
                     let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
                         Error::FfmpegProcessError(format!(
                             "Failed to parse stream bit rate from ffprobe output: {e}"
@@ -1106,7 +1108,7 @@ pub async fn load_object_metadata(
 
     let mut connection = acquire_db_connection().await?;
 
-    let duration = if let Some(ref duration_str) = exif_output.duration {
+    let duration = if let Some(ref duration_str) = *exif_output.duration {
         let pg_interval = diesel::sql_query("SELECT $1::interval AS pg_interval")
             .bind::<Text, _>(duration_str)
             .get_result::<PgIntervalQuery>(&mut connection)
@@ -1134,21 +1136,24 @@ pub async fn load_object_metadata(
 
             let metadata_to_insert = S3ObjectMetadata {
                 object_key: object.object_key,
-                file_type: exif_output.file_type,
-                file_type_extension: exif_output.file_type_extension,
-                mime_type: exif_output.mime_type.or(Some(object.mime_type)),
-                title: exif_output.title,
-                artist: exif_output.artist,
-                album: exif_output.album,
-                album_artist: exif_output.album_artist,
-                composer: exif_output.composer,
-                genre: exif_output.genre,
+                file_type: exif_output.file_type.into_inner(),
+                file_type_extension: exif_output.file_type_extension.into_inner(),
+                mime_type: exif_output
+                    .mime_type
+                    .into_inner()
+                    .or(Some(object.mime_type)),
+                title: exif_output.title.into_inner(),
+                artist: exif_output.artist.into_inner(),
+                album: exif_output.album.into_inner(),
+                album_artist: exif_output.album_artist.into_inner(),
+                composer: exif_output.composer.into_inner(),
+                genre: exif_output.genre.into_inner(),
                 date,
                 track_number: exif_output.track_number,
                 disc_number: exif_output.disc_number,
                 duration: duration.map(PgIntervalWrapper),
-                width: exif_output.width,
-                height: exif_output.height,
+                width: *exif_output.width,
+                height: *exif_output.height,
                 size: size.or(Some(object.size_bytes)),
                 bit_rate,
                 format_name,
@@ -1156,13 +1161,13 @@ pub async fn load_object_metadata(
                 video_stream_count,
                 video_codec_name,
                 video_codec_long_name,
-                video_frame_rate: exif_output.frame_rate,
+                video_frame_rate: *exif_output.frame_rate,
                 video_bit_rate_max,
                 audio_stream_count,
                 audio_codec_name,
                 audio_codec_long_name,
-                audio_sample_rate: exif_output.audio_sample_rate,
-                audio_channels: exif_output.audio_channels,
+                audio_sample_rate: *exif_output.audio_sample_rate,
+                audio_channels: *exif_output.audio_channels,
                 audio_bit_rate_max,
                 raw,
                 loaded: true,
