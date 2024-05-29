@@ -759,8 +759,10 @@ struct ExifToolOutput {
     album: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Genre")]
     genre: DeserializeOrDefault<Option<String>>,
-    #[serde(rename = "CreateDate", alias = "DateTimeOriginal")]
-    date: DeserializeOrDefault<Option<String>>,
+    #[serde(rename = "CreateDate")]
+    create_date: DeserializeOrDefault<Option<String>>,
+    #[serde(rename = "DateTimeOriginal")]
+    date_time_original: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Albumartist")]
     album_artist: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Composer")]
@@ -785,8 +787,10 @@ struct ExifToolOutput {
     height: DeserializeOrDefault<Option<i32>>,
     #[serde(rename = "VideoFrameRate")]
     frame_rate: DeserializeOrDefault<Option<f64>>,
-    #[serde(rename = "AudioSampleRate", alias = "SampleRate")]
+    #[serde(rename = "AudioSampleRate")]
     audio_sample_rate: DeserializeOrDefault<Option<f64>>,
+    #[serde(rename = "SampleRate")]
+    sample_rate: DeserializeOrDefault<Option<f64>>,
     #[serde(rename = "AudioChannels")]
     audio_channels: DeserializeOrDefault<Option<i32>>,
 }
@@ -926,7 +930,7 @@ pub async fn load_object_metadata(
         .map(content_type_is_audio)
         .unwrap_or_default();
 
-    let (
+    let FfprobeMediaMetadata {
         format_name,
         format_long_name,
         size,
@@ -940,123 +944,19 @@ pub async fn load_object_metadata(
         audio_codec_long_name,
         audio_bit_rate_max,
         ffprobe_output_str,
-    ) = if content_type_is_video || content_type_is_image || content_type_is_audio {
-        let ffprobe_proc = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-show_streams",
-                "-show_format",
-                "-print_format",
-                "json",
-                &object_url,
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                Error::FfmpegProcessError(format!("Failed to spawn ffprobe process: {e}"))
-            })?;
-
-        let ffprobe_proc_output = spawn_blocking(|| {
-            ffprobe_proc.wait_with_output().map_err(|e| {
-                Error::FfmpegProcessError(format!("Failed to get ffprobe process output: {e}"))
-            })
-        })
-        .await?;
-
-        if !ffprobe_proc_output.status.success() {
-            let error_msg = String::from_utf8_lossy(&ffprobe_proc_output.stderr);
-            return Err(Error::FfmpegProcessError(format!(
-                "ffprobe failed with status {}: {error_msg}",
-                ffprobe_proc_output.status
-            )));
-        }
-
-        let ffprobe_output_str = String::from_utf8_lossy(&ffprobe_proc_output.stdout).to_string();
-        let ffprobe_output =
-            serde_json::from_str::<FfprobeOutput>(&ffprobe_output_str).map_err(|e| {
-                Error::FfmpegProcessError(format!("Failed to deserialize ffprobe output: {e}"))
-            })?;
-
-        let format_name = ffprobe_output.format.format_name;
-        let format_long_name = ffprobe_output.format.format_long_name;
-        let size = ffprobe_output.format.size.parse::<i64>().map_err(|e| {
-            Error::FfmpegProcessError(format!("Failed to parse size from ffprobe output: {e}"))
-        })?;
-        let bit_rate = ffprobe_output
-            .format
-            .bit_rate
-            .map(|b| b.parse::<i64>())
-            .map_or(Ok(None), |v| v.map(Some))
-            .map_err(|e| {
-                Error::FfmpegProcessError(format!(
-                    "Failed to parse bit rate from ffprobe output: {e}"
-                ))
-            })?;
-
-        let mut video_stream_count = 0;
-        let mut video_codec_name: Option<String> = None;
-        let mut video_codec_long_name: Option<String> = None;
-        let mut video_bit_rate_max: Option<i64> = None;
-        let mut audio_stream_count = 0;
-        let mut audio_codec_name: Option<String> = None;
-        let mut audio_codec_long_name: Option<String> = None;
-        let mut audio_bit_rate_max: Option<i64> = None;
-
-        for stream in ffprobe_output.streams {
-            if *stream.codec_type == "video" {
-                video_stream_count += 1;
-                video_codec_name = video_codec_name.or(stream.codec_name.into_inner());
-                video_codec_long_name =
-                    video_codec_long_name.or(stream.codec_long_name.into_inner());
-                if let Some(bit_rate) = stream.bit_rate.into_inner() {
-                    let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
-                        Error::FfmpegProcessError(format!(
-                            "Failed to parse stream bit rate from ffprobe output: {e}"
-                        ))
-                    })?;
-                    video_bit_rate_max = video_bit_rate_max
-                        .map(|b| b.max(bit_rate))
-                        .or(Some(bit_rate));
-                }
-            } else if *stream.codec_type == "audio" {
-                audio_stream_count += 1;
-                audio_codec_name = audio_codec_name.or(stream.codec_name.into_inner());
-                audio_codec_long_name =
-                    audio_codec_long_name.or(stream.codec_long_name.into_inner());
-                if let Some(bit_rate) = stream.bit_rate.into_inner() {
-                    let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
-                        Error::FfmpegProcessError(format!(
-                            "Failed to parse stream bit rate from ffprobe output: {e}"
-                        ))
-                    })?;
-                    audio_bit_rate_max = audio_bit_rate_max
-                        .map(|b| b.max(bit_rate))
-                        .or(Some(bit_rate));
-                }
+    } = if content_type_is_video || content_type_is_image || content_type_is_audio {
+        match load_ffprobe_media_metadata(&object_url).await {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                log::error!(
+                    "Failed to load ffprobe metadata for {}: {e}",
+                    &source_object_key
+                );
+                FfprobeMediaMetadata::default()
             }
         }
-
-        (
-            Some(format_name),
-            Some(format_long_name),
-            Some(size),
-            bit_rate,
-            video_stream_count,
-            video_codec_name,
-            video_codec_long_name,
-            video_bit_rate_max,
-            audio_stream_count,
-            audio_codec_name,
-            audio_codec_long_name,
-            audio_bit_rate_max,
-            Some(ffprobe_output_str),
-        )
     } else {
-        (
-            None, None, None, None, 0, None, None, None, 0, None, None, None, None,
-        )
+        FfprobeMediaMetadata::default()
     };
 
     let raw = if let Some(ffprobe_output_str) = ffprobe_output_str {
@@ -1071,7 +971,9 @@ pub async fn load_object_metadata(
     };
 
     let date: Result<Option<DateTime<Utc>>, chrono::ParseError> = exif_output
-        .date
+        .create_date
+        .into_inner()
+        .or(exif_output.date_time_original.into_inner())
         .as_ref()
         .map(|d| {
             let postgres_date = EXIF_DATE_FORMAT_REGEX
@@ -1099,7 +1001,7 @@ pub async fn load_object_metadata(
         Err(e) => {
             log::error!(
                 "Failed to parse '{:?}' as date from exiftool output for {}: {e}",
-                &exif_output.date,
+                &date,
                 &source_object_key
             );
             None
@@ -1166,7 +1068,9 @@ pub async fn load_object_metadata(
                 audio_stream_count,
                 audio_codec_name,
                 audio_codec_long_name,
-                audio_sample_rate: *exif_output.audio_sample_rate,
+                audio_sample_rate: exif_output
+                    .audio_sample_rate
+                    .or(exif_output.sample_rate.into_inner()),
                 audio_channels: *exif_output.audio_channels,
                 audio_bit_rate_max,
                 raw,
@@ -1212,6 +1116,132 @@ pub async fn load_object_metadata(
     );
 
     Ok(())
+}
+
+#[derive(Default)]
+struct FfprobeMediaMetadata {
+    format_name: Option<String>,
+    format_long_name: Option<String>,
+    size: Option<i64>,
+    bit_rate: Option<i64>,
+    video_stream_count: i32,
+    video_codec_name: Option<String>,
+    video_codec_long_name: Option<String>,
+    video_bit_rate_max: Option<i64>,
+    audio_stream_count: i32,
+    audio_codec_name: Option<String>,
+    audio_codec_long_name: Option<String>,
+    audio_bit_rate_max: Option<i64>,
+    ffprobe_output_str: Option<String>,
+}
+
+async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMetadata, Error> {
+    let ffprobe_proc = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-print_format",
+            "json",
+            object_url,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::FfmpegProcessError(format!("Failed to spawn ffprobe process: {e}")))?;
+
+    let ffprobe_proc_output = spawn_blocking(|| {
+        ffprobe_proc.wait_with_output().map_err(|e| {
+            Error::FfmpegProcessError(format!("Failed to get ffprobe process output: {e}"))
+        })
+    })
+    .await?;
+
+    if !ffprobe_proc_output.status.success() {
+        let error_msg = String::from_utf8_lossy(&ffprobe_proc_output.stderr);
+        return Err(Error::FfmpegProcessError(format!(
+            "ffprobe failed with status {}: {error_msg}",
+            ffprobe_proc_output.status
+        )));
+    }
+
+    let ffprobe_output_str = String::from_utf8_lossy(&ffprobe_proc_output.stdout).to_string();
+    let ffprobe_output =
+        serde_json::from_str::<FfprobeOutput>(&ffprobe_output_str).map_err(|e| {
+            Error::FfmpegProcessError(format!("Failed to deserialize ffprobe output: {e}"))
+        })?;
+
+    let format_name = ffprobe_output.format.format_name;
+    let format_long_name = ffprobe_output.format.format_long_name;
+    let size = ffprobe_output.format.size.parse::<i64>().map_err(|e| {
+        Error::FfmpegProcessError(format!("Failed to parse size from ffprobe output: {e}"))
+    })?;
+    let bit_rate = ffprobe_output
+        .format
+        .bit_rate
+        .map(|b| b.parse::<i64>())
+        .map_or(Ok(None), |v| v.map(Some))
+        .map_err(|e| {
+            Error::FfmpegProcessError(format!("Failed to parse bit rate from ffprobe output: {e}"))
+        })?;
+
+    let mut video_stream_count = 0;
+    let mut video_codec_name: Option<String> = None;
+    let mut video_codec_long_name: Option<String> = None;
+    let mut video_bit_rate_max: Option<i64> = None;
+    let mut audio_stream_count = 0;
+    let mut audio_codec_name: Option<String> = None;
+    let mut audio_codec_long_name: Option<String> = None;
+    let mut audio_bit_rate_max: Option<i64> = None;
+
+    for stream in ffprobe_output.streams {
+        if *stream.codec_type == "video" {
+            video_stream_count += 1;
+            video_codec_name = video_codec_name.or(stream.codec_name.into_inner());
+            video_codec_long_name = video_codec_long_name.or(stream.codec_long_name.into_inner());
+            if let Some(bit_rate) = stream.bit_rate.into_inner() {
+                let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
+                    Error::FfmpegProcessError(format!(
+                        "Failed to parse stream bit rate from ffprobe output: {e}"
+                    ))
+                })?;
+                video_bit_rate_max = video_bit_rate_max
+                    .map(|b| b.max(bit_rate))
+                    .or(Some(bit_rate));
+            }
+        } else if *stream.codec_type == "audio" {
+            audio_stream_count += 1;
+            audio_codec_name = audio_codec_name.or(stream.codec_name.into_inner());
+            audio_codec_long_name = audio_codec_long_name.or(stream.codec_long_name.into_inner());
+            if let Some(bit_rate) = stream.bit_rate.into_inner() {
+                let bit_rate = bit_rate.parse::<i64>().map_err(|e| {
+                    Error::FfmpegProcessError(format!(
+                        "Failed to parse stream bit rate from ffprobe output: {e}"
+                    ))
+                })?;
+                audio_bit_rate_max = audio_bit_rate_max
+                    .map(|b| b.max(bit_rate))
+                    .or(Some(bit_rate));
+            }
+        }
+    }
+
+    Ok(FfprobeMediaMetadata {
+        format_name: Some(format_name),
+        format_long_name: Some(format_long_name),
+        size: Some(size),
+        bit_rate,
+        video_stream_count,
+        video_codec_name,
+        video_codec_long_name,
+        video_bit_rate_max,
+        audio_stream_count,
+        audio_codec_name,
+        audio_codec_long_name,
+        audio_bit_rate_max,
+        ffprobe_output_str: Some(ffprobe_output_str),
+    })
 }
 
 #[inline]
