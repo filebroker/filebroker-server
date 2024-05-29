@@ -1,6 +1,7 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use lazy_static::lazy_static;
+use regex::Regex;
 
 use super::{
     ast::{AttributeNode, ExpressionNode, Node, QueryBuilderVisitor, StringLiteralNode},
@@ -77,7 +78,23 @@ impl FromStr for Scope {
             "global" => Ok(Self::Global),
             "post" => Ok(Self::Post),
             "collection" => Ok(Self::Collection),
-            _ => Err(()),
+            "collection_item" => Ok(Self::CollectionItem { collection_pk: -1 }),
+            _ => {
+                lazy_static! {
+                    static ref COLLECTION_ITEM_REGEX: Regex =
+                        Regex::new(r"^collection_item_(\d+)$").unwrap();
+                }
+
+                if let Some(captures) = COLLECTION_ITEM_REGEX.captures(s) {
+                    let collection_pk = captures
+                        .get(1)
+                        .and_then(|m| m.as_str().parse().ok())
+                        .unwrap_or(-1);
+                    Ok(Self::CollectionItem { collection_pk })
+                } else {
+                    Err(())
+                }
+            }
         }
     }
 }

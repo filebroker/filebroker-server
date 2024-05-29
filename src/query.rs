@@ -1061,6 +1061,7 @@ pub fn string_is_valid_ident(s: &str) -> bool {
     let mut chars = s.chars();
     chars.next().map(char::is_alphabetic).unwrap_or(false)
         && chars.all(lexer::char_is_valid_identifier)
+        && lexer::Tag::try_from(s).is_err()
 }
 
 async fn find_expression_autocomplete_suggestions(
