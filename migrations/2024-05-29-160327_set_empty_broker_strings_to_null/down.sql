@@ -1,0 +1,2 @@
+DROP TRIGGER before_insert_or_update_set_empty_broker_strings_to_null ON broker;
+DROP FUNCTION set_empty_broker_strings_to_null();

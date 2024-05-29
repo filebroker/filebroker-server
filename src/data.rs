@@ -25,6 +25,7 @@ use crate::{
     post,
     query::PostDetailed,
     schema::{broker, s3_object, s3_object_metadata},
+    util::NOT_BLANK_REGEX,
 };
 
 pub mod down;
@@ -296,15 +297,15 @@ pub async fn get_object_head_handler(
 
 #[derive(Deserialize, Validate)]
 pub struct CreateBrokerRequest {
-    #[validate(length(min = 1, max = 255))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub name: String,
-    #[validate(length(min = 1, max = 255))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub bucket: String,
-    #[validate(length(min = 1, max = 2048))]
+    #[validate(length(min = 1, max = 2048), regex(path = *NOT_BLANK_REGEX))]
     pub endpoint: String,
-    #[validate(length(min = 1, max = 255))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub access_key: String,
-    #[validate(length(min = 1, max = 255))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub secret_key: String,
     pub is_aws_region: bool,
     pub remove_duplicate_files: bool,

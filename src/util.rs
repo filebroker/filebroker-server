@@ -1,9 +1,15 @@
 use std::{fmt, net::SocketAddr, time::Duration};
 
+use lazy_static::lazy_static;
+use regex::Regex;
 use serde::{Deserialize, Deserializer};
 use url::Url;
 
 use crate::{error::Error, API_BASE_URL};
+
+lazy_static! {
+    pub static ref NOT_BLANK_REGEX: Regex = Regex::new(r".*\S.*").expect("Failed to compile regex");
+}
 
 #[derive(Debug, Clone)]
 pub struct FormattedDuration(Duration);
