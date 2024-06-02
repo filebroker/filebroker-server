@@ -236,8 +236,8 @@ diesel::table! {
         composer -> Nullable<Text>,
         genre -> Nullable<Text>,
         date -> Nullable<Timestamptz>,
-        track_number -> Nullable<Text>,
-        disc_number -> Nullable<Text>,
+        track_number -> Nullable<Int4>,
+        disc_number -> Nullable<Int4>,
         duration -> Nullable<Interval>,
         width -> Nullable<Int4>,
         height -> Nullable<Int4>,
@@ -258,6 +258,8 @@ diesel::table! {
         audio_bit_rate_max -> Nullable<Int8>,
         raw -> Jsonb,
         loaded -> Bool,
+        track_count -> Nullable<Int4>,
+        disc_count -> Nullable<Int4>,
     }
 }
 

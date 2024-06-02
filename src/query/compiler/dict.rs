@@ -415,7 +415,7 @@ lazy_static! {
             Arc::new(Attribute {
                 table: "s3_object_metadata",
                 selection_expression: String::from("s3_object_metadata.track_number"),
-                return_type: Type::String,
+                return_type: Type::Number,
                 allow_sorting: true,
                 nullable: true
             })
@@ -425,7 +425,7 @@ lazy_static! {
             Arc::new(Attribute {
                 table: "s3_object_metadata",
                 selection_expression: String::from("s3_object_metadata.disc_number"),
-                return_type: Type::String,
+                return_type: Type::Number,
                 allow_sorting: true,
                 nullable: true
             })

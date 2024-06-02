@@ -291,12 +291,18 @@ pub struct PostS3ObjectMetadata {
     #[diesel(sql_type = Nullable<Timestamptz>)]
     #[diesel(column_name = "post_s3_object_metadata_date")]
     pub date: Option<DateTime<Utc>>,
-    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(sql_type = Nullable<Integer>)]
     #[diesel(column_name = "post_s3_object_metadata_track_number")]
-    pub track_number: Option<String>,
-    #[diesel(sql_type = Nullable<Varchar>)]
+    pub track_number: Option<i32>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    #[diesel(column_name = "post_s3_object_metadata_track_count")]
+    pub track_count: Option<i32>,
+    #[diesel(sql_type = Nullable<Integer>)]
     #[diesel(column_name = "post_s3_object_metadata_disc_number")]
-    pub disc_number: Option<String>,
+    pub disc_number: Option<i32>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    #[diesel(column_name = "post_s3_object_metadata_disc_count")]
+    pub disc_count: Option<i32>,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_s3_object_metadata_duration")]
     pub duration: Option<String>,
@@ -1214,8 +1220,8 @@ pub struct S3ObjectMetadata {
     pub composer: Option<String>,
     pub genre: Option<String>,
     pub date: Option<DateTime<Utc>>,
-    pub track_number: Option<String>,
-    pub disc_number: Option<String>,
+    pub track_number: Option<i32>,
+    pub disc_number: Option<i32>,
     pub duration: Option<PgIntervalWrapper>,
     pub width: Option<i32>,
     pub height: Option<i32>,
@@ -1236,6 +1242,8 @@ pub struct S3ObjectMetadata {
     pub audio_bit_rate_max: Option<i64>,
     pub raw: serde_json::Value,
     pub loaded: bool,
+    pub track_count: Option<i32>,
+    pub disc_count: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]

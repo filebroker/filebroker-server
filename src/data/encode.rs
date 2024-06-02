@@ -825,6 +825,23 @@ struct FfprobeFormat {
     size: String,
     duration: Option<String>,
     bit_rate: Option<String>,
+    #[serde(default)]
+    tags: FfprobeTags,
+}
+
+#[derive(Clone, Default, Deserialize)]
+struct FfprobeTags {
+    creation_time: DeserializeOrDefault<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_string_from_number")]
+    track: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_from_number")]
+    disc: Option<String>,
+    genre: DeserializeOrDefault<Option<String>>,
+    title: DeserializeOrDefault<Option<String>>,
+    composer: DeserializeOrDefault<Option<String>>,
+    artist: DeserializeOrDefault<Option<String>>,
+    album: DeserializeOrDefault<Option<String>>,
+    album_artist: DeserializeOrDefault<Option<String>>,
 }
 
 pub async fn load_object_metadata(
@@ -870,7 +887,7 @@ pub async fn load_object_metadata(
         let exif_proc = Command::new("exiftool")
             .arg("-j")
             .arg("--struct")
-            .arg("--fast")
+            .arg("-fast")
             .arg("-api")
             .arg("largefilesupport=1")
             .arg("-")
@@ -939,11 +956,13 @@ pub async fn load_object_metadata(
         video_codec_name,
         video_codec_long_name,
         video_bit_rate_max,
+        video_frame_rate,
         audio_stream_count,
         audio_codec_name,
         audio_codec_long_name,
         audio_bit_rate_max,
         ffprobe_output_str,
+        ffprobe_tags,
     } = if content_type_is_video || content_type_is_image || content_type_is_audio {
         match load_ffprobe_media_metadata(&object_url).await {
             Ok(metadata) => metadata,
@@ -966,14 +985,15 @@ pub async fn load_object_metadata(
         .map_err(|e| Error::SerialisationError(format!("Failed to serialize raw metadate: {e}")))?
     } else {
         serde_json::from_str(&format!("{{\"exiftool\": {exif_output_str}}}")).map_err(|e| {
-            Error::SerialisationError(format!("Failed to serialize raw metadate: {e}"))
+            Error::SerialisationError(format!("Failed to serialize raw metadata: {e}"))
         })?
     };
 
-    let date: Result<Option<DateTime<Utc>>, chrono::ParseError> = exif_output
+    let date_str = exif_output
         .create_date
         .into_inner()
-        .or(exif_output.date_time_original.into_inner())
+        .or(exif_output.date_time_original.into_inner());
+    let date: Result<Option<DateTime<Utc>>, chrono::ParseError> = date_str
         .as_ref()
         .map(|d| {
             let postgres_date = EXIF_DATE_FORMAT_REGEX
@@ -999,14 +1019,33 @@ pub async fn load_object_metadata(
     let date = match date {
         Ok(date) => date,
         Err(e) => {
-            log::error!(
+            log::warn!(
                 "Failed to parse '{:?}' as date from exiftool output for {}: {e}",
-                &date,
+                &date_str,
                 &source_object_key
             );
             None
         }
     };
+
+    let date = date.or_else(|| {
+        if let Some(ffprobe_date) = ffprobe_tags.creation_time.into_inner() {
+            let parsed_date = DateTime::parse_from_rfc3339(&ffprobe_date);
+            match parsed_date {
+                Ok(parsed_date) => Some(parsed_date.with_timezone(&Utc)),
+                Err(e) => {
+                    log::warn!(
+                        "Failed to parse '{:?}' as date from ffprobe output for {}: {e}",
+                        &ffprobe_date,
+                        &source_object_key
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    });
 
     let mut connection = acquire_db_connection().await?;
 
@@ -1018,9 +1057,10 @@ pub async fn load_object_metadata(
         match pg_interval {
             Ok(pg_interval) => Some(pg_interval.interval),
             Err(e) => {
-                log::error!(
-                    "Failed to cast duration '{:?}' to postgres interval: {e}",
-                    &exif_output.duration
+                log::warn!(
+                    "Failed to cast duration '{:?}' to postgres interval for {}: {e}",
+                    &exif_output.duration,
+                    &source_object_key
                 );
                 None
             }
@@ -1028,6 +1068,48 @@ pub async fn load_object_metadata(
     } else {
         None
     };
+
+    fn parse_track_or_disc_number(
+        track_or_disc_number: Option<String>,
+        source_object_key: &str,
+    ) -> (Option<i32>, Option<i32>) {
+        track_or_disc_number
+            .map(|track_number| {
+                lazy_static! {
+                    static ref EXIF_TRACK_NUMBER_REGEX: Regex =
+                        Regex::new(r"^(\d+)\s*of\s*(\d+)$").unwrap();
+                    static ref FFPROBE_TRACK_NUMBER_REGEX: Regex =
+                        Regex::new(r"^(\d+)\s*/\s*(\d+)$").unwrap();
+                }
+                if let Ok(num) = track_number.trim().parse::<i32>() {
+                    (Some(num), None)
+                } else if let Some(captures) = EXIF_TRACK_NUMBER_REGEX.captures(&track_number) {
+                    let track_number = captures.get(1).and_then(|m| m.as_str().parse::<i32>().ok());
+                    let track_count = captures.get(2).and_then(|m| m.as_str().parse::<i32>().ok());
+                    (track_number, track_count)
+                } else if let Some(captures) = FFPROBE_TRACK_NUMBER_REGEX.captures(&track_number) {
+                    let track_number = captures.get(1).and_then(|m| m.as_str().parse::<i32>().ok());
+                    let track_count = captures.get(2).and_then(|m| m.as_str().parse::<i32>().ok());
+                    (track_number, track_count)
+                } else {
+                    log::warn!(
+                        "Cannot to parse track or disc number from '{}' for {}",
+                        &track_number,
+                        &source_object_key
+                    );
+                    (None, None)
+                }
+            })
+            .unwrap_or_default()
+    }
+    let (track_number, track_count) = parse_track_or_disc_number(
+        exif_output.track_number.or(ffprobe_tags.track),
+        &source_object_key,
+    );
+    let (disc_number, disc_count) = parse_track_or_disc_number(
+        exif_output.disc_number.or(ffprobe_tags.disc),
+        &source_object_key,
+    );
 
     let s3_object_metadata = run_retryable_transaction(&mut connection, |connection| {
         async move {
@@ -1044,15 +1126,33 @@ pub async fn load_object_metadata(
                     .mime_type
                     .into_inner()
                     .or(Some(object.mime_type)),
-                title: exif_output.title.into_inner(),
-                artist: exif_output.artist.into_inner(),
-                album: exif_output.album.into_inner(),
-                album_artist: exif_output.album_artist.into_inner(),
-                composer: exif_output.composer.into_inner(),
-                genre: exif_output.genre.into_inner(),
+                title: exif_output
+                    .title
+                    .into_inner()
+                    .or(ffprobe_tags.title.into_inner()),
+                artist: exif_output
+                    .artist
+                    .into_inner()
+                    .or(ffprobe_tags.artist.into_inner()),
+                album: exif_output
+                    .album
+                    .into_inner()
+                    .or(ffprobe_tags.album.into_inner()),
+                album_artist: exif_output
+                    .album_artist
+                    .into_inner()
+                    .or(ffprobe_tags.album_artist.into_inner()),
+                composer: exif_output
+                    .composer
+                    .into_inner()
+                    .or(ffprobe_tags.composer.into_inner()),
+                genre: exif_output
+                    .genre
+                    .into_inner()
+                    .or(ffprobe_tags.genre.into_inner()),
                 date,
-                track_number: exif_output.track_number,
-                disc_number: exif_output.disc_number,
+                track_number,
+                disc_number,
                 duration: duration.map(PgIntervalWrapper),
                 width: *exif_output.width,
                 height: *exif_output.height,
@@ -1063,7 +1163,7 @@ pub async fn load_object_metadata(
                 video_stream_count,
                 video_codec_name,
                 video_codec_long_name,
-                video_frame_rate: *exif_output.frame_rate,
+                video_frame_rate: (*exif_output.frame_rate).or(video_frame_rate),
                 video_bit_rate_max,
                 audio_stream_count,
                 audio_codec_name,
@@ -1075,6 +1175,8 @@ pub async fn load_object_metadata(
                 audio_bit_rate_max,
                 raw,
                 loaded: true,
+                track_count,
+                disc_count,
             };
 
             let s3_object_metadata = diesel::insert_into(s3_object_metadata::table)
@@ -1128,11 +1230,13 @@ struct FfprobeMediaMetadata {
     video_codec_name: Option<String>,
     video_codec_long_name: Option<String>,
     video_bit_rate_max: Option<i64>,
+    video_frame_rate: Option<f64>,
     audio_stream_count: i32,
     audio_codec_name: Option<String>,
     audio_codec_long_name: Option<String>,
     audio_bit_rate_max: Option<i64>,
     ffprobe_output_str: Option<String>,
+    ffprobe_tags: FfprobeTags,
 }
 
 async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMetadata, Error> {
@@ -1190,12 +1294,45 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
     let mut video_codec_name: Option<String> = None;
     let mut video_codec_long_name: Option<String> = None;
     let mut video_bit_rate_max: Option<i64> = None;
+    let mut video_frame_rate: Option<f64> = None;
     let mut audio_stream_count = 0;
     let mut audio_codec_name: Option<String> = None;
     let mut audio_codec_long_name: Option<String> = None;
     let mut audio_bit_rate_max: Option<i64> = None;
 
     for stream in ffprobe_output.streams {
+        if let Some(frame_rate) = stream.frame_rate.into_inner() {
+            let parsed_frame_rate = match frame_rate.parse::<f64>() {
+                Ok(frame_rate) => Some(frame_rate),
+                Err(_) => {
+                    let frame_rate_parts: Vec<&str> = frame_rate.split('/').collect();
+                    if frame_rate_parts.len() == 2 {
+                        let numerator = frame_rate_parts[0].parse::<f64>().ok();
+                        let denominator = frame_rate_parts[1].parse::<f64>().ok();
+                        if let (Some(numerator), Some(denominator)) = (numerator, denominator) {
+                            Some((numerator / denominator * 100.0).round() / 100.0)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(frame_rate) = parsed_frame_rate {
+                video_frame_rate = video_frame_rate
+                    .map(|fr| fr.max(frame_rate))
+                    .or(Some(frame_rate));
+            } else {
+                log::warn!(
+                    "Failed to parse frame rate '{}' from ffprobe output for {}",
+                    &frame_rate,
+                    object_url,
+                );
+            }
+        }
+
         if *stream.codec_type == "video" {
             video_stream_count += 1;
             video_codec_name = video_codec_name.or(stream.codec_name.into_inner());
@@ -1236,11 +1373,13 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         video_codec_name,
         video_codec_long_name,
         video_bit_rate_max,
+        video_frame_rate,
         audio_stream_count,
         audio_codec_name,
         audio_codec_long_name,
         audio_bit_rate_max,
         ffprobe_output_str: Some(ffprobe_output_str),
+        ffprobe_tags: ffprobe_output.format.tags,
     })
 }
 
