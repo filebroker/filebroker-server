@@ -39,7 +39,7 @@ pub mod compiler;
 const DEFAULT_LIMIT_STR: &str = "50";
 const MAX_LIMIT: u32 = 100;
 const MAX_FULL_LIMIT: u32 = 10000;
-const MAX_SHUFFLE_LIMIT_STR: &str = "10000";
+const MAX_FULL_LIMIT_STR: &str = "10000";
 
 macro_rules! report_missing_pks {
     ($tab:ident, $pks:expr, $connection:expr) => {

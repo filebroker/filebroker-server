@@ -14,7 +14,7 @@ use super::QueryParameters;
 use crate::{
     model::User,
     perms,
-    query::{Direction, Ordering, DEFAULT_LIMIT_STR, MAX_SHUFFLE_LIMIT_STR},
+    query::{Direction, Ordering, DEFAULT_LIMIT_STR, MAX_FULL_LIMIT_STR},
 };
 
 pub mod ast;
@@ -83,51 +83,24 @@ pub fn compile_sql(
     let from_table_name = query_parameters
         .from_table_override
         .unwrap_or(query_parameters.base_table_name);
-    if !query_parameters.shuffle {
-        // Only get a full count of the result set if the number of results is below 100000, the count query that
-        // checks if there are more than 100000 results does not apply the post permission conditions to speed up
-        // the query, that means the effective result size may be smaller.
-        sql_query.push_str("countCte AS (SELECT CASE WHEN (SELECT COUNT(*) FROM (SELECT ");
-        sql_query.push_str(from_table_name);
-        sql_query.push_str(".pk FROM ");
-        sql_query.push_str(from_table_name);
-        if !query_parameters.join_statements.is_empty() {
-            sql_query.push(' ');
-            sql_query.push_str(&query_parameters.join_statements.join(" "));
-        }
-        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
-        sql_query
-            .push_str(" LIMIT 100000) limitedPks) < 100000 THEN (SELECT COUNT(*) FROM (SELECT ");
-        sql_query.push_str(from_table_name);
-        sql_query.push_str(".pk FROM ");
-        sql_query.push_str(from_table_name);
-        if !query_parameters.join_statements.is_empty() {
-            sql_query.push(' ');
-            sql_query.push_str(&query_parameters.join_statements.join(" "));
-        }
-        perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
-        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
-        sql_query.push_str(") pks) END AS full_count)");
-    } else {
-        sql_query.push_str("reducedRandomSet AS (SELECT ");
-        sql_query.push_str(from_table_name);
-        sql_query.push_str(".pk FROM ");
-        sql_query.push_str(from_table_name);
-        if !query_parameters.join_statements.is_empty() {
-            sql_query.push(' ');
-            sql_query.push_str(&query_parameters.join_statements.join(" "));
-        }
-        perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
-        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
-        apply_ordering(
-            &mut sql_query,
-            &mut query_parameters.ordering,
-            &query_parameters.fallback_orderings,
-        )?;
-        sql_query.push_str(" LIMIT ");
-        sql_query.push_str(MAX_SHUFFLE_LIMIT_STR);
-        sql_query.push_str("), countCte AS (SELECT count(*) AS full_count FROM reducedRandomSet)");
+
+    // Load a full set of PKs limited by MAX_FULL_LIMIT_STR (10000) to create a limited count of results
+    // as well as a limited set of PKs to shuffle (shuffling is too slow for larger results)
+    sql_query.push_str("limitedPkSet AS (SELECT ");
+    sql_query.push_str(from_table_name);
+    sql_query.push_str(".pk FROM ");
+    sql_query.push_str(from_table_name);
+    if !query_parameters.join_statements.is_empty() {
+        sql_query.push(' ');
+        sql_query.push_str(&query_parameters.join_statements.join(" "));
     }
+    perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
+    apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+    sql_query.push_str(" LIMIT ");
+    sql_query.push_str(MAX_FULL_LIMIT_STR);
+    sql_query.push_str("), countCte AS (SELECT NULLIF((SELECT count(*) FROM limitedPkSet), ");
+    sql_query.push_str(MAX_FULL_LIMIT_STR);
+    sql_query.push_str(") AS full_count)");
 
     sql_query.push_str(" SELECT ");
     sql_query.push_str(&query_parameters.select_statements.join(", "));
@@ -149,7 +122,7 @@ pub fn compile_sql(
     if query_parameters.shuffle {
         sql_query.push_str(" WHERE ");
         sql_query.push_str(from_table_name);
-        sql_query.push_str(".pk in(SELECT pk FROM reducedRandomSet) ORDER BY RANDOM()");
+        sql_query.push_str(".pk IN(SELECT pk FROM limitedPkSet) ORDER BY RANDOM()");
     } else {
         apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
         apply_ordering(
@@ -198,7 +171,7 @@ pub fn compile_window_query(
         .from_table_override
         .unwrap_or(query_parameters.base_table_name);
     if !query_parameters.shuffle {
-        sql_query.push_str("SELECT * FROM (SELECT ROW_NUMBER() OVER(");
+        sql_query.push_str(" SELECT * FROM (SELECT ROW_NUMBER() OVER(");
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
@@ -274,7 +247,7 @@ pub fn compile_window_query(
             &query_parameters.fallback_orderings,
         )?;
         sql_query.push_str(" LIMIT ");
-        sql_query.push_str(MAX_SHUFFLE_LIMIT_STR);
+        sql_query.push_str(MAX_FULL_LIMIT_STR);
         sql_query.push(')');
 
         sql_query.push_str(" SELECT 1::BIGINT AS row_number, NULL AS prev, ");
