@@ -314,13 +314,12 @@ pub async fn create_post_collection_handler(
             let current_ordinal = if let Some(ref post_pks) = request.post_pks {
                 if !post_pks.is_empty() {
                     // load posts that are actually accessible and report missing or inaccessible pks as error
-                    let posts =
-                        perms::load_posts_secured(post_pks, connection, Some(&user)).await?;
-                    let post_collection_items = posts
+                    perms::load_posts_secured(post_pks, connection, Some(&user)).await?;
+                    let post_collection_items = post_pks
                         .into_iter()
                         .enumerate()
-                        .map(|(idx, post_full)| NewPostCollectionItem {
-                            fk_post: post_full.post.pk,
+                        .map(|(idx, post_pk)| NewPostCollectionItem {
+                            fk_post: *post_pk,
                             fk_post_collection: post_collection.pk,
                             fk_added_by: user.pk,
                             ordinal: idx as i32,
