@@ -1,5 +1,7 @@
 #![allow(clippy::extra_unused_lifetimes)]
 
+use std::hash::{Hash, Hasher};
+
 use chrono::{offset::Utc, DateTime};
 use diesel::data_types::PgInterval;
 use diesel::deserialize::{self, FromSql, FromSqlRow};
@@ -890,6 +892,18 @@ pub struct Tag {
     pub pk: i64,
     pub tag_name: String,
     pub creation_timestamp: DateTime<Utc>,
+}
+
+impl PartialEq for Tag {
+    fn eq(&self, other: &Self) -> bool {
+        self.pk == other.pk
+    }
+}
+
+impl Hash for Tag {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.pk.hash(state);
+    }
 }
 
 #[derive(Insertable)]

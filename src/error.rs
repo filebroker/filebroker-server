@@ -74,6 +74,10 @@ pub enum Error {
     #[error("Cannot access objects with provided pks {0:?}")]
     InaccessibleObjectsError(Vec<i64>),
 
+    // 404
+    #[error("The requested entity was not found")]
+    NotFoundError,
+
     // 416
     #[error("The provided byte range is invalid: {1}")]
     IllegalRangeError(u64, String),
@@ -119,6 +123,7 @@ pub enum Error {
 impl Error {
     pub fn status_code(&self) -> StatusCode {
         match self {
+            Error::NotFoundError => StatusCode::NOT_FOUND,
             Error::InaccessibleObjectError(_)
             | Error::InaccessibleS3ObjectError(_)
             | Error::InaccessibleObjectsError(_) => StatusCode::FORBIDDEN,
@@ -199,6 +204,8 @@ impl Error {
             Self::InaccessibleObjectError(_) => 403_001,
             Self::InaccessibleS3ObjectError(_) => 403_002,
             Self::InaccessibleObjectsError(_) => 403_003,
+
+            Self::NotFoundError => 404_001,
 
             Self::IllegalRangeError(..) => 416_001,
 

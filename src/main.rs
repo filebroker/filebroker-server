@@ -36,6 +36,7 @@ use std::{
     thread::JoinHandle,
     time::Duration,
 };
+use tags::GetTagsFilter;
 use tls_listener::{AsyncTls, TlsListener};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -514,6 +515,28 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(auth::with_user())
         .and_then(post::delete::delete_posts_collections_handler);
 
+    let get_tag_route = warp::path("get-tag")
+        .and(warp::get())
+        .and(warp::path::param::<i64>())
+        .and_then(tags::get_tag_handler);
+
+    let get_tags_route = warp::path("get-tags")
+        .and(warp::get())
+        .and(warp::query::<GetTagsFilter>())
+        .and_then(tags::get_tags_handler);
+
+    let update_tag_route = warp::path("update-tag")
+        .and(warp::post())
+        .and(warp::path::param::<i64>())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(tags::update_tag_handler);
+
+    let get_tag_hierarchy_route = warp::path("get-tag-hierarchy")
+        .and(warp::get())
+        .and(warp::path::param::<i64>())
+        .and_then(tags::get_tag_hierarchy_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -557,7 +580,12 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .or(edit_post_collection_route)
         .or(delete_posts_route)
         .boxed()
-        .or(delete_post_collections_route);
+        .or(delete_post_collections_route)
+        .or(get_tag_route)
+        .or(get_tags_route)
+        .or(update_tag_route)
+        .or(get_tag_hierarchy_route)
+        .boxed();
 
     let filter = routes
         .recover(error::handle_rejection)
