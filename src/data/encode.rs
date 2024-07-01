@@ -1,5 +1,5 @@
 use std::{
-    cmp::{max, min, Reverse},
+    cmp::Reverse,
     collections::HashSet,
     fmt::Write,
     process::{Command, Output, Stdio},
@@ -97,7 +97,7 @@ lazy_static! {
             Some(limit) => limit,
             None => {
                 let num_cpus = num_cpus::get();
-                max(1, min(8, num_cpus / 2))
+                (num_cpus / 2).clamp(1, 8)
             }
         };
         log::info!("CONCURRENT_VIDEO_TRANSCODE_LIMIT set to {limit}");

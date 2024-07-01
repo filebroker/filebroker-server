@@ -122,7 +122,6 @@ pub struct QueryParameters {
     pub shuffle: bool,
     pub writable_only: bool,
     pub base_table_name: &'static str,
-    pub tag_relation_table_name: &'static str,
     pub select_statements: Vec<String>,
     pub join_statements: Vec<String>,
     pub max_limit: u32,
@@ -620,7 +619,6 @@ fn prepare_query_parameters(
             shuffle: query_parameters_filter.shuffle.unwrap_or(false),
             writable_only: query_parameters_filter.writable_only.unwrap_or(false),
             base_table_name: "post",
-            tag_relation_table_name: "post_tag",
             select_statements: vec![
                 String::from("post.pk AS post_pk"),
                 String::from("post.data_url AS post_data_url"),
@@ -726,7 +724,6 @@ fn prepare_query_parameters(
             shuffle: query_parameters_filter.shuffle.unwrap_or(false),
             writable_only: query_parameters_filter.writable_only.unwrap_or(false),
             base_table_name: "post_collection",
-            tag_relation_table_name: "post_collection_tag",
             select_statements: vec![
                 String::from("post_collection.pk AS post_collection_pk"),
                 String::from("post_collection.title AS post_collection_title"),
@@ -782,7 +779,6 @@ fn prepare_query_parameters(
             shuffle: query_parameters_filter.shuffle.unwrap_or(false),
             writable_only: query_parameters_filter.writable_only.unwrap_or(false),
             base_table_name: "post",
-            tag_relation_table_name: "post_tag",
             select_statements: vec![
                 String::from("post_collection_item.pk AS post_collection_item_pk"),
                 String::from("post_collection_item.ordinal AS post_collection_item_ordinal"),

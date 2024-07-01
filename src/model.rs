@@ -487,6 +487,7 @@ impl SearchQueryResultObject for PostQueryObject {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Queryable, QueryableByName)]
 pub struct PostWindowQueryObject {
     #[diesel(sql_type = BigInt)]

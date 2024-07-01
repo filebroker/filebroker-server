@@ -316,7 +316,7 @@ pub async fn create_post_collection_handler(
                     // load posts that are actually accessible and report missing or inaccessible pks as error
                     perms::load_posts_secured(post_pks, connection, Some(&user)).await?;
                     let post_collection_items = post_pks
-                        .into_iter()
+                        .iter()
                         .enumerate()
                         .map(|(idx, post_pk)| NewPostCollectionItem {
                             fk_post: *post_pk,
