@@ -406,7 +406,7 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
 
     let get_brokers_route = warp::path("get-brokers")
         .and(warp::get())
-        .and(auth::with_user_optional())
+        .and(auth::with_user())
         .and_then(data::get_brokers_handler);
 
     let find_tag_route = warp::path("find-tag")

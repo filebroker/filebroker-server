@@ -1,5 +1,11 @@
+use std::collections::{HashMap, HashSet};
+
+use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
-use diesel::QueryDsl;
+use diesel::{
+    dsl::{exists, max, not, sum},
+    BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
+};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{Stream, TryStreamExt};
 use mime::Mime;
@@ -21,10 +27,15 @@ use crate::{
     diesel::{ExpressionMethods, OptionalExtension},
     error::Error,
     model::{Broker, NewBroker, S3Object, S3ObjectMetadata, User},
-    perms::{self, PostJoinedS3Object},
+    perms::{
+        self, get_group_access_or_public_condition, get_group_membership_condition,
+        PostJoinedS3Object,
+    },
     post,
     query::PostDetailed,
-    schema::{broker, s3_object, s3_object_metadata},
+    schema::{
+        broker, broker_access, s3_object, s3_object_metadata, user_group, user_group_membership,
+    },
     util::NOT_BLANK_REGEX,
 };
 
@@ -371,11 +382,108 @@ pub async fn create_broker_handler(
     Ok(warp::reply::json(&created_broker))
 }
 
-pub async fn get_brokers_handler(user: Option<User>) -> Result<impl Reply, Rejection> {
+#[derive(Serialize)]
+pub struct BrokerAvailability {
+    pub broker: Broker,
+    pub used_bytes: i64,
+    pub quota_bytes: Option<i64>,
+}
+
+pub async fn get_brokers_handler(user: User) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
-    Ok(warp::reply::json(
-        &perms::get_brokers_secured(&mut connection, user.as_ref()).await?,
-    ))
+    let brokers = perms::get_brokers_secured(&mut connection, Some(&user)).await?;
+    let broker_pks = brokers.iter().map(|b| b.pk).collect::<Vec<i64>>();
+
+    let broker_usages = s3_object::table
+        .group_by(s3_object::fk_broker)
+        .select((s3_object::fk_broker, sum(s3_object::size_bytes)))
+        .filter(
+            s3_object::fk_uploader
+                .eq(user.pk)
+                .and(s3_object::fk_broker.eq_any(&broker_pks)),
+        )
+        .load::<(i64, Option<BigDecimal>)>(&mut connection)
+        .await
+        .map_err(Error::from)?
+        .into_iter()
+        .map(|(broker_pk, size_used)| (broker_pk, size_used.unwrap_or(BigDecimal::from(0))))
+        .collect::<HashMap<i64, BigDecimal>>();
+
+    let unlimited_brokers = broker::table
+        .select(broker::pk)
+        .filter(
+            broker::pk.eq_any(&broker_pks).and(
+                broker::fk_owner.eq(user.pk).or(exists(
+                    broker_access::table.filter(
+                        get_group_access_or_public_condition!(
+                            broker_access::fk_broker,
+                            broker::pk,
+                            &Some(user.pk),
+                            broker_access::fk_granted_group.is_null(),
+                            broker_access::fk_granted_group
+                        )
+                        .and(broker_access::quota.is_null()),
+                    ),
+                )),
+            ),
+        )
+        .load::<i64>(&mut connection)
+        .await
+        .map_err(Error::from)?
+        .into_iter()
+        .collect::<HashSet<i64>>();
+
+    let broker_quotas = broker::table
+        .inner_join(
+            broker_access::table.on(get_group_access_or_public_condition!(
+                broker_access::fk_broker,
+                broker::pk,
+                &Some(user.pk),
+                broker_access::fk_granted_group.is_null(),
+                broker_access::fk_granted_group
+            )
+            .and(broker_access::quota.is_not_null())),
+        )
+        .group_by(broker::pk)
+        .select((broker::pk, max(broker_access::quota)))
+        .filter(
+            broker::pk
+                .eq_any(&broker_pks)
+                .and(not(broker::pk.eq_any(&unlimited_brokers))),
+        )
+        .load::<(i64, Option<i64>)>(&mut connection)
+        .await
+        .map_err(Error::from)?
+        .into_iter()
+        .collect::<HashMap<i64, Option<i64>>>();
+
+    let mut broker_availabilities = Vec::new();
+    for broker in brokers {
+        let used_bytes = broker_usages
+            .get(&broker.pk)
+            .map(|usage_bytes| {
+                usage_bytes.to_i64().ok_or_else(|| {
+                    Error::InternalError(format!(
+                        "Could not convert broker usage bytes {} to i64",
+                        usage_bytes
+                    ))
+                })
+            })
+            .unwrap_or(Ok(0))?;
+        let quota_bytes = if unlimited_brokers.contains(&broker.pk) {
+            None
+        } else {
+            broker_quotas.get(&broker.pk).cloned().flatten()
+        };
+
+        broker_availabilities.push(BrokerAvailability {
+            broker,
+            used_bytes,
+            quota_bytes,
+        });
+    }
+
+    Ok(warp::reply::json(&broker_availabilities))
 }
 
 pub async fn load_object(
