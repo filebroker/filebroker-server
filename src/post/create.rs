@@ -44,7 +44,7 @@ pub struct CreatePostRequest {
     pub entered_tags: Option<Vec<String>>,
     #[validate(length(max = 100))]
     pub selected_tags: Option<Vec<i64>>,
-    pub s3_object: Option<String>,
+    pub s3_object: String,
     #[validate(url)]
     pub thumbnail_url: Option<String>,
     pub is_public: Option<bool>,
@@ -89,22 +89,18 @@ pub async fn create_post_handler(
             )
             .await?;
 
-            let metadata_title: Option<String> =
-                if let Some(ref object_key) = create_post_request.s3_object {
-                    if create_post_request.title.is_none() {
-                        s3_object_metadata::table
-                            .select(s3_object_metadata::title)
-                            .filter(s3_object_metadata::object_key.eq(object_key))
-                            .get_result::<Option<String>>(connection)
-                            .await
-                            .optional()?
-                            .flatten()
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+            let object_key = &create_post_request.s3_object;
+            let metadata_title: Option<String> = if create_post_request.title.is_none() {
+                s3_object_metadata::table
+                    .select(s3_object_metadata::title)
+                    .filter(s3_object_metadata::object_key.eq(object_key))
+                    .get_result::<Option<String>>(connection)
+                    .await
+                    .optional()?
+                    .flatten()
+            } else {
+                None
+            };
 
             let post = diesel::insert_into(post::table)
                 .values(NewPost {

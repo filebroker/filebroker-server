@@ -690,6 +690,7 @@ fn prepare_query_parameters(
                 String::from("s3_object_metadata.audio_channels AS post_s3_object_metadata_audio_channels"),
                 String::from("s3_object_metadata.audio_bit_rate_max AS post_s3_object_metadata_audio_bit_rate_max"),
                 String::from("s3_object_metadata.raw AS post_s3_object_metadata_raw"),
+                String::from("s3_object_metadata.loaded AS post_s3_object_metadata_loaded"),
             ],
             join_statements: vec![
                 String::from("INNER JOIN s3_object ON s3_object.object_key = post.s3_object"),
@@ -862,6 +863,7 @@ fn prepare_query_parameters(
                 String::from("s3_object_metadata.audio_channels AS post_s3_object_metadata_audio_channels"),
                 String::from("s3_object_metadata.audio_bit_rate_max AS post_s3_object_metadata_audio_bit_rate_max"),
                 String::from("s3_object_metadata.raw AS post_s3_object_metadata_raw"),
+                String::from("s3_object_metadata.loaded AS post_s3_object_metadata_loaded"),
                 // collection data
                 String::from("post_collection.pk AS post_collection_pk"),
                 String::from("post_collection.title AS post_collection_title"),

@@ -130,7 +130,7 @@ pub struct NewPost {
     pub source_url: Option<String>,
     pub title: Option<String>,
     pub fk_create_user: i64,
-    pub s3_object: Option<String>,
+    pub s3_object: String,
     pub thumbnail_url: Option<String>,
     pub public: bool,
     pub public_edit: bool,
@@ -362,6 +362,9 @@ pub struct PostS3ObjectMetadata {
     #[diesel(sql_type = Jsonb)]
     #[diesel(column_name = "post_s3_object_metadata_raw")]
     pub raw: serde_json::Value,
+    #[diesel(sql_type = Bool)]
+    #[diesel(column_name = "post_s3_object_metadata_loaded")]
+    pub loaded: bool,
 }
 
 #[derive(Queryable, QueryableByName, Serialize)]
@@ -388,9 +391,9 @@ pub struct PostFull {
     #[diesel(column_name = "post_score")]
     pub score: i32,
     #[diesel(embed)]
-    pub s3_object: Option<PostS3Object>,
+    pub s3_object: PostS3Object,
     #[diesel(embed)]
-    pub s3_object_metadata: Option<PostS3ObjectMetadata>,
+    pub s3_object_metadata: PostS3ObjectMetadata,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_thumbnail_url")]
     pub thumbnail_url: Option<String>,
@@ -433,9 +436,9 @@ pub struct PostQueryObject {
     #[diesel(column_name = "post_score")]
     pub score: i32,
     #[diesel(embed)]
-    pub s3_object: Option<PostS3Object>,
+    pub s3_object: PostS3Object,
     #[diesel(embed)]
-    pub s3_object_metadata: Option<PostS3ObjectMetadata>,
+    pub s3_object_metadata: PostS3ObjectMetadata,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_thumbnail_url")]
     pub thumbnail_url: Option<String>,
