@@ -371,6 +371,12 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(warp::query::<QueryParametersFilter>())
         .and_then(query::get_post_handler);
 
+    let get_posts_route = warp::path("get-posts")
+        .and(warp::get())
+        .and(auth::with_user_optional())
+        .and(warp::path::param())
+        .and_then(query::get_posts_handler);
+
     let upload_route = warp::path("upload")
         .and(warp::post())
         .and(warp::path::param())
@@ -552,6 +558,7 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .or(upsert_tag_route)
         .or(search_route)
         .or(get_post_route)
+        .or(get_posts_route)
         .or(upload_route)
         .or(get_object_metadata_route)
         .or(get_object_route)

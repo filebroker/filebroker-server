@@ -567,6 +567,33 @@ pub async fn is_post_editable(
         .map(|result| result.is_some())
 }
 
+pub async fn filter_posts_editable(
+    connection: &mut AsyncPgConnection,
+    user: Option<&User>,
+    post_pks: &[i64],
+) -> Result<Vec<i64>, Error> {
+    let user_pk = user.map(|user| user.pk);
+    post::table
+        .select(post::pk)
+        .filter(
+            post::pk.eq_any(post_pks).and(
+                post::public_edit
+                    .or(post::fk_create_user.nullable().eq(user_pk))
+                    .or(exists(post_group_access::table.filter(
+                        get_group_access_write_condition!(
+                            post_group_access::fk_post,
+                            post::pk,
+                            &user_pk,
+                            post_group_access
+                        ),
+                    ))),
+            ),
+        )
+        .load::<i64>(connection)
+        .await
+        .map_err(|e| Error::QueryError(e.to_string()))
+}
+
 pub async fn is_post_deletable(
     connection: &mut AsyncPgConnection,
     user: Option<&User>,
@@ -595,6 +622,34 @@ pub async fn is_post_deletable(
         .optional()
         .map_err(|e| Error::QueryError(e.to_string()))
         .map(|result| result.is_some())
+}
+
+pub async fn filter_posts_deletable(
+    connection: &mut AsyncPgConnection,
+    user: Option<&User>,
+    post_pks: &[i64],
+) -> Result<Vec<i64>, Error> {
+    let user_pk = user.map(|user| user.pk);
+    post::table
+        .left_join(s3_object::table)
+        .left_join(broker::table.on(s3_object::fk_broker.eq(broker::pk)))
+        .select(post::pk)
+        .filter(
+            post::pk
+                .eq_any(post_pks)
+                .and(
+                    post::fk_create_user
+                        .nullable()
+                        .eq(user_pk)
+                        .or(broker::fk_owner.nullable().eq(user_pk).or(exists(
+                            broker_access::table
+                                .filter(get_broker_group_access_write_condition!(user_pk)),
+                        ))),
+                ),
+        )
+        .load::<i64>(connection)
+        .await
+        .map_err(|e| Error::QueryError(e.to_string()))
 }
 
 pub async fn is_post_collection_editable(

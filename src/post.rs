@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use diesel::{
     dsl::{exists, not},
@@ -131,6 +133,26 @@ pub async fn get_post_tags(
         .await
 }
 
+pub async fn get_posts_tags(
+    post_pks: &[i64],
+    connection: &mut AsyncPgConnection,
+) -> Result<HashMap<i64, Vec<Tag>>, diesel::result::Error> {
+    let mut post_tags_map = HashMap::new();
+    let post_tags = post_tag::table
+        .inner_join(tag::table)
+        .select((post_tag::fk_post, tag::table::all_columns()))
+        .filter(post_tag::fk_post.eq_any(post_pks))
+        .load::<(i64, Tag)>(connection)
+        .await?;
+    for (post_pk, tag) in post_tags {
+        post_tags_map
+            .entry(post_pk)
+            .or_insert_with(Vec::new)
+            .push(tag);
+    }
+    Ok(post_tags_map)
+}
+
 pub async fn get_post_collection_tags(
     post_collection_pk: i64,
     connection: &mut AsyncPgConnection,
@@ -180,6 +202,53 @@ pub async fn get_post_group_access(
                 granted_group: post_group_access.1,
             })
             .collect::<Vec<_>>()
+    })
+}
+
+pub async fn get_posts_group_access(
+    post_pks: &[i64],
+    user: Option<&User>,
+    connection: &mut AsyncPgConnection,
+) -> Result<HashMap<i64, Vec<PostGroupAccessDetailed>>, diesel::result::Error> {
+    if let Some(user) = user {
+        post_group_access::table
+            .inner_join(user_group::table)
+            .filter(
+                post_group_access::fk_post.eq_any(post_pks).and(
+                    not(user_group::hidden).or(perms::get_group_membership_condition!(user.pk)),
+                ),
+            )
+            .load::<(PostGroupAccess, UserGroup)>(connection)
+            .await
+    } else {
+        post_group_access::table
+            .inner_join(user_group::table)
+            .filter(
+                post_group_access::fk_post
+                    .eq_any(post_pks)
+                    .and(not(user_group::hidden)),
+            )
+            .load::<(PostGroupAccess, UserGroup)>(connection)
+            .await
+    }
+    .map(|post_group_access_vec| {
+        let mut post_group_access_map = HashMap::new();
+        post_group_access_vec
+            .into_iter()
+            .map(|post_group_access| PostGroupAccessDetailed {
+                fk_post: post_group_access.0.fk_post,
+                write: post_group_access.0.write,
+                fk_granted_by: post_group_access.0.fk_granted_by,
+                creation_timestamp: post_group_access.0.creation_timestamp,
+                granted_group: post_group_access.1,
+            })
+            .for_each(|post_group_access| {
+                post_group_access_map
+                    .entry(post_group_access.fk_post)
+                    .or_insert_with(Vec::new)
+                    .push(post_group_access);
+            });
+        post_group_access_map
     })
 }
 

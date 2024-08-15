@@ -12,6 +12,7 @@ use crate::model::{
 };
 use crate::perms::{PostCollectionItemJoined, PostCollectionJoined};
 use crate::post::PostCollectionGroupAccessDetailed;
+use crate::util::dedup_vec;
 use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, TextExpressionMethods},
@@ -269,6 +270,74 @@ pub struct PostCollectionItemInformation {
     pub creation_timestamp: DateTime<Utc>,
     pub pk: i64,
     pub ordinal: i32,
+}
+
+pub async fn get_posts_handler(
+    user: Option<User>,
+    pk_string: String,
+) -> Result<impl Reply, Rejection> {
+    let mut pks = pk_string
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|num_str| num_str.parse::<i64>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            Error::BadRequestError(String::from(
+                "Post pk string is invalid, must be a comma separated list of i64",
+            ))
+        })?;
+
+    dedup_vec(&mut pks);
+    if pks.is_empty() || pks.len() > 100 {
+        return Err(warp::reject::custom(Error::BadRequestError(String::from(
+            "Must provide between 1 and 100 pks",
+        ))));
+    }
+
+    let mut connection = acquire_db_connection().await?;
+    let posts = perms::load_posts_secured(&pks, &mut connection, user.as_ref()).await?;
+    let posts_editable = perms::filter_posts_editable(&mut connection, user.as_ref(), &pks).await?;
+    let posts_deletable =
+        perms::filter_posts_deletable(&mut connection, user.as_ref(), &pks).await?;
+
+    let mut post_tags_map = post::get_posts_tags(&pks, &mut connection)
+        .await
+        .map_err(Error::from)?;
+    let mut post_group_access_map =
+        post::get_posts_group_access(&pks, user.as_ref(), &mut connection)
+            .await
+            .map_err(Error::from)?;
+
+    let posts_detailed = posts
+        .into_iter()
+        .map(|post| PostDetailed {
+            pk: post.post.pk,
+            data_url: post.post.data_url,
+            source_url: post.post.source_url,
+            title: post.post.title,
+            creation_timestamp: post.post.creation_timestamp,
+            create_user: post.create_user,
+            score: post.post.score,
+            s3_object: post.s3_object,
+            s3_object_metadata: post.s3_object_metadata,
+            thumbnail_url: post.post.thumbnail_url,
+            prev_post: None,
+            next_post: None,
+            public: post.post.public,
+            public_edit: post.post.public_edit,
+            description: post.post.description,
+            is_editable: posts_editable.contains(&post.post.pk),
+            is_deletable: posts_deletable.contains(&post.post.pk),
+            tags: post_tags_map.remove(&post.post.pk).unwrap_or_default(),
+            group_access: post_group_access_map
+                .remove(&post.post.pk)
+                .unwrap_or_default(),
+            post_collection_item: None,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(warp::reply::json(&posts_detailed))
 }
 
 pub async fn get_post_handler(

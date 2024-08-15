@@ -317,6 +317,8 @@ struct ErrorResponse {
     compilation_errors: Option<Vec<compiler::Error>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duplicate_post_collection_items: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inaccessible_object_keys: Option<Vec<i64>>,
 }
 
 /// Creates a Rejection response for the given error and logs internal server errors.
@@ -349,12 +351,19 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
                 None
             };
 
+        let inaccessible_object_keys = if let Error::InaccessibleObjectsError(keys) = e {
+            Some(keys.clone())
+        } else {
+            None
+        };
+
         let err_response = ErrorResponse {
             message,
             status: status_code.to_string(),
             error_code,
             compilation_errors,
             duplicate_post_collection_items,
+            inaccessible_object_keys,
         };
 
         let response_builder = Response::builder()
