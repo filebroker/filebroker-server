@@ -524,9 +524,6 @@ pub async fn update_tag_handler(
                     }
                     report_missing_pks!(tag, added_parent_pks, connection)??;
                     add_tag_parents(tag.pk, added_parent_pks, connection).await?;
-
-                    let p = get_tag_parents_pks(tag.pk, connection).await?;
-                    println!("parents after update {:?}", p);
                 }
             }
 
