@@ -37,7 +37,10 @@ use crate::{
     query::functions::substring,
     retry_on_serialization_failure, run_retryable_transaction,
     schema::{hls_stream, post, s3_object, s3_object_metadata},
-    util::{deserialize_string_from_number, format_duration, join_api_url, DeserializeOrDefault},
+    util::{
+        deserialize_string_from_number, format_duration, join_api_url, DeStringOrArray,
+        DeserializeOrDefault,
+    },
     CONCURRENT_VIDEO_TRANSCODE_LIMIT,
 };
 
@@ -754,11 +757,11 @@ struct ExifToolOutput {
     #[serde(rename = "Title")]
     title: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Artist")]
-    artist: DeserializeOrDefault<Option<String>>,
+    artist: DeserializeOrDefault<Option<DeStringOrArray>>,
     #[serde(rename = "Album")]
     album: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "Genre")]
-    genre: DeserializeOrDefault<Option<String>>,
+    genre: DeserializeOrDefault<Option<DeStringOrArray>>,
     #[serde(rename = "CreateDate")]
     create_date: DeserializeOrDefault<Option<String>>,
     #[serde(rename = "DateTimeOriginal")]
@@ -952,6 +955,7 @@ pub async fn load_object_metadata(
         format_long_name,
         size,
         bit_rate,
+        duration_secs,
         video_stream_count,
         video_codec_name,
         video_codec_long_name,
@@ -1057,12 +1061,31 @@ pub async fn load_object_metadata(
         match pg_interval {
             Ok(pg_interval) => Some(pg_interval.interval),
             Err(e) => {
-                log::warn!(
-                    "Failed to cast duration '{:?}' to postgres interval for {}: {e}",
-                    &exif_output.duration,
-                    &source_object_key
-                );
-                None
+                if let Some(ffprobe_duration) = duration_secs {
+                    let pg_interval = diesel::sql_query("SELECT $1::interval AS pg_interval")
+                        .bind::<Text, _>(format!("{}s", ffprobe_duration))
+                        .get_result::<PgIntervalQuery>(&mut connection)
+                        .await;
+                    match pg_interval {
+                        Ok(pg_interval) => Some(pg_interval.interval),
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to cast exiftool duration '{:?}' and ffprobe duration '{}' to postgres interval for {}: {e}",
+                                &exif_output.duration,
+                                ffprobe_duration,
+                                &source_object_key
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    log::warn!(
+                        "Failed to cast exiftool duration '{:?}' to postgres interval for {}: {e}",
+                        &exif_output.duration,
+                        &source_object_key
+                    );
+                    None
+                }
             }
         }
     } else {
@@ -1133,6 +1156,7 @@ pub async fn load_object_metadata(
                 artist: exif_output
                     .artist
                     .into_inner()
+                    .map(DeStringOrArray::into_inner)
                     .or(ffprobe_tags.artist.into_inner()),
                 album: exif_output
                     .album
@@ -1149,6 +1173,7 @@ pub async fn load_object_metadata(
                 genre: exif_output
                     .genre
                     .into_inner()
+                    .map(DeStringOrArray::into_inner)
                     .or(ffprobe_tags.genre.into_inner()),
                 date,
                 track_number,
@@ -1226,6 +1251,7 @@ struct FfprobeMediaMetadata {
     format_long_name: Option<String>,
     size: Option<i64>,
     bit_rate: Option<i64>,
+    duration_secs: Option<f32>,
     video_stream_count: i32,
     video_codec_name: Option<String>,
     video_codec_long_name: Option<String>,
@@ -1288,6 +1314,14 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         .map_or(Ok(None), |v| v.map(Some))
         .map_err(|e| {
             Error::FfmpegProcessError(format!("Failed to parse bit rate from ffprobe output: {e}"))
+        })?;
+    let duration_secs = ffprobe_output
+        .format
+        .duration
+        .map(|d| d.parse::<f32>())
+        .map_or(Ok(None), |v| v.map(Some))
+        .map_err(|e| {
+            Error::FfmpegProcessError(format!("Failed to parse duration from ffprobe output: {e}"))
         })?;
 
     let mut video_stream_count = 0;
@@ -1369,6 +1403,7 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         format_long_name: Some(format_long_name),
         size: Some(size),
         bit_rate,
+        duration_secs,
         video_stream_count,
         video_codec_name,
         video_codec_long_name,

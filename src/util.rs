@@ -237,3 +237,52 @@ where
         &mut self.0
     }
 }
+
+/// Wrapper type to deserialize a string or an array of strings into a comma-separated string.
+#[derive(Debug)]
+pub struct DeStringOrArray(pub String);
+
+impl DeStringOrArray {
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for DeStringOrArray {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StringOrArray {
+            String(String),
+            Array(Vec<String>),
+        }
+
+        match StringOrArray::deserialize(deserializer)? {
+            StringOrArray::String(s) => Ok(DeStringOrArray(s)),
+            StringOrArray::Array(a) => Ok(DeStringOrArray(a.join(", "))),
+        }
+    }
+}
+
+impl Clone for DeStringOrArray {
+    fn clone(&self) -> Self {
+        DeStringOrArray(self.0.clone())
+    }
+}
+
+impl Deref for DeStringOrArray {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DeStringOrArray {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
