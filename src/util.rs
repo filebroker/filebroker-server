@@ -286,3 +286,23 @@ impl DerefMut for DeStringOrArray {
         &mut self.0
     }
 }
+
+/// Returns true if the difference between curr_value and new_value will cause an update on the database.
+///
+/// new_value being `None` means no update, new_value being an empty string means the value will be
+/// cleared / set to null causing an update if the curr_value is not None.
+///
+/// Returns true if new_value is present AND either a non-empty string different from the curr_value
+/// or an empty string with curr_value being non-empty
+#[inline]
+pub fn string_value_updated(curr_value: Option<&str>, new_value: Option<&str>) -> bool {
+    new_value
+        .map(|v| v != curr_value.unwrap_or(""))
+        .unwrap_or(false)
+}
+
+pub fn vec_eq_sorted<T: Ord>(v1: &mut Vec<T>, v2: &mut Vec<T>) -> bool {
+    v1.sort_unstable();
+    v2.sort_unstable();
+    v1 == v2
+}

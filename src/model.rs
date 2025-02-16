@@ -1,6 +1,9 @@
 #![allow(clippy::extra_unused_lifetimes)]
 
-use std::hash::{Hash, Hasher};
+use std::{
+    cmp::Ordering,
+    hash::{Hash, Hasher},
+};
 
 use chrono::{offset::Utc, DateTime};
 use diesel::data_types::PgInterval;
@@ -17,6 +20,7 @@ use serde::{Serialize, Serializer};
 
 use crate::error::Error;
 use crate::query::{SearchQueryResultObject, SearchResult};
+use crate::util::string_value_updated;
 use crate::{perms, schema::*};
 
 #[derive(Identifiable, Queryable, QueryableByName, Serialize, Clone)]
@@ -47,6 +51,72 @@ pub struct User {
     pub password_fail_count: i32,
 }
 
+/// A struct representing a user that serializes public information only.
+#[derive(Identifiable, Queryable, QueryableByName, Serialize, Clone)]
+#[diesel(table_name = registered_user)]
+#[diesel(primary_key(pk))]
+pub struct UserPublic {
+    #[diesel(sql_type = BigInt)]
+    pub pk: i64,
+    #[diesel(sql_type = Varchar)]
+    pub user_name: String,
+    #[diesel(sql_type = Varchar)]
+    #[serde(skip_serializing)]
+    pub password: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[serde(skip_serializing)]
+    pub email: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    pub avatar_url: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = Bool)]
+    #[serde(skip_serializing)]
+    pub email_confirmed: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    pub display_name: Option<String>,
+    #[diesel(sql_type = Int4)]
+    #[serde(skip_serializing)]
+    pub jwt_version: i32,
+    #[diesel(sql_type = Int4)]
+    #[serde(skip_serializing)]
+    pub password_fail_count: i32,
+}
+
+impl From<User> for UserPublic {
+    fn from(value: User) -> Self {
+        Self {
+            pk: value.pk,
+            user_name: value.user_name,
+            password: value.password,
+            email: value.email,
+            avatar_url: value.avatar_url,
+            creation_timestamp: value.creation_timestamp,
+            email_confirmed: value.email_confirmed,
+            display_name: value.display_name,
+            jwt_version: value.jwt_version,
+            password_fail_count: value.password_fail_count,
+        }
+    }
+}
+
+impl From<UserPublic> for User {
+    fn from(value: UserPublic) -> Self {
+        Self {
+            pk: value.pk,
+            user_name: value.user_name,
+            password: value.password,
+            email: value.email,
+            avatar_url: value.avatar_url,
+            creation_timestamp: value.creation_timestamp,
+            email_confirmed: value.email_confirmed,
+            display_name: value.display_name,
+            jwt_version: value.jwt_version,
+            password_fail_count: value.password_fail_count,
+        }
+    }
+}
+
 #[derive(Clone, Insertable)]
 #[diesel(table_name = registered_user)]
 pub struct NewUser {
@@ -70,7 +140,7 @@ pub struct RefreshToken {
     pub fk_user: i64,
 }
 
-#[derive(Associations, Identifiable, Queryable, QueryableByName, Serialize)]
+#[derive(Associations, Clone, Identifiable, Queryable, QueryableByName, Serialize)]
 #[diesel(table_name = post)]
 #[diesel(primary_key(pk))]
 #[diesel(belongs_to(User, foreign_key = fk_create_user))]
@@ -88,6 +158,8 @@ pub struct Post {
     pub public: bool,
     pub public_edit: bool,
     pub description: Option<String>,
+    pub edit_timestamp: DateTime<Utc>,
+    pub fk_edit_user: i64,
 }
 
 impl Post {
@@ -147,23 +219,14 @@ pub struct PostCreateUser {
     #[diesel(column_name = "post_create_user_user_name")]
     pub user_name: String,
     #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "post_create_user_email")]
-    pub email: Option<String>,
-    #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_create_user_avatar_url")]
     pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     #[diesel(column_name = "post_create_user_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "post_create_user_email_confirmed")]
-    pub email_confirmed: bool,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_create_user_display_name")]
     pub display_name: Option<String>,
-    #[diesel(sql_type = Int4)]
-    #[diesel(column_name = "post_create_user_password_fail_count")]
-    pub password_fail_count: i32,
 }
 
 impl From<User> for PostCreateUser {
@@ -171,13 +234,16 @@ impl From<User> for PostCreateUser {
         Self {
             pk: value.pk,
             user_name: value.user_name,
-            email: value.email,
             avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
-            email_confirmed: value.email_confirmed,
             display_name: value.display_name,
-            password_fail_count: value.password_fail_count,
         }
+    }
+}
+
+impl From<UserPublic> for PostCreateUser {
+    fn from(value: UserPublic) -> Self {
+        PostCreateUser::from(User::from(value))
     }
 }
 
@@ -410,6 +476,9 @@ pub struct PostFull {
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_description")]
     pub description: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_edit_timestamp")]
+    pub edit_timestamp: DateTime<Utc>,
 }
 
 #[derive(Queryable, QueryableByName, Serialize)]
@@ -461,6 +530,9 @@ pub struct PostQueryObject {
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_description")]
     pub description: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_edit_timestamp")]
+    pub edit_timestamp: DateTime<Utc>,
 }
 
 impl SearchQueryResultObject for PostQueryObject {
@@ -515,23 +587,14 @@ pub struct PostCollectionCreateUser {
     #[diesel(column_name = "post_collection_create_user_user_name")]
     pub user_name: String,
     #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "post_collection_create_user_email")]
-    pub email: Option<String>,
-    #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_create_user_avatar_url")]
     pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     #[diesel(column_name = "post_collection_create_user_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "post_collection_create_user_email_confirmed")]
-    pub email_confirmed: bool,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_create_user_display_name")]
     pub display_name: Option<String>,
-    #[diesel(sql_type = Int4)]
-    #[diesel(column_name = "post_collection_create_user_password_fail_count")]
-    pub password_fail_count: i32,
 }
 
 impl From<User> for PostCollectionCreateUser {
@@ -539,13 +602,16 @@ impl From<User> for PostCollectionCreateUser {
         Self {
             pk: value.pk,
             user_name: value.user_name,
-            email: value.email,
             avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
-            email_confirmed: value.email_confirmed,
             display_name: value.display_name,
-            password_fail_count: value.password_fail_count,
         }
+    }
+}
+
+impl From<UserPublic> for PostCollectionCreateUser {
+    fn from(value: UserPublic) -> Self {
+        PostCollectionCreateUser::from(User::from(value))
     }
 }
 
@@ -654,6 +720,9 @@ pub struct PostCollectionFull {
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_description")]
     pub description: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_edit_timestamp")]
+    pub edit_timestamp: DateTime<Utc>,
 }
 
 #[derive(Queryable, QueryableByName, Serialize)]
@@ -691,6 +760,9 @@ pub struct PostCollectionQueryObject {
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_description")]
     pub description: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_edit_timestamp")]
+    pub edit_timestamp: DateTime<Utc>,
 }
 
 impl SearchQueryResultObject for PostCollectionQueryObject {
@@ -730,23 +802,14 @@ pub struct PostCollectionItemAddedUser {
     #[diesel(column_name = "post_collection_item_added_user_user_name")]
     pub user_name: String,
     #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "post_collection_item_added_user_email")]
-    pub email: Option<String>,
-    #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_item_added_user_avatar_url")]
     pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     #[diesel(column_name = "post_collection_item_added_user_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "post_collection_item_added_user_email_confirmed")]
-    pub email_confirmed: bool,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_item_added_user_display_name")]
     pub display_name: Option<String>,
-    #[diesel(sql_type = Int4)]
-    #[diesel(column_name = "post_collection_item_added_user_password_fail_count")]
-    pub password_fail_count: i32,
 }
 
 impl From<User> for PostCollectionItemAddedUser {
@@ -754,13 +817,16 @@ impl From<User> for PostCollectionItemAddedUser {
         Self {
             pk: value.pk,
             user_name: value.user_name,
-            email: value.email,
             avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
-            email_confirmed: value.email_confirmed,
             display_name: value.display_name,
-            password_fail_count: value.password_fail_count,
         }
+    }
+}
+
+impl From<UserPublic> for PostCollectionItemAddedUser {
+    fn from(value: UserPublic) -> Self {
+        PostCollectionItemAddedUser::from(User::from(value))
     }
 }
 
@@ -849,13 +915,51 @@ pub struct PostUpdateOptional {
 }
 
 impl PostUpdateOptional {
+    pub fn get_field_changes(&self, curr_value: &Post) -> PostUpdateFieldChanges {
+        PostUpdateFieldChanges {
+            data_url_changed: string_value_updated(
+                curr_value.data_url.as_deref(),
+                self.data_url.as_deref(),
+            ),
+            source_url_changed: string_value_updated(
+                curr_value.source_url.as_deref(),
+                self.source_url.as_deref(),
+            ),
+            title_changed: string_value_updated(curr_value.title.as_deref(), self.title.as_deref()),
+            public_changed: self.public.map(|v| v != curr_value.public).unwrap_or(false),
+            public_edit_changed: self
+                .public_edit
+                .map(|v| v != curr_value.public_edit)
+                .unwrap_or(false),
+            description_changed: string_value_updated(
+                curr_value.description.as_deref(),
+                self.description.as_deref(),
+            ),
+        }
+    }
+
+    pub fn has_changes(&self, curr_value: &Post) -> bool {
+        self.get_field_changes(curr_value).has_changes()
+    }
+}
+
+pub struct PostUpdateFieldChanges {
+    pub data_url_changed: bool,
+    pub source_url_changed: bool,
+    pub title_changed: bool,
+    pub public_changed: bool,
+    pub public_edit_changed: bool,
+    pub description_changed: bool,
+}
+
+impl PostUpdateFieldChanges {
     pub fn has_changes(&self) -> bool {
-        self.data_url.is_some()
-            || self.source_url.is_some()
-            || self.title.is_some()
-            || self.public.is_some()
-            || self.public_edit.is_some()
-            || self.description.is_some()
+        self.data_url_changed
+            || self.source_url_changed
+            || self.title_changed
+            || self.public_changed
+            || self.public_edit_changed
+            || self.description_changed
     }
 }
 
@@ -870,12 +974,48 @@ pub struct PostCollectionUpdateOptional {
 }
 
 impl PostCollectionUpdateOptional {
+    pub fn get_field_changes(
+        &self,
+        curr_value: &PostCollection,
+    ) -> PostCollectionUpdateFieldChanges {
+        PostCollectionUpdateFieldChanges {
+            title_changed: string_value_updated(Some(&curr_value.title), self.title.as_deref()),
+            public_changed: self.public.map(|v| v != curr_value.public).unwrap_or(false),
+            public_edit_changed: self
+                .public_edit
+                .map(|v| v != curr_value.public_edit)
+                .unwrap_or(false),
+            poster_object_key_changed: string_value_updated(
+                curr_value.poster_object_key.as_deref(),
+                self.poster_object_key.as_deref(),
+            ),
+            description_changed: string_value_updated(
+                curr_value.description.as_deref(),
+                self.description.as_deref(),
+            ),
+        }
+    }
+
+    pub fn has_changes(&self, curr_value: &PostCollection) -> bool {
+        self.get_field_changes(curr_value).has_changes()
+    }
+}
+
+pub struct PostCollectionUpdateFieldChanges {
+    pub title_changed: bool,
+    pub public_changed: bool,
+    pub public_edit_changed: bool,
+    pub poster_object_key_changed: bool,
+    pub description_changed: bool,
+}
+
+impl PostCollectionUpdateFieldChanges {
     pub fn has_changes(&self) -> bool {
-        self.title.is_some()
-            || self.public.is_some()
-            || self.public_edit.is_some()
-            || self.poster_object_key.is_some()
-            || self.description.is_some()
+        self.title_changed
+            || self.public_changed
+            || self.public_edit_changed
+            || self.poster_object_key_changed
+            || self.description_changed
     }
 }
 
@@ -904,9 +1044,23 @@ impl PartialEq for Tag {
     }
 }
 
+impl Eq for Tag {}
+
 impl Hash for Tag {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.pk.hash(state);
+    }
+}
+
+impl PartialOrd for Tag {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Tag {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.pk.cmp(&other.pk)
     }
 }
 
@@ -1069,6 +1223,8 @@ pub struct PostCollection {
     pub public_edit: bool,
     pub poster_object_key: Option<String>,
     pub description: Option<String>,
+    pub edit_timestamp: DateTime<Utc>,
+    pub fk_edit_user: i64,
 }
 
 impl PostCollection {
@@ -1298,4 +1454,142 @@ pub struct PgIntervalQuery {
     #[diesel(sql_type = Interval)]
     #[diesel(column_name = "pg_interval")]
     pub interval: PgInterval,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(Post, foreign_key = fk_post))]
+#[diesel(belongs_to(User, foreign_key = fk_edit_user))]
+#[diesel(table_name = post_edit_history)]
+#[diesel(primary_key(pk))]
+pub struct PostEditHistory {
+    pub pk: i64,
+    pub fk_post: i64,
+    pub fk_edit_user: i64,
+    pub edit_timestamp: DateTime<Utc>,
+    pub data_url: Option<String>,
+    pub data_url_changed: bool,
+    pub source_url: Option<String>,
+    pub source_url_changed: bool,
+    pub title: Option<String>,
+    pub title_changed: bool,
+    pub public: bool,
+    pub public_changed: bool,
+    pub public_edit: bool,
+    pub public_edit_changed: bool,
+    pub description: Option<String>,
+    pub description_changed: bool,
+    pub tags_changed: bool,
+    pub group_access_changed: bool,
+}
+
+#[derive(Clone, Insertable)]
+#[diesel(table_name = post_edit_history)]
+pub struct NewPostEditHistory {
+    pub fk_post: i64,
+    pub fk_edit_user: i64,
+    pub edit_timestamp: DateTime<Utc>,
+    pub data_url: Option<String>,
+    pub data_url_changed: bool,
+    pub source_url: Option<String>,
+    pub source_url_changed: bool,
+    pub title: Option<String>,
+    pub title_changed: bool,
+    pub public: bool,
+    pub public_changed: bool,
+    pub public_edit: bool,
+    pub public_edit_changed: bool,
+    pub description: Option<String>,
+    pub description_changed: bool,
+    pub tags_changed: bool,
+    pub group_access_changed: bool,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(PostEditHistory, foreign_key = fk_post_edit_history))]
+#[diesel(belongs_to(Tag, foreign_key = fk_tag))]
+#[diesel(table_name = post_edit_history_tag)]
+#[diesel(primary_key(fk_post_edit_history, fk_tag))]
+pub struct PostEditHistoryTag {
+    pub fk_post_edit_history: i64,
+    pub fk_tag: i64,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(PostEditHistory, foreign_key = fk_post_edit_history))]
+#[diesel(belongs_to(UserGroup, foreign_key = fk_granted_group))]
+#[diesel(table_name = post_edit_history_group_access)]
+#[diesel(primary_key(fk_post_edit_history, fk_granted_group))]
+pub struct PostEditHistoryGroupAccess {
+    pub fk_post_edit_history: i64,
+    pub fk_granted_group: i64,
+    pub write: bool,
+    pub fk_granted_by: i64,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(PostCollection, foreign_key = fk_post_collection))]
+#[diesel(belongs_to(User, foreign_key = fk_edit_user))]
+#[diesel(table_name = post_collection_edit_history)]
+#[diesel(primary_key(pk))]
+pub struct PostCollectionEditHistory {
+    pub pk: i64,
+    pub fk_post_collection: i64,
+    pub fk_edit_user: i64,
+    pub edit_timestamp: DateTime<Utc>,
+    pub title: String,
+    pub title_changed: bool,
+    pub public: bool,
+    pub public_changed: bool,
+    pub public_edit: bool,
+    pub public_edit_changed: bool,
+    pub description: Option<String>,
+    pub description_changed: bool,
+    pub poster_object_key: Option<String>,
+    pub poster_object_key_changed: bool,
+    pub tags_changed: bool,
+    pub group_access_changed: bool,
+}
+
+#[derive(Clone, Insertable)]
+#[diesel(table_name = post_collection_edit_history)]
+pub struct NewPostCollectionEditHistory {
+    pub fk_post_collection: i64,
+    pub fk_edit_user: i64,
+    pub edit_timestamp: DateTime<Utc>,
+    pub title: String,
+    pub title_changed: bool,
+    pub public: bool,
+    pub public_changed: bool,
+    pub public_edit: bool,
+    pub public_edit_changed: bool,
+    pub description: Option<String>,
+    pub description_changed: bool,
+    pub poster_object_key: Option<String>,
+    pub poster_object_key_changed: bool,
+    pub tags_changed: bool,
+    pub group_access_changed: bool,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(PostCollectionEditHistory, foreign_key = fk_post_collection_edit_history))]
+#[diesel(belongs_to(Tag, foreign_key = fk_tag))]
+#[diesel(table_name = post_collection_edit_history_tag)]
+#[diesel(primary_key(fk_post_collection_edit_history, fk_tag))]
+pub struct PostCollectionEditHistoryTag {
+    pub fk_post_collection_edit_history: i64,
+    pub fk_tag: i64,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(PostCollectionEditHistory, foreign_key = fk_post_collection_edit_history))]
+#[diesel(belongs_to(UserGroup, foreign_key = fk_granted_group))]
+#[diesel(table_name = post_collection_edit_history_group_access)]
+#[diesel(primary_key(fk_post_collection_edit_history, fk_granted_group))]
+pub struct PostCollectionEditHistoryGroupAccess {
+    pub fk_post_collection_edit_history: i64,
+    pub fk_granted_group: i64,
+    pub write: bool,
+    pub fk_granted_by: i64,
+    pub creation_timestamp: DateTime<Utc>,
 }

@@ -4,7 +4,7 @@ use diesel::{
     sql_types::BigInt,
     upsert::excluded,
     BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, OptionalExtension,
-    QueryDsl,
+    QueryDsl, Table,
 };
 use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
 use serde::Deserialize;
@@ -13,21 +13,24 @@ use warp::{reject::Rejection, reply::Reply};
 
 use crate::{
     acquire_db_connection,
-    diesel::Table,
     error::{Error, TransactionRuntimeError},
     model::{
-        NewPostCollectionItem, Post, PostCollection, PostCollectionGroupAccess, PostCollectionTag,
-        PostCollectionUpdateOptional, PostGroupAccess, PostTag, PostUpdateOptional, S3Object,
-        S3ObjectMetadata, Tag, User,
+        NewPostCollectionEditHistory, NewPostCollectionItem, NewPostEditHistory, Post,
+        PostCollection, PostCollectionEditHistory, PostCollectionEditHistoryGroupAccess,
+        PostCollectionEditHistoryTag, PostCollectionGroupAccess, PostCollectionTag,
+        PostCollectionUpdateOptional, PostEditHistory, PostEditHistoryGroupAccess,
+        PostEditHistoryTag, PostGroupAccess, PostTag, PostUpdateOptional, Tag, User,
     },
     perms,
     post::{load_post_collection_poster_object, report_inaccessible_post_pks},
-    query::{self, load_and_report_missing_pks, PostCollectionDetailed, PostDetailed},
+    query::{self, load_and_report_missing_pks},
     retry_on_constraint_violation, run_serializable_transaction,
     schema::{
-        post, post_collection, post_collection_group_access, post_collection_item,
-        post_collection_tag, post_group_access, post_tag, registered_user, s3_object,
-        s3_object_metadata, tag, user_group, user_group_membership,
+        post, post_collection, post_collection_edit_history,
+        post_collection_edit_history_group_access, post_collection_edit_history_tag,
+        post_collection_group_access, post_collection_item, post_collection_tag, post_edit_history,
+        post_edit_history_group_access, post_edit_history_tag, post_group_access, post_tag, tag,
+        user_group, user_group_membership,
     },
     tags::{
         filter_redundant_tags, get_or_create_tags, get_source_object_tag, sanitize_request_tags,
@@ -37,29 +40,33 @@ use crate::{
 };
 
 use super::{
-    get_post_collection_group_access, get_post_collection_tags, get_post_group_access,
-    get_post_tags, report_inaccessible_group_pks, GroupAccessDefinition,
+    load_post_collection_detailed, load_post_detailed, report_inaccessible_group_pks,
+    GroupAccessDefinition,
 };
 
 macro_rules! handle_object_tag_update {
-    ($source_object_pk:expr, $tag_relation_entity:ident, $tag_relation_table:ident, $fk_source_object:ident, $tags_overwrite:expr, $tag_pks_overwrite:expr, $added_tags:expr, $added_tag_pks:expr, $removed_tag_pks:expr, $connection:expr) => {
-        if $tags_overwrite.is_some() || $tag_pks_overwrite.is_some() {
-            diesel::delete(
-                $tag_relation_table::table.filter($tag_relation_table::$fk_source_object.eq($source_object_pk)),
-            )
-            .execute($connection)
-            .await?;
-            if let Some(ref tags_overwrite) = $tags_overwrite {
-                match $added_tags {
-                    Some(ref mut added_tags) => added_tags.append(&mut tags_overwrite.clone()),
-                    None => $added_tags = Some(tags_overwrite.clone()),
-                }
+    ($source_object_pk:expr, $tag_relation_entity:ident, $tag_relation_table:ident, $fk_source_object:ident, $tags_overwrite:expr, $tag_pks_overwrite:expr, $added_tags:expr, $added_tag_pks:expr, $removed_tag_pks:expr, $connection:expr) => {{
+        let mut mutated_tags = false;
+
+        let curr_tags = get_source_object_tag!(
+            $tag_relation_table,
+            $source_object_pk,
+            $tag_relation_table::$fk_source_object,
+            $connection
+        )
+        .await?;
+        let curr_tag_pks = curr_tags.iter().map(|tag| tag.pk).collect::<std::collections::HashSet<_>>();
+
+        if let Some(ref tags_overwrite) = $tags_overwrite {
+            match $added_tags {
+                Some(ref mut added_tags) => added_tags.append(&mut tags_overwrite.clone()),
+                None => $added_tags = Some(tags_overwrite.clone()),
             }
-            if let Some(ref tag_pks_overwrite) = $tag_pks_overwrite {
-                match $added_tag_pks {
-                    Some(ref mut added_tag_pks) => added_tag_pks.append(&mut tag_pks_overwrite.clone()),
-                    None => $added_tag_pks = Some(tag_pks_overwrite.clone()),
-                }
+        }
+        if let Some(ref tag_pks_overwrite) = $tag_pks_overwrite {
+            match $added_tag_pks {
+                Some(ref mut added_tag_pks) => added_tag_pks.append(&mut tag_pks_overwrite.clone()),
+                None => $added_tag_pks = Some(tag_pks_overwrite.clone()),
             }
         }
 
@@ -86,23 +93,18 @@ macro_rules! handle_object_tag_update {
         }
 
         if let Some(ref added_tag_pks) = $added_tag_pks {
-            if !added_tag_pks.is_empty() {
+            // only handle tag insertion if any of the added (or overwritten) tags are not already present
+            if !added_tag_pks.is_empty() && added_tag_pks.iter().any(|tag_pk| !curr_tag_pks.contains(tag_pk)) {
                 let mut loaded_tags =
                     load_and_report_missing_pks!(Tag, tag, added_tag_pks, $connection)?;
-                let curr_tags = get_source_object_tag!(
-                    $tag_relation_table,
-                    $source_object_pk,
-                    $tag_relation_table::$fk_source_object,
-                    $connection
-                )
-                .await?;
-                let curr_tag_pks = curr_tags.iter().map(|tag| tag.pk).collect::<Vec<_>>();
-                loaded_tags.extend(curr_tags);
+                loaded_tags.extend(curr_tags.clone());
+                dedup_vec(&mut loaded_tags);
                 filter_redundant_tags(&mut loaded_tags, $connection).await?;
 
                 // remove current tags that are now redundant, that means remove all currently set tags that have been removed by filter_redundant_tags
                 let mut curr_tag_pks_to_remove = curr_tag_pks
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .filter(|tag_pk| !loaded_tags.iter().any(|tag| tag.pk == *tag_pk))
                     .collect::<Vec<_>>();
 
@@ -117,7 +119,7 @@ macro_rules! handle_object_tag_update {
 
                 let new_object_tags = added_tag_pks
                     .iter()
-                    .filter(|tag_pk| loaded_tags.iter().any(|tag| tag.pk == **tag_pk))
+                    .filter(|tag_pk| loaded_tags.iter().any(|tag| tag.pk == **tag_pk) && !curr_tag_pks.contains(*tag_pk))
                     .map(|tag_pk| $tag_relation_entity {
                         $fk_source_object: $source_object_pk,
                         fk_tag: *tag_pk
@@ -125,18 +127,49 @@ macro_rules! handle_object_tag_update {
                     .collect::<Vec<_>>();
 
                 if !new_object_tags.is_empty() {
-                    diesel::insert_into($tag_relation_table::table)
+                    let row_count = diesel::insert_into($tag_relation_table::table)
                         .values(&new_object_tags)
                         .on_conflict_do_nothing()
                         .execute($connection)
                         .await?;
+
+                    mutated_tags = row_count > 0;
+                }
+            }
+        }
+
+        // if tags are overwritten, remove all previously set tags that are not in the new set
+        if $tags_overwrite.is_some() || $tag_pks_overwrite.is_some() {
+            if let Some(ref added_tag_pks) = $added_tag_pks {
+                let mut curr_tag_pks_to_remove = curr_tag_pks
+                    .into_iter()
+                    .filter(|tag_pk| !added_tag_pks.contains(tag_pk))
+                    .collect::<Vec<_>>();
+
+                if !curr_tag_pks_to_remove.is_empty() {
+                    match $removed_tag_pks {
+                        Some(ref mut removed_tag_pks) => {
+                            removed_tag_pks.append(&mut curr_tag_pks_to_remove)
+                        }
+                        None => $removed_tag_pks = Some(curr_tag_pks_to_remove),
+                    }
+                }
+            } else {
+                if !curr_tag_pks.is_empty() {
+                    let mut curr_tag_pks = Vec::from_iter(curr_tag_pks);
+                    match $removed_tag_pks {
+                        Some(ref mut removed_tag_pks) => {
+                            removed_tag_pks.append(&mut curr_tag_pks)
+                        }
+                        None => $removed_tag_pks = Some(curr_tag_pks),
+                    }
                 }
             }
         }
 
         if let Some(ref removed_tag_pks) = $removed_tag_pks {
             if !removed_tag_pks.is_empty() {
-                diesel::delete(
+                let row_count = diesel::delete(
                     $tag_relation_table::table.filter(
                         $tag_relation_table::$fk_source_object
                             .eq($source_object_pk)
@@ -145,6 +178,7 @@ macro_rules! handle_object_tag_update {
                 )
                 .execute($connection)
                 .await?;
+                mutated_tags |= row_count > 0;
             }
         }
 
@@ -168,11 +202,23 @@ macro_rules! handle_object_tag_update {
                 ));
             }
         }
-    };
+
+        if mutated_tags {
+            Some(curr_tags)
+        } else {
+            None
+        }
+    }};
 }
 
 macro_rules! handle_object_group_access_update {
-    ($source_object_pk:expr, $group_access_relation_entity:ident, $group_access_relation_table:ident, $fk_source_object:ident, $group_access_overwrite:expr, $added_group_access:expr, $removed_group_access:expr, $user:expr, $connection:expr) => {
+    ($source_object_pk:expr, $group_access_relation_entity:ident, $group_access_relation_table:ident, $fk_source_object:ident, $group_access_overwrite:expr, $added_group_access:expr, $removed_group_access:expr, $user:expr, $connection:expr) => {{
+        let previous_group_access = $group_access_relation_table::table
+            .filter($group_access_relation_table::$fk_source_object.eq($source_object_pk))
+            .load::<$group_access_relation_entity>($connection)
+            .await?;
+
+        let mut removed_groups = false;
         let added_groups = if $group_access_overwrite.is_some()
                 || $added_group_access.is_some()
             {
@@ -209,7 +255,7 @@ macro_rules! handle_object_group_access_update {
                         .map(|group_access| group_access.group_pk)
                         .collect::<Vec<_>>();
 
-                    diesel::delete(
+                    let row_count = diesel::delete(
                         $group_access_relation_table::table.filter(
                             $group_access_relation_table::$fk_source_object
                                 .eq($source_object_pk)
@@ -227,6 +273,7 @@ macro_rules! handle_object_group_access_update {
                     )
                     .execute($connection)
                     .await?;
+                    removed_groups = row_count > 0;
 
                     group_access_overwrite
                         .iter()
@@ -281,9 +328,9 @@ macro_rules! handle_object_group_access_update {
                 false
             };
 
-            if let Some(ref removed_group_access) = $removed_group_access {
+            removed_groups |= if let Some(ref removed_group_access) = $removed_group_access {
                 if !removed_group_access.is_empty() {
-                    diesel::delete(
+                    let row_count = diesel::delete(
                         $group_access_relation_table::table.filter(
                             $group_access_relation_table::$fk_source_object.eq($source_object_pk).and(
                                 $group_access_relation_table::fk_granted_group.eq_any(removed_group_access),
@@ -292,8 +339,13 @@ macro_rules! handle_object_group_access_update {
                     )
                     .execute($connection)
                     .await?;
+                    row_count > 0
+                } else {
+                    false
                 }
-            }
+            } else {
+                false
+            };
 
             if added_groups {
                 let curr_group_count = $group_access_relation_table::table
@@ -311,7 +363,13 @@ macro_rules! handle_object_group_access_update {
                     ));
                 }
             }
-    };
+
+            if added_groups || removed_groups {
+                Some(previous_group_access)
+            } else {
+                None
+            }
+    }};
 }
 
 #[derive(Deserialize, Validate)]
@@ -374,7 +432,10 @@ pub async fn edit_post_handler(
 
     let post = run_serializable_transaction(&mut connection, |connection| {
         async {
-            if !perms::is_post_editable(connection, Some(&user), post_pk).await? {
+            let curr_post = perms::load_post_secured(post_pk, connection, Some(&user))
+                .await?
+                .post;
+            if !curr_post.is_editable(Some(&user), connection).await? {
                 return Err(TransactionRuntimeError::Rollback(
                     Error::InaccessibleObjectError(post_pk),
                 ));
@@ -384,7 +445,7 @@ pub async fn edit_post_handler(
             let mut added_tag_pks = request.added_tag_pks.clone();
             let mut removed_tag_pks = request.removed_tag_pks.clone();
 
-            handle_object_tag_update!(
+            let previous_tags = handle_object_tag_update!(
                 post_pk,
                 PostTag,
                 post_tag,
@@ -397,7 +458,7 @@ pub async fn edit_post_handler(
                 connection
             );
 
-            handle_object_group_access_update!(
+            let previous_group_access = handle_object_group_access_update!(
                 post_pk,
                 PostGroupAccess,
                 post_group_access,
@@ -418,69 +479,98 @@ pub async fn edit_post_handler(
                 description: request.description.clone(),
             };
 
-            if update.has_changes() {
+            let update_field_changes = update.get_field_changes(&curr_post);
+            let ret = if update_field_changes.has_changes() {
                 let updated_post = diesel::update(post::table)
                     .filter(post::pk.eq(post_pk))
-                    .set(update)
+                    .set(&update)
                     .get_result::<Post>(connection)
                     .await?;
 
                 Ok(updated_post)
             } else {
-                let loaded_post = post::table
-                    .filter(post::pk.eq(post_pk))
-                    .get_result::<Post>(connection)
+                Ok(curr_post.clone())
+            };
+
+            if update_field_changes.has_changes()
+                || previous_tags.is_some()
+                || previous_group_access.is_some()
+            {
+                let post_edit_history = diesel::insert_into(post_edit_history::table)
+                    .values(NewPostEditHistory {
+                        fk_post: curr_post.pk,
+                        fk_edit_user: curr_post.fk_edit_user,
+                        edit_timestamp: curr_post.edit_timestamp,
+                        data_url_changed: update_field_changes.data_url_changed,
+                        data_url: curr_post.data_url,
+                        source_url_changed: update_field_changes.source_url_changed,
+                        source_url: curr_post.source_url,
+                        title_changed: update_field_changes.title_changed,
+                        title: curr_post.title,
+                        public_changed: update_field_changes.public_changed,
+                        public: curr_post.public,
+                        public_edit_changed: update_field_changes.public_edit_changed,
+                        public_edit: curr_post.public_edit,
+                        description_changed: update_field_changes.description_changed,
+                        description: curr_post.description,
+                        tags_changed: previous_tags.is_some(),
+                        group_access_changed: previous_group_access.is_some(),
+                    })
+                    .get_result::<PostEditHistory>(connection)
                     .await?;
 
-                Ok(loaded_post)
+                if let Some(previous_tags) = previous_tags {
+                    diesel::insert_into(post_edit_history_tag::table)
+                        .values(
+                            previous_tags
+                                .iter()
+                                .map(|tag| PostEditHistoryTag {
+                                    fk_post_edit_history: post_edit_history.pk,
+                                    fk_tag: tag.pk,
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .execute(connection)
+                        .await?;
+                }
+
+                if let Some(previous_group_access) = previous_group_access {
+                    diesel::insert_into(post_edit_history_group_access::table)
+                        .values(
+                            previous_group_access
+                                .iter()
+                                .map(|group_access| PostEditHistoryGroupAccess {
+                                    fk_post_edit_history: post_edit_history.pk,
+                                    fk_granted_group: group_access.fk_granted_group,
+                                    write: group_access.write,
+                                    fk_granted_by: group_access.fk_granted_by,
+                                    creation_timestamp: group_access.creation_timestamp,
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .execute(connection)
+                        .await?;
+                }
+
+                diesel::update(post::table)
+                    .filter(post::pk.eq(post_pk))
+                    .set((
+                        post::edit_timestamp.eq(Utc::now()),
+                        post::fk_edit_user.eq(user.pk),
+                    ))
+                    .execute(connection)
+                    .await?;
             }
+
+            ret
         }
         .scope_boxed()
     })
     .await?;
 
-    let tags = get_post_tags(post_pk, &mut connection)
-        .await
-        .map_err(Error::from)?;
-    let group_access = get_post_group_access(post_pk, Some(&user), &mut connection)
-        .await
-        .map_err(Error::from)?;
-    let create_user = registered_user::table
-        .filter(registered_user::pk.eq(post.fk_create_user))
-        .get_result::<User>(&mut connection)
-        .await
-        .map_err(Error::from)?;
-    let is_editable = post.is_editable(Some(&user), &mut connection).await?;
-    let is_deletable = post.is_deletable(Some(&user), &mut connection).await?;
-    let (s3_object, s3_object_metadata) = s3_object::table
-        .filter(s3_object::object_key.eq(&post.s3_object))
-        .inner_join(s3_object_metadata::table)
-        .get_result::<(S3Object, S3ObjectMetadata)>(&mut connection)
-        .await
-        .map_err(Error::from)?;
-
-    Ok(warp::reply::json(&PostDetailed {
-        pk: post.pk,
-        data_url: post.data_url,
-        source_url: post.source_url,
-        title: post.title,
-        creation_timestamp: post.creation_timestamp,
-        create_user,
-        score: post.score,
-        s3_object,
-        s3_object_metadata,
-        thumbnail_url: post.thumbnail_url,
-        prev_post: None,
-        next_post: None,
-        public: post.public,
-        public_edit: post.public_edit,
-        description: post.description,
-        is_editable,
-        is_deletable,
-        tags,
-        group_access,
-        post_collection_item: None,
-    }))
+    Ok(warp::reply::json(
+        &load_post_detailed(post, Some(&user), &mut connection).await?,
+    ))
 }
 
 #[derive(Deserialize, Validate)]
@@ -565,7 +655,8 @@ pub async fn edit_post_collection_handler(
 
     let post_collection = run_serializable_transaction(&mut connection, |connection| {
         async {
-            if !perms::is_post_collection_editable(connection, Some(&user), post_collection_pk)
+            let curr_post_collection = perms::load_post_collection_secured(post_collection_pk, connection, Some(&user)).await?.post_collection;
+            if !curr_post_collection.is_editable(Some(&user), connection)
                 .await?
             {
                 return Err(TransactionRuntimeError::Rollback(
@@ -583,7 +674,7 @@ pub async fn edit_post_collection_handler(
                 report_inaccessible_post_pks(added_post_pks, &user, connection).await?
             }
 
-            handle_object_tag_update!(
+            let previous_tags = handle_object_tag_update!(
                 post_collection_pk,
                 PostCollectionTag,
                 post_collection_tag,
@@ -596,7 +687,7 @@ pub async fn edit_post_collection_handler(
                 connection
             );
 
-            handle_object_group_access_update!(
+            let previous_group_access = handle_object_group_access_update!(
                 post_collection_pk,
                 PostCollectionGroupAccess,
                 post_collection_group_access,
@@ -755,70 +846,78 @@ pub async fn edit_post_collection_handler(
                 description: request.description.clone(),
             };
 
-            if update.has_changes() {
+            let update_field_changes = update.get_field_changes(&curr_post_collection);
+            let res = if update_field_changes.has_changes() {
                 let updated_post_collection = diesel::update(post_collection::table)
                     .filter(post_collection::pk.eq(post_collection_pk))
-                    .set(update)
+                    .set(&update)
                     .get_result::<PostCollection>(connection)
                     .await?;
 
                 Ok(updated_post_collection)
             } else {
-                let loaded_post_collection = post_collection::table
-                    .filter(post_collection::pk.eq(post_collection_pk))
-                    .get_result::<PostCollection>(connection)
+                Ok(curr_post_collection.clone())
+            };
+
+            if update_field_changes.has_changes() || previous_tags.is_some() || previous_group_access.is_some() {
+                let post_collection_edit_history = diesel::insert_into(post_collection_edit_history::table)
+                    .values(NewPostCollectionEditHistory {
+                        fk_post_collection: curr_post_collection.pk,
+                        fk_edit_user: curr_post_collection.fk_edit_user,
+                        edit_timestamp: curr_post_collection.edit_timestamp,
+                        title_changed: update_field_changes.title_changed,
+                        title: curr_post_collection.title,
+                        public_changed: update_field_changes.public_changed,
+                        public: curr_post_collection.public,
+                        public_edit_changed: update_field_changes.public_edit_changed,
+                        public_edit: curr_post_collection.public_edit,
+                        description_changed: update_field_changes.description_changed,
+                        description: curr_post_collection.description,
+                        poster_object_key_changed: update_field_changes.poster_object_key_changed,
+                        poster_object_key: curr_post_collection.poster_object_key,
+                        tags_changed: previous_tags.is_some(),
+                        group_access_changed: previous_group_access.is_some(),
+                    })
+                    .get_result::<PostCollectionEditHistory>(connection)
                     .await?;
 
-                Ok(loaded_post_collection)
+                    if let Some(previous_tags) = previous_tags {
+                        diesel::insert_into(post_collection_edit_history_tag::table)
+                            .values(previous_tags.iter().map(|tag| PostCollectionEditHistoryTag {
+                                fk_post_collection_edit_history: post_collection_edit_history.pk,
+                                fk_tag: tag.pk,
+                            }).collect::<Vec<_>>())
+                            .execute(connection)
+                            .await?;
+                    }
+
+                    if let Some(previous_group_access) = previous_group_access {
+                        diesel::insert_into(post_collection_edit_history_group_access::table)
+                            .values(previous_group_access.iter().map(|group_access| PostCollectionEditHistoryGroupAccess {
+                                fk_post_collection_edit_history: post_collection_edit_history.pk,
+                                fk_granted_group: group_access.fk_granted_group,
+                                write: group_access.write,
+                                fk_granted_by: group_access.fk_granted_by,
+                                creation_timestamp: group_access.creation_timestamp,
+                            }).collect::<Vec<_>>())
+                            .execute(connection)
+                            .await?;
+                    }
+
+                    diesel::update(post_collection::table)
+                        .filter(post_collection::pk.eq(post_collection_pk))
+                        .set((post_collection::edit_timestamp.eq(Utc::now()), post_collection::fk_edit_user.eq(user.pk)))
+                        .execute(connection)
+                        .await?;
             }
+
+            res
         }
         .scope_boxed()
     })
     .await?;
 
-    let tags = get_post_collection_tags(post_collection_pk, &mut connection)
-        .await
-        .map_err(Error::from)?;
-    let group_access =
-        get_post_collection_group_access(post_collection_pk, Some(&user), &mut connection)
-            .await
-            .map_err(Error::from)?;
-    let create_user = registered_user::table
-        .filter(registered_user::pk.eq(post_collection.fk_create_user))
-        .get_result::<User>(&mut connection)
-        .await
-        .map_err(Error::from)?;
-    let is_editable = post_collection
-        .is_editable(Some(&user), &mut connection)
-        .await?;
-    let is_deletable = post_collection
-        .is_deletable(Some(&user), &mut connection)
-        .await?;
-    let poster_object = if let Some(ref poster_object_key) = post_collection.poster_object_key {
-        Some(
-            s3_object::table
-                .filter(s3_object::object_key.eq(poster_object_key))
-                .get_result::<S3Object>(&mut connection)
-                .await
-                .map_err(Error::from)?,
-        )
-    } else {
-        None
-    };
-
-    Ok(warp::reply::json(&PostCollectionDetailed {
-        pk: post_collection.pk,
-        title: post_collection.title,
-        create_user,
-        creation_timestamp: post_collection.creation_timestamp,
-        public: post_collection.public,
-        public_edit: post_collection.public_edit,
-        poster_object,
-        poster_object_key: post_collection.poster_object_key,
-        description: post_collection.description,
-        is_editable,
-        is_deletable,
-        tags,
-        group_access,
-    }))
+    Ok(warp::reply::json(
+        &load_post_collection_detailed(post_collection, Some(&user), &mut connection).await?,
+    ))
 }

@@ -15,7 +15,7 @@ use crate::{
     error::{Error, TransactionRuntimeError},
     model::{
         Broker, NewUserGroup, Post, PostCollection, PostCollectionItem, S3Object, S3ObjectMetadata,
-        User, UserGroup,
+        User, UserGroup, UserPublic,
     },
     run_retryable_transaction,
     schema::{
@@ -156,20 +156,22 @@ pub(crate) use get_group_access_write_condition;
 
 pub struct PostJoined {
     pub post: Post,
-    pub create_user: User,
+    pub create_user: UserPublic,
     pub s3_object: S3Object,
     pub s3_object_metadata: S3ObjectMetadata,
+    pub edit_user: UserPublic,
 }
 
 pub struct PostCollectionJoined {
     pub post_collection: PostCollection,
-    pub create_user: User,
+    pub create_user: UserPublic,
     pub poster_object: Option<S3Object>,
+    pub edit_user: UserPublic,
 }
 
 pub struct PostCollectionItemJoined {
     pub post_collection_item: PostCollectionItem,
-    pub added_by: User,
+    pub added_by: UserPublic,
     pub post: PostJoined,
     pub post_collection: PostCollectionJoined,
 }
@@ -180,12 +182,17 @@ pub async fn load_post_secured(
     user: Option<&User>,
 ) -> Result<PostJoined, Error> {
     let user_pk = user.map(|u| u.pk);
+    let (create_user, edit_user) = diesel::alias!(
+        schema::registered_user as create_user,
+        schema::registered_user as edit_user,
+    );
     post::table
-        .inner_join(registered_user::table)
+        .inner_join(create_user.on(post::fk_create_user.eq(create_user.field(registered_user::pk))))
         .inner_join(s3_object::table)
         .inner_join(
             s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
         )
+        .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::pk.eq(post_pk).and(
                 post::fk_create_user
@@ -202,7 +209,7 @@ pub async fn load_post_secured(
                     ))),
             ),
         )
-        .get_result::<(Post, User, S3Object, S3ObjectMetadata)>(connection)
+        .get_result::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
         .await
         .optional()?
         .ok_or(Error::InaccessibleObjectError(post_pk))
@@ -211,6 +218,7 @@ pub async fn load_post_secured(
             create_user: tuple.1,
             s3_object: tuple.2,
             s3_object_metadata: tuple.3,
+            edit_user: tuple.4,
         })
 }
 
@@ -221,10 +229,18 @@ pub async fn load_post_collection_item_secured(
     user: Option<&User>,
 ) -> Result<PostCollectionItemJoined, Error> {
     let user_pk = user.map(|u| u.pk);
-    let (added_by_user, post_create_user, post_collection_create_user) = diesel::alias!(
+    let (
+        added_by_user,
+        post_create_user,
+        post_edit_user,
+        post_collection_create_user,
+        post_collection_edit_user,
+    ) = diesel::alias!(
         schema::registered_user as added_by_user,
         schema::registered_user as post_create_user,
-        schema::registered_user as post_collection_create_user
+        schema::registered_user as post_edit_user,
+        schema::registered_user as post_collection_create_user,
+        schema::registered_user as post_collection_edit_user,
     );
     let (post_s3_object, post_collection_poster_object) = diesel::alias!(
         schema::s3_object as post_s3_object,
@@ -241,6 +257,9 @@ pub async fn load_post_collection_item_secured(
                 .on(post::fk_create_user.eq(post_create_user.field(registered_user::pk))),
         )
         .inner_join(
+            post_edit_user.on(post::fk_edit_user.eq(post_edit_user.field(registered_user::pk))),
+        )
+        .inner_join(
             post_s3_object.on(post::s3_object.eq(post_s3_object.field(s3_object::object_key))),
         )
         .inner_join(
@@ -251,6 +270,9 @@ pub async fn load_post_collection_item_secured(
             post_collection_create_user.on(post_collection::fk_create_user
                 .eq(post_collection_create_user.field(registered_user::pk))),
         )
+        .inner_join(post_collection_edit_user.on(
+            post_collection::fk_edit_user.eq(post_collection_edit_user.field(registered_user::pk)),
+        ))
         .left_join(
             post_collection_poster_object.on(post_collection::poster_object_key.eq(
                 post_collection_poster_object
@@ -298,12 +320,14 @@ pub async fn load_post_collection_item_secured(
         )
         .get_result::<(
             PostCollectionItem,
-            User,
+            UserPublic,
             Post,
-            User,
+            UserPublic,
+            UserPublic,
             S3Object,
             PostCollection,
-            User,
+            UserPublic,
+            UserPublic,
             Option<S3Object>,
             S3ObjectMetadata,
         )>(connection)
@@ -316,13 +340,15 @@ pub async fn load_post_collection_item_secured(
             post: PostJoined {
                 post: tuple.2,
                 create_user: tuple.3,
-                s3_object: tuple.4,
-                s3_object_metadata: tuple.8,
+                s3_object: tuple.5,
+                s3_object_metadata: tuple.10,
+                edit_user: tuple.4,
             },
             post_collection: PostCollectionJoined {
-                post_collection: tuple.5,
-                create_user: tuple.6,
-                poster_object: tuple.7,
+                post_collection: tuple.6,
+                create_user: tuple.7,
+                poster_object: tuple.9,
+                edit_user: tuple.8,
             },
         })
 }
@@ -333,12 +359,17 @@ pub async fn load_posts_secured(
     user: Option<&User>,
 ) -> Result<Vec<PostJoined>, Error> {
     let user_pk = user.map(|u| u.pk);
+    let (create_user, edit_user) = diesel::alias!(
+        schema::registered_user as create_user,
+        schema::registered_user as edit_user,
+    );
     let results = post::table
-        .inner_join(registered_user::table)
+        .inner_join(create_user.on(post::fk_create_user.eq(create_user.field(registered_user::pk))))
         .inner_join(s3_object::table)
         .inner_join(
             s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
         )
+        .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::pk.eq_any(post_pks).and(
                 post::fk_create_user
@@ -355,7 +386,7 @@ pub async fn load_posts_secured(
                     ))),
             ),
         )
-        .load::<(Post, User, S3Object, S3ObjectMetadata)>(connection)
+        .load::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
         .await?;
 
     let found_pks = results.iter().map(|res| res.0.pk).collect::<HashSet<_>>();
@@ -372,6 +403,7 @@ pub async fn load_posts_secured(
                 create_user: tuple.1,
                 s3_object: tuple.2,
                 s3_object_metadata: tuple.3,
+                edit_user: tuple.4,
             })
             .collect::<Vec<_>>())
     } else {
@@ -385,9 +417,19 @@ pub async fn load_post_collection_secured(
     user: Option<&User>,
 ) -> Result<PostCollectionJoined, Error> {
     let user_pk = user.map(|u| u.pk);
+    let (create_user, edit_user) = diesel::alias!(
+        schema::registered_user as create_user,
+        schema::registered_user as edit_user,
+    );
     post_collection::table
-        .inner_join(registered_user::table)
+        .inner_join(
+            create_user
+                .on(post_collection::fk_create_user.eq(create_user.field(registered_user::pk))),
+        )
         .left_join(s3_object::table)
+        .inner_join(
+            edit_user.on(post_collection::fk_edit_user.eq(edit_user.field(registered_user::pk))),
+        )
         .filter(
             post_collection::pk.eq(post_collection_pk).and(
                 post_collection::fk_create_user
@@ -404,7 +446,7 @@ pub async fn load_post_collection_secured(
                     ))),
             ),
         )
-        .get_result::<(PostCollection, User, Option<S3Object>)>(connection)
+        .get_result::<(PostCollection, UserPublic, Option<S3Object>, UserPublic)>(connection)
         .await
         .optional()?
         .ok_or(Error::InaccessibleObjectError(post_collection_pk))
@@ -412,14 +454,16 @@ pub async fn load_post_collection_secured(
             post_collection: tuple.0,
             create_user: tuple.1,
             poster_object: tuple.2,
+            edit_user: tuple.3,
         })
 }
 
 pub struct PostJoinedS3Object {
     pub post: Post,
-    pub create_user: User,
+    pub create_user: UserPublic,
     pub s3_object: S3Object,
     pub s3_object_metadata: S3ObjectMetadata,
+    pub edit_user: UserPublic,
 }
 
 pub async fn load_s3_object_posts(
@@ -427,12 +471,17 @@ pub async fn load_s3_object_posts(
     user_pk: i64,
     connection: &mut AsyncPgConnection,
 ) -> Result<Vec<PostJoinedS3Object>, Error> {
+    let (create_user, edit_user) = diesel::alias!(
+        schema::registered_user as create_user,
+        schema::registered_user as edit_user,
+    );
     post::table
-        .inner_join(registered_user::table)
+        .inner_join(create_user.on(post::fk_create_user.eq(create_user.field(registered_user::pk))))
         .inner_join(s3_object::table)
         .inner_join(
             s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
         )
+        .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::s3_object.eq(s3_object_key).and(
                 post::fk_create_user
@@ -449,7 +498,7 @@ pub async fn load_s3_object_posts(
                     ))),
             ),
         )
-        .load::<(Post, User, S3Object, S3ObjectMetadata)>(connection)
+        .load::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
         .await
         .map_err(|e| Error::QueryError(e.to_string()))
         .map(|tuples| {
@@ -460,6 +509,7 @@ pub async fn load_s3_object_posts(
                     create_user: tuple.1,
                     s3_object: tuple.2,
                     s3_object_metadata: tuple.3,
+                    edit_user: tuple.4,
                 })
                 .collect::<Vec<_>>()
         })

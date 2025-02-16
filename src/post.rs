@@ -11,16 +11,22 @@ use serde::{Deserialize, Serialize};
 use crate::{
     diesel::{ExpressionMethods, NullableExpressionMethods, QueryDsl},
     error::Error,
-    model::{PostCollectionGroupAccess, PostGroupAccess, S3Object, Tag, User, UserGroup},
+    model::{
+        Post, PostCollection, PostCollectionGroupAccess, PostGroupAccess, S3Object,
+        S3ObjectMetadata, Tag, User, UserGroup, UserPublic,
+    },
     perms,
+    query::{PostCollectionDetailed, PostDetailed},
     schema::{
-        post, post_collection_group_access, post_collection_item, post_collection_tag,
-        post_group_access, post_tag, s3_object, tag, user_group, user_group_membership,
+        self, post, post_collection, post_collection_group_access, post_collection_item,
+        post_collection_tag, post_group_access, post_tag, registered_user, s3_object,
+        s3_object_metadata, tag, user_group, user_group_membership,
     },
 };
 
 pub mod create;
 pub mod delete;
+pub mod history;
 pub mod update;
 
 async fn report_inaccessible_groups(
@@ -293,6 +299,130 @@ pub async fn get_post_collection_group_access(
                 },
             )
             .collect::<Vec<_>>()
+    })
+}
+
+pub async fn load_post_detailed(
+    post: Post,
+    user: Option<&User>,
+    connection: &mut AsyncPgConnection,
+) -> Result<PostDetailed, Error> {
+    let tags = get_post_tags(post.pk, connection)
+        .await
+        .map_err(Error::from)?;
+    let group_access = get_post_group_access(post.pk, user, connection)
+        .await
+        .map_err(Error::from)?;
+    let (create_user, edit_user) = diesel::alias!(
+        schema::registered_user as create_user,
+        schema::registered_user as edit_user,
+    );
+    let (create_user, edit_user) = post::table
+        .inner_join(create_user.on(post::fk_create_user.eq(create_user.field(registered_user::pk))))
+        .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
+        .select((
+            create_user.fields(registered_user::table::all_columns()),
+            edit_user.fields(registered_user::table::all_columns()),
+        ))
+        .filter(post::pk.eq(post.pk))
+        .get_result::<(UserPublic, UserPublic)>(connection)
+        .await
+        .map_err(Error::from)?;
+    let is_editable = post.is_editable(user, connection).await?;
+    let is_deletable = post.is_deletable(user, connection).await?;
+    let (s3_object, s3_object_metadata) = s3_object::table
+        .filter(s3_object::object_key.eq(&post.s3_object))
+        .inner_join(s3_object_metadata::table)
+        .get_result::<(S3Object, S3ObjectMetadata)>(connection)
+        .await
+        .map_err(Error::from)?;
+
+    Ok(PostDetailed {
+        pk: post.pk,
+        data_url: post.data_url,
+        source_url: post.source_url,
+        title: post.title,
+        creation_timestamp: post.creation_timestamp,
+        edit_timestamp: post.edit_timestamp,
+        create_user,
+        edit_user,
+        score: post.score,
+        s3_object,
+        s3_object_metadata,
+        thumbnail_url: post.thumbnail_url,
+        prev_post: None,
+        next_post: None,
+        public: post.public,
+        public_edit: post.public_edit,
+        description: post.description,
+        is_editable,
+        is_deletable,
+        tags,
+        group_access,
+        post_collection_item: None,
+    })
+}
+
+pub async fn load_post_collection_detailed(
+    post_collection: PostCollection,
+    user: Option<&User>,
+    connection: &mut AsyncPgConnection,
+) -> Result<PostCollectionDetailed, Error> {
+    let tags = get_post_collection_tags(post_collection.pk, connection)
+        .await
+        .map_err(Error::from)?;
+    let group_access = get_post_collection_group_access(post_collection.pk, user, connection)
+        .await
+        .map_err(Error::from)?;
+    let (create_user, edit_user) = diesel::alias!(
+        schema::registered_user as create_user,
+        schema::registered_user as edit_user,
+    );
+    let (create_user, edit_user) = post_collection::table
+        .inner_join(
+            create_user
+                .on(post_collection::fk_create_user.eq(create_user.field(registered_user::pk))),
+        )
+        .inner_join(
+            edit_user.on(post_collection::fk_edit_user.eq(edit_user.field(registered_user::pk))),
+        )
+        .select((
+            create_user.fields(registered_user::table::all_columns()),
+            edit_user.fields(registered_user::table::all_columns()),
+        ))
+        .filter(post_collection::pk.eq(post_collection.pk))
+        .get_result::<(UserPublic, UserPublic)>(connection)
+        .await
+        .map_err(Error::from)?;
+    let is_editable = post_collection.is_editable(user, connection).await?;
+    let is_deletable = post_collection.is_deletable(user, connection).await?;
+    let poster_object = if let Some(ref poster_object_key) = post_collection.poster_object_key {
+        Some(
+            s3_object::table
+                .filter(s3_object::object_key.eq(poster_object_key))
+                .get_result::<S3Object>(connection)
+                .await
+                .map_err(Error::from)?,
+        )
+    } else {
+        None
+    };
+
+    Ok(PostCollectionDetailed {
+        pk: post_collection.pk,
+        title: post_collection.title,
+        create_user,
+        edit_user,
+        creation_timestamp: post_collection.creation_timestamp,
+        public: post_collection.public,
+        public_edit: post_collection.public_edit,
+        poster_object,
+        poster_object_key: post_collection.poster_object_key,
+        description: post_collection.description,
+        is_editable,
+        is_deletable,
+        tags,
+        group_access,
     })
 }
 

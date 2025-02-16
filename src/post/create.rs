@@ -1,5 +1,5 @@
 use chrono::Utc;
-use diesel::{OptionalExtension, QueryDsl};
+use diesel::{JoinOnDsl, OptionalExtension, QueryDsl, Table};
 use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
 use serde::Deserialize;
 use validator::Validate;
@@ -12,13 +12,13 @@ use crate::{
     model::{
         NewPost, NewPostCollection, NewPostCollectionItem, Post, PostCollection,
         PostCollectionGroupAccess, PostCollectionTag, PostGroupAccess, PostTag, S3Object,
-        S3ObjectMetadata, User,
+        S3ObjectMetadata, User, UserPublic,
     },
     perms,
     query::{self, report_missing_pks, PostCollectionDetailed, PostDetailed},
     run_retryable_transaction, run_serializable_transaction,
     schema::{
-        post, post_collection, post_collection_group_access, post_collection_item,
+        self, post, post_collection, post_collection_group_access, post_collection_item,
         post_collection_tag, post_group_access, post_tag, registered_user, s3_object,
         s3_object_metadata, user_group,
     },
@@ -161,9 +161,23 @@ pub async fn create_post_handler(
             let group_access = get_post_group_access(post.pk, Some(&user), connection)
                 .await
                 .map_err(Error::from)?;
-            let create_user = registered_user::table
-                .filter(registered_user::pk.eq(post.fk_create_user))
-                .get_result::<User>(connection)
+            let (create_user, edit_user) = diesel::alias!(
+                schema::registered_user as create_user,
+                schema::registered_user as edit_user,
+            );
+            let (create_user, edit_user) = post::table
+                .inner_join(
+                    create_user.on(post::fk_create_user.eq(create_user.field(registered_user::pk))),
+                )
+                .inner_join(
+                    edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))),
+                )
+                .select((
+                    create_user.fields(registered_user::table::all_columns()),
+                    edit_user.fields(registered_user::table::all_columns()),
+                ))
+                .filter(post::pk.eq(post.pk))
+                .get_result::<(UserPublic, UserPublic)>(connection)
                 .await
                 .map_err(Error::from)?;
             let is_editable = post.is_editable(Some(&user), connection).await?;
@@ -181,7 +195,9 @@ pub async fn create_post_handler(
                 source_url: post.source_url,
                 title: post.title,
                 creation_timestamp: post.creation_timestamp,
+                edit_timestamp: post.edit_timestamp,
                 create_user,
+                edit_user,
                 score: post.score,
                 s3_object,
                 s3_object_metadata,
@@ -391,9 +407,26 @@ pub async fn create_post_collection_handler(
                 get_post_collection_group_access(post_collection.pk, Some(&user), connection)
                     .await
                     .map_err(Error::from)?;
-            let create_user = registered_user::table
-                .filter(registered_user::pk.eq(post_collection.fk_create_user))
-                .get_result::<User>(connection)
+            let (create_user, edit_user) = diesel::alias!(
+                schema::registered_user as create_user,
+                schema::registered_user as edit_user,
+            );
+            let (create_user, edit_user) = post_collection::table
+                .inner_join(
+                    create_user
+                        .on(post_collection::fk_create_user
+                            .eq(create_user.field(registered_user::pk))),
+                )
+                .inner_join(
+                    edit_user
+                        .on(post_collection::fk_edit_user.eq(edit_user.field(registered_user::pk))),
+                )
+                .select((
+                    create_user.fields(registered_user::table::all_columns()),
+                    edit_user.fields(registered_user::table::all_columns()),
+                ))
+                .filter(post_collection::pk.eq(post_collection.pk))
+                .get_result::<(UserPublic, UserPublic)>(connection)
                 .await
                 .map_err(Error::from)?;
             let is_editable = post_collection.is_editable(Some(&user), connection).await?;
@@ -417,6 +450,7 @@ pub async fn create_post_collection_handler(
                 pk: post_collection.pk,
                 title: post_collection.title,
                 create_user,
+                edit_user,
                 creation_timestamp: post_collection.creation_timestamp,
                 public: post_collection.public,
                 public_edit: post_collection.public_edit,

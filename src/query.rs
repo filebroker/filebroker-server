@@ -9,6 +9,7 @@ use warp::{Rejection, Reply};
 
 use crate::model::{
     PostCollectionFull, PostCollectionItemQueryObject, PostCollectionQueryObject, S3ObjectMetadata,
+    UserPublic,
 };
 use crate::perms::{PostCollectionItemJoined, PostCollectionJoined};
 use crate::post::PostCollectionGroupAccessDetailed;
@@ -103,6 +104,14 @@ macro_rules! load_and_report_missing_pks {
 }
 
 pub(crate) use load_and_report_missing_pks;
+
+#[derive(Deserialize, Validate)]
+pub struct PaginationQueryParams {
+    #[validate(range(min = 1, max = 20))]
+    pub limit: Option<u32>,
+    #[validate(range(min = 1, max = 1000))]
+    pub page: Option<u32>,
+}
 
 #[derive(Deserialize, Validate)]
 pub struct QueryParametersFilter {
@@ -238,7 +247,9 @@ pub struct PostDetailed {
     pub source_url: Option<String>,
     pub title: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
-    pub create_user: User,
+    pub edit_timestamp: DateTime<Utc>,
+    pub create_user: UserPublic,
+    pub edit_user: UserPublic,
     pub score: i32,
     pub s3_object: S3Object,
     pub s3_object_metadata: S3ObjectMetadata,
@@ -266,7 +277,7 @@ pub struct PostWindowObject {
 #[derive(Serialize)]
 pub struct PostCollectionItemInformation {
     pub post_collection: PostCollectionFull,
-    pub added_by: User,
+    pub added_by: UserPublic,
     pub creation_timestamp: DateTime<Utc>,
     pub pk: i64,
     pub ordinal: i32,
@@ -317,7 +328,9 @@ pub async fn get_posts_handler(
             source_url: post.post.source_url,
             title: post.post.title,
             creation_timestamp: post.post.creation_timestamp,
+            edit_timestamp: post.post.edit_timestamp,
             create_user: post.create_user,
+            edit_user: post.edit_user,
             score: post.post.score,
             s3_object: post.s3_object,
             s3_object_metadata: post.s3_object_metadata,
@@ -384,6 +397,7 @@ pub async fn get_post_handler(
                     public: post_collection.post_collection.public,
                     public_edit: post_collection.post_collection.public_edit,
                     description: post_collection.post_collection.description,
+                    edit_timestamp: post_collection.post_collection.edit_timestamp,
                 },
                 added_by,
                 creation_timestamp: post_collection_item.creation_timestamp,
@@ -404,6 +418,7 @@ pub async fn get_post_handler(
         create_user,
         s3_object,
         s3_object_metadata,
+        edit_user,
     } = post;
 
     let page = query_parameters_filter.page;
@@ -479,7 +494,9 @@ pub async fn get_post_handler(
         source_url: post.source_url,
         title: post.title,
         creation_timestamp: post.creation_timestamp,
+        edit_timestamp: post.edit_timestamp,
         create_user,
+        edit_user,
         score: post.score,
         s3_object,
         s3_object_metadata,
@@ -501,7 +518,8 @@ pub async fn get_post_handler(
 pub struct PostCollectionDetailed {
     pub pk: i64,
     pub title: String,
-    pub create_user: User,
+    pub create_user: UserPublic,
+    pub edit_user: UserPublic,
     pub creation_timestamp: DateTime<Utc>,
     #[serde(rename = "is_public")]
     pub public: bool,
@@ -525,6 +543,7 @@ pub async fn get_post_collection_handler(
         post_collection,
         create_user,
         poster_object,
+        edit_user,
     } = perms::load_post_collection_secured(post_collection_pk, &mut connection, user.as_ref())
         .await?;
 
@@ -546,6 +565,7 @@ pub async fn get_post_collection_handler(
         pk: post_collection.pk,
         title: post_collection.title,
         create_user,
+        edit_user,
         creation_timestamp: post_collection.creation_timestamp,
         public: post_collection.public,
         public_edit: post_collection.public_edit,
@@ -699,16 +719,13 @@ fn prepare_query_parameters(
                 String::from("post.public AS post_public"),
                 String::from("post.public_edit AS post_public_edit"),
                 String::from("post.description AS post_description"),
+                String::from("post.edit_timestamp AS post_edit_timestamp"),
                 String::from("s3_object.thumbnail_object_key AS post_thumbnail_object_key"),
                 String::from("create_user.pk AS post_create_user_pk"),
                 String::from("create_user.user_name AS post_create_user_user_name"),
-                String::from("create_user.user_name AS post_create_user_user_name"),
-                String::from("create_user.email AS post_create_user_email"),
                 String::from("create_user.avatar_url AS post_create_user_avatar_url"),
                 String::from("create_user.creation_timestamp AS post_create_user_creation_timestamp"),
-                String::from("create_user.email_confirmed AS post_create_user_email_confirmed"),
                 String::from("create_user.display_name AS post_create_user_display_name"),
-                String::from("create_user.password_fail_count AS post_create_user_password_fail_count"),
                 String::from("s3_object.object_key AS post_s3_object_object_key"),
                 String::from("s3_object.sha256_hash AS post_s3_object_sha256_hash"),
                 String::from("s3_object.size_bytes AS post_s3_object_size_bytes"),
@@ -801,6 +818,7 @@ fn prepare_query_parameters(
                 String::from("post_collection.public AS post_collection_public"),
                 String::from("post_collection.public_edit AS post_collection_public_edit"),
                 String::from("post_collection.description AS post_collection_description"),
+                String::from("post_collection.edit_timestamp AS post_collection_edit_timestamp"),
                 String::from("poster_object.thumbnail_object_key AS post_collection_thumbnail_object_key"),
                 String::from("poster_object.object_key AS post_collection_poster_object_key"),
                 String::from("poster_object.sha256_hash AS post_collection_poster_sha256_hash"),
@@ -820,12 +838,9 @@ fn prepare_query_parameters(
                 String::from("poster_object.thumbnail_disabled AS post_collection_poster_thumbnail_disabled"),
                 String::from("create_user.pk AS post_collection_create_user_pk"),
                 String::from("create_user.user_name AS post_collection_create_user_user_name"),
-                String::from("create_user.email AS post_collection_create_user_email"),
                 String::from("create_user.avatar_url AS post_collection_create_user_avatar_url"),
                 String::from("create_user.creation_timestamp AS post_collection_create_user_creation_timestamp"),
-                String::from("create_user.email_confirmed AS post_collection_create_user_email_confirmed"),
                 String::from("create_user.display_name AS post_collection_create_user_display_name"),
-                String::from("create_user.password_fail_count AS post_collection_create_user_password_fail_count"),
             ],
             join_statements: vec![
                 String::from("LEFT JOIN s3_object AS poster_object ON poster_object.object_key = post_collection.poster_object_key"),
@@ -855,12 +870,9 @@ fn prepare_query_parameters(
                 String::from("post_collection_item.creation_timestamp AS post_collection_item_creation_timestamp"),
                 String::from("post_collection_item_added_user.pk AS post_collection_item_added_user_pk"),
                 String::from("post_collection_item_added_user.user_name AS post_collection_item_added_user_user_name"),
-                String::from("post_collection_item_added_user.email AS post_collection_item_added_user_email"),
                 String::from("post_collection_item_added_user.avatar_url AS post_collection_item_added_user_avatar_url"),
                 String::from("post_collection_item_added_user.creation_timestamp AS post_collection_item_added_user_creation_timestamp"),
-                String::from("post_collection_item_added_user.email_confirmed AS post_collection_item_added_user_email_confirmed"),
                 String::from("post_collection_item_added_user.display_name AS post_collection_item_added_user_display_name"),
-                String::from("post_collection_item_added_user.password_fail_count AS post_collection_item_added_user_password_fail_count"),
                 // post data
                 String::from("post.pk AS post_pk"),
                 String::from("post.data_url AS post_data_url"),
@@ -872,16 +884,13 @@ fn prepare_query_parameters(
                 String::from("post.public AS post_public"),
                 String::from("post.public_edit AS post_public_edit"),
                 String::from("post.description AS post_description"),
+                String::from("post.edit_timestamp AS post_edit_timestamp"),
                 String::from("post_s3_object.thumbnail_object_key AS post_thumbnail_object_key"),
                 String::from("post_create_user.pk AS post_create_user_pk"),
                 String::from("post_create_user.user_name AS post_create_user_user_name"),
-                String::from("post_create_user.user_name AS post_create_user_user_name"),
-                String::from("post_create_user.email AS post_create_user_email"),
                 String::from("post_create_user.avatar_url AS post_create_user_avatar_url"),
                 String::from("post_create_user.creation_timestamp AS post_create_user_creation_timestamp"),
-                String::from("post_create_user.email_confirmed AS post_create_user_email_confirmed"),
                 String::from("post_create_user.display_name AS post_create_user_display_name"),
-                String::from("post_create_user.password_fail_count AS post_create_user_password_fail_count"),
                 String::from("post_s3_object.object_key AS post_s3_object_object_key"),
                 String::from("post_s3_object.sha256_hash AS post_s3_object_sha256_hash"),
                 String::from("post_s3_object.size_bytes AS post_s3_object_size_bytes"),
@@ -940,6 +949,7 @@ fn prepare_query_parameters(
                 String::from("post_collection.public AS post_collection_public"),
                 String::from("post_collection.public_edit AS post_collection_public_edit"),
                 String::from("post_collection.description AS post_collection_description"),
+                String::from("post_collection.edit_timestamp AS post_collection_edit_timestamp"),
                 String::from("poster_object.thumbnail_object_key AS post_collection_thumbnail_object_key"),
                 String::from("poster_object.object_key AS post_collection_poster_object_key"),
                 String::from("poster_object.sha256_hash AS post_collection_poster_sha256_hash"),
@@ -959,12 +969,9 @@ fn prepare_query_parameters(
                 String::from("poster_object.thumbnail_disabled AS post_collection_poster_thumbnail_disabled"),
                 String::from("post_collection_create_user.pk AS post_collection_create_user_pk"),
                 String::from("post_collection_create_user.user_name AS post_collection_create_user_user_name"),
-                String::from("post_collection_create_user.email AS post_collection_create_user_email"),
                 String::from("post_collection_create_user.avatar_url AS post_collection_create_user_avatar_url"),
                 String::from("post_collection_create_user.creation_timestamp AS post_collection_create_user_creation_timestamp"),
-                String::from("post_collection_create_user.email_confirmed AS post_collection_create_user_email_confirmed"),
                 String::from("post_collection_create_user.display_name AS post_collection_create_user_display_name"),
-                String::from("post_collection_create_user.password_fail_count AS post_collection_create_user_password_fail_count"),
             ],
             join_statements: vec![
                 String::from("INNER JOIN post ON post_collection_item.fk_post = post.pk"),

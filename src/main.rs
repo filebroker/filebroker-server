@@ -20,7 +20,7 @@ use error::{Error, TransactionRuntimeError};
 use futures::{future::BoxFuture, Future, FutureExt, StreamExt, TryFuture};
 use lazy_static::lazy_static;
 use mime::Mime;
-use query::QueryParametersFilter;
+use query::{PaginationQueryParams, QueryParametersFilter};
 use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer},
     ServerConfig,
@@ -543,6 +543,33 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(warp::path::param::<i64>())
         .and_then(tags::get_tag_hierarchy_handler);
 
+    let get_post_edit_history_route = warp::path("get-post-edit-history")
+        .and(warp::get())
+        .and(warp::query::<PaginationQueryParams>())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(post::history::get_post_edit_history_handler);
+
+    let get_post_collection_edit_history_route = warp::path("get-post-collection-edit-history")
+        .and(warp::get())
+        .and(warp::query::<PaginationQueryParams>())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(post::history::get_post_collection_edit_history_handler);
+
+    let rewind_post_history_snapshot_route = warp::path("rewind-post-history-snapshot")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(post::history::rewind_post_history_snapshot_handler);
+
+    let rewind_post_collection_history_snapshot_route =
+        warp::path("rewind-post-collection-history-snapshot")
+            .and(warp::post())
+            .and(warp::path::param())
+            .and(auth::with_user())
+            .and_then(post::history::rewind_post_collection_history_snapshot_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -592,7 +619,11 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .or(get_tags_route)
         .or(update_tag_route)
         .or(get_tag_hierarchy_route)
-        .boxed();
+        .boxed()
+        .or(get_post_edit_history_route)
+        .or(get_post_collection_edit_history_route)
+        .or(rewind_post_history_snapshot_route)
+        .or(rewind_post_collection_history_snapshot_route);
 
     let filter = routes
         .recover(error::handle_rejection)

@@ -144,6 +144,7 @@ pub async fn upload_handler(
                     create_user,
                     s3_object,
                     s3_object_metadata,
+                    edit_user,
                 } in posts
                 {
                     let is_editable = post.is_editable(Some(&user), &mut connection).await?;
@@ -162,7 +163,9 @@ pub async fn upload_handler(
                         source_url: post.source_url,
                         title: post.title,
                         creation_timestamp: post.creation_timestamp,
+                        edit_timestamp: post.edit_timestamp,
                         create_user,
+                        edit_user,
                         score: post.score,
                         s3_object,
                         s3_object_metadata,
