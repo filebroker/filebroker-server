@@ -101,6 +101,8 @@ diesel::table! {
         public -> Bool,
         public_edit -> Bool,
         description -> Nullable<Text>,
+        edit_timestamp -> Timestamptz,
+        fk_edit_user -> Int8,
     }
 }
 
@@ -116,6 +118,48 @@ diesel::table! {
         #[max_length = 255]
         poster_object_key -> Nullable<Varchar>,
         description -> Nullable<Text>,
+        edit_timestamp -> Timestamptz,
+        fk_edit_user -> Int8,
+    }
+}
+
+diesel::table! {
+    post_collection_edit_history (pk) {
+        pk -> Int8,
+        fk_post_collection -> Int8,
+        fk_edit_user -> Int8,
+        edit_timestamp -> Timestamptz,
+        #[max_length = 300]
+        title -> Varchar,
+        title_changed -> Bool,
+        public -> Bool,
+        public_changed -> Bool,
+        public_edit -> Bool,
+        public_edit_changed -> Bool,
+        description -> Nullable<Text>,
+        description_changed -> Bool,
+        #[max_length = 255]
+        poster_object_key -> Nullable<Varchar>,
+        poster_object_key_changed -> Bool,
+        tags_changed -> Bool,
+        group_access_changed -> Bool,
+    }
+}
+
+diesel::table! {
+    post_collection_edit_history_group_access (fk_post_collection_edit_history, fk_granted_group) {
+        fk_post_collection_edit_history -> Int8,
+        fk_granted_group -> Int8,
+        write -> Bool,
+        fk_granted_by -> Int8,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    post_collection_edit_history_tag (fk_post_collection_edit_history, fk_tag) {
+        fk_post_collection_edit_history -> Int8,
+        fk_tag -> Int8,
     }
 }
 
@@ -143,6 +187,49 @@ diesel::table! {
 diesel::table! {
     post_collection_tag (fk_post_collection, fk_tag) {
         fk_post_collection -> Int8,
+        fk_tag -> Int8,
+    }
+}
+
+diesel::table! {
+    post_edit_history (pk) {
+        pk -> Int8,
+        fk_post -> Int8,
+        fk_edit_user -> Int8,
+        edit_timestamp -> Timestamptz,
+        #[max_length = 2048]
+        data_url -> Nullable<Varchar>,
+        data_url_changed -> Bool,
+        #[max_length = 2048]
+        source_url -> Nullable<Varchar>,
+        source_url_changed -> Bool,
+        #[max_length = 300]
+        title -> Nullable<Varchar>,
+        title_changed -> Bool,
+        public -> Bool,
+        public_changed -> Bool,
+        public_edit -> Bool,
+        public_edit_changed -> Bool,
+        description -> Nullable<Text>,
+        description_changed -> Bool,
+        tags_changed -> Bool,
+        group_access_changed -> Bool,
+    }
+}
+
+diesel::table! {
+    post_edit_history_group_access (fk_post_edit_history, fk_granted_group) {
+        fk_post_edit_history -> Int8,
+        fk_granted_group -> Int8,
+        write -> Bool,
+        fk_granted_by -> Int8,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    post_edit_history_tag (fk_post_edit_history, fk_tag) {
+        fk_post_edit_history -> Int8,
         fk_tag -> Int8,
     }
 }
@@ -325,10 +412,15 @@ diesel::joinable!(broker_access -> user_group (fk_granted_group));
 diesel::joinable!(deferred_s3_object_deletion -> broker (fk_broker));
 diesel::joinable!(email_confirmation_token -> registered_user (fk_user));
 diesel::joinable!(one_time_password -> registered_user (fk_user));
-diesel::joinable!(post -> registered_user (fk_create_user));
 diesel::joinable!(post -> s3_object (s3_object));
-diesel::joinable!(post_collection -> registered_user (fk_create_user));
 diesel::joinable!(post_collection -> s3_object (poster_object_key));
+diesel::joinable!(post_collection_edit_history -> post_collection (fk_post_collection));
+diesel::joinable!(post_collection_edit_history -> registered_user (fk_edit_user));
+diesel::joinable!(post_collection_edit_history_group_access -> post_collection_edit_history (fk_post_collection_edit_history));
+diesel::joinable!(post_collection_edit_history_group_access -> registered_user (fk_granted_by));
+diesel::joinable!(post_collection_edit_history_group_access -> user_group (fk_granted_group));
+diesel::joinable!(post_collection_edit_history_tag -> post_collection_edit_history (fk_post_collection_edit_history));
+diesel::joinable!(post_collection_edit_history_tag -> tag (fk_tag));
 diesel::joinable!(post_collection_group_access -> post_collection (fk_post_collection));
 diesel::joinable!(post_collection_group_access -> registered_user (fk_granted_by));
 diesel::joinable!(post_collection_group_access -> user_group (fk_granted_group));
@@ -337,6 +429,13 @@ diesel::joinable!(post_collection_item -> post_collection (fk_post_collection));
 diesel::joinable!(post_collection_item -> registered_user (fk_added_by));
 diesel::joinable!(post_collection_tag -> post_collection (fk_post_collection));
 diesel::joinable!(post_collection_tag -> tag (fk_tag));
+diesel::joinable!(post_edit_history -> post (fk_post));
+diesel::joinable!(post_edit_history -> registered_user (fk_edit_user));
+diesel::joinable!(post_edit_history_group_access -> post_edit_history (fk_post_edit_history));
+diesel::joinable!(post_edit_history_group_access -> registered_user (fk_granted_by));
+diesel::joinable!(post_edit_history_group_access -> user_group (fk_granted_group));
+diesel::joinable!(post_edit_history_tag -> post_edit_history (fk_post_edit_history));
+diesel::joinable!(post_edit_history_tag -> tag (fk_tag));
 diesel::joinable!(post_group_access -> post (fk_post));
 diesel::joinable!(post_group_access -> registered_user (fk_granted_by));
 diesel::joinable!(post_group_access -> user_group (fk_granted_group));
@@ -358,9 +457,15 @@ diesel::allow_tables_to_appear_in_same_query!(
     one_time_password,
     post,
     post_collection,
+    post_collection_edit_history,
+    post_collection_edit_history_group_access,
+    post_collection_edit_history_tag,
     post_collection_group_access,
     post_collection_item,
     post_collection_tag,
+    post_edit_history,
+    post_edit_history_group_access,
+    post_edit_history_tag,
     post_group_access,
     post_tag,
     refresh_token,
