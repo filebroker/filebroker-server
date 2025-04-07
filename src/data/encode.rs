@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use lazy_static::lazy_static;
 
+use crate::error::TransactionRuntimeError;
 use crate::{
     acquire_db_connection,
     diesel::ExpressionMethods,
@@ -35,7 +36,7 @@ use crate::{
         Broker, HlsStream, PgIntervalQuery, PgIntervalWrapper, S3Object, S3ObjectMetadata, User,
     },
     query::functions::substring,
-    retry_on_serialization_failure, run_retryable_transaction,
+    retry_on_serialization_failure, run_retryable_transaction, run_serializable_transaction,
     schema::{hls_stream, post, s3_object, s3_object_metadata},
     util::{
         deserialize_string_from_number, format_duration, join_api_url, DeStringOrArray,
@@ -696,8 +697,8 @@ pub async fn generate_thumbnail(
             .await?;
 
         let mut connection = acquire_db_connection().await?;
-        run_retryable_transaction(&mut connection, |connection| {
-            async move {
+        let persist_result = run_serializable_transaction(&mut connection, |connection| {
+            async {
                 let s3_object = diesel::insert_into(s3_object::table)
                     .values(&S3Object {
                         object_key: thumb_path.clone(),
@@ -723,18 +724,38 @@ pub async fn generate_thumbnail(
                     .await
                     .map_err(retry_on_serialization_failure)?;
 
-                diesel::update(s3_object::table)
+                let update_count = diesel::update(s3_object::table)
                     .filter(s3_object::object_key.eq(&source_object_key))
                     .set(s3_object::thumbnail_object_key.eq(&s3_object.object_key))
                     .execute(connection)
                     .await
                     .map_err(retry_on_serialization_failure)?;
 
+                if update_count == 0 {
+                    // object no longer exists, delete thumb
+                    log::info!("Created thumbnail for object {} that no longer exists, deleting created thumbnail {}", source_object_key, thumb_path);
+                    return Err(TransactionRuntimeError::Rollback(Error::QueryError(
+                        format!(
+                            "Source object {} for thumbnail no longer exists",
+                            source_object_key
+                        ),
+                    )));
+                }
+
                 Ok(())
             }
             .scope_boxed()
         })
-        .await?;
+        .await;
+        drop(connection);
+
+        if let Err(e) = persist_result {
+            log::error!("Failed to await and persist thumbnail object to db with error: {e}. Going to delete created object");
+            if let Err(e) = bucket.delete_object(&thumb_path).await {
+                log::error!("Failed to delete obsolete thumbnail {}: {}", thumb_path, e);
+            }
+            return Err(e);
+        }
 
         Ok(())
     } else {
@@ -1564,7 +1585,7 @@ async fn persist_hls_transcode_results(
     }
 
     let mut conn = acquire_db_connection().await?;
-    run_retryable_transaction(&mut conn, |conn| {
+    run_serializable_transaction(&mut conn, |conn| {
         async {
             diesel::insert_into(s3_object::table)
                 .values(&s3_objects)
@@ -1575,11 +1596,21 @@ async fn persist_hls_transcode_results(
                 .execute(conn)
                 .await?;
 
-            diesel::update(s3_object::table)
+            let update_count = diesel::update(s3_object::table)
                 .set(s3_object::hls_master_playlist.eq(&master_playlist_result.path))
                 .filter(s3_object::object_key.eq(source_object_key))
                 .execute(conn)
                 .await?;
+
+            if update_count == 0 {
+                // source object no longer exists, delete HLS transcode
+                return Err(TransactionRuntimeError::Rollback(Error::QueryError(
+                    format!(
+                        "Source object {} for HLS transcoding no longer exists",
+                        source_object_key
+                    ),
+                )));
+            }
 
             Ok(())
         }
