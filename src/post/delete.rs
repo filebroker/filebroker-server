@@ -13,7 +13,7 @@ use crate::{
     error::{Error, TransactionRuntimeError},
     model::{DeferredS3ObjectDeletion, HlsStream, Post, PostCollection, S3Object, User},
     perms::{self, get_group_membership_condition},
-    run_retryable_transaction,
+    run_serializable_transaction,
     schema::{
         broker, broker_access, deferred_s3_object_deletion, hls_stream, post, post_collection,
         post_collection_group_access, post_collection_item, post_collection_tag, post_group_access,
@@ -65,7 +65,7 @@ pub async fn delete_posts_handler(
 
     let res = if !request.post_pks.is_empty() {
         let mut connection = acquire_db_connection().await?;
-        run_retryable_transaction(&mut connection, |connection| {
+        run_serializable_transaction(&mut connection, |connection| {
             async {
                 let mut post_pks = request.post_pks.clone();
                 let inaccessible_posts = post::table
@@ -281,7 +281,7 @@ pub async fn delete_posts_collections_handler(
 
     let res = if !request.post_collection_pks.is_empty() {
         let mut connection = acquire_db_connection().await?;
-        run_retryable_transaction(&mut connection, |connection| {
+        run_serializable_transaction(&mut connection, |connection| {
             async {
                 let mut post_collection_pks = request.post_collection_pks.clone();
                 let inaccessible_post_collections = post_collection::table
