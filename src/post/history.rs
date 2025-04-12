@@ -1,12 +1,12 @@
 use chrono::{DateTime, Utc};
 use diesel::{
+    BelongingToDsl, BoolExpressionMethods, OptionalExtension, Table,
     dsl::{exists, not},
     upsert::excluded,
-    BelongingToDsl, BoolExpressionMethods, OptionalExtension, Table,
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use serde::Serialize;
-use warp::{reject::Rejection, Reply};
+use warp::{Reply, reject::Rejection};
 
 use crate::{
     acquire_db_connection,
@@ -21,8 +21,9 @@ use crate::{
     },
     perms::{self, PostCollectionJoined, PostJoined},
     post::{
+        PostCollectionGroupAccessDetailed, PostGroupAccess, PostGroupAccessDetailed,
         get_post_collection_group_access, get_post_collection_tags, get_post_group_access,
-        get_post_tags, PostCollectionGroupAccessDetailed, PostGroupAccess, PostGroupAccessDetailed,
+        get_post_tags,
     },
     query::PaginationQueryParams,
     run_serializable_transaction,

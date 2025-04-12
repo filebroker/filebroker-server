@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use diesel::{
-    dsl::{exists, not},
     BoolExpressionMethods, JoinOnDsl, OptionalExtension, Table,
+    dsl::{exists, not},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};

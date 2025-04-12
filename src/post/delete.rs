@@ -1,9 +1,9 @@
 use diesel::{
-    dsl::{exists, not},
     BoolExpressionMethods, ExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
     Table,
+    dsl::{exists, not},
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 use warp::{reject::Rejection, reply::Reply};

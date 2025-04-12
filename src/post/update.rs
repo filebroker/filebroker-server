@@ -1,12 +1,12 @@
 use chrono::Utc;
 use diesel::{
+    BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, OptionalExtension,
+    QueryDsl, Table,
     dsl::{self, exists, not},
     sql_types::BigInt,
     upsert::excluded,
-    BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, OptionalExtension,
-    QueryDsl, Table,
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
+use diesel_async::{RunQueryDsl, scoped_futures::ScopedFutureExt};
 use serde::Deserialize;
 use validator::Validate;
 use warp::{reject::Rejection, reply::Reply};
@@ -40,8 +40,8 @@ use crate::{
 };
 
 use super::{
-    load_post_collection_detailed, load_post_detailed, report_inaccessible_group_pks,
-    GroupAccessDefinition,
+    GroupAccessDefinition, load_post_collection_detailed, load_post_detailed,
+    report_inaccessible_group_pks,
 };
 
 macro_rules! handle_object_tag_update {

@@ -1,16 +1,16 @@
 use std::{fs, io, num::NonZeroU32};
 
 use governor::{
+    Quota, RateLimiter,
     clock::DefaultClock,
     middleware::NoOpMiddleware,
     state::{InMemoryState, NotKeyed},
-    Quota, RateLimiter,
 };
 use lazy_static::lazy_static;
 use lettre::{
-    message::{header::ContentType, DkimConfig, DkimSigningAlgorithm, DkimSigningKey, Mailbox},
-    transport::smtp::authentication::Credentials,
     Address, Message, SmtpTransport, Transport,
+    message::{DkimConfig, DkimSigningAlgorithm, DkimSigningKey, Mailbox, header::ContentType},
+    transport::smtp::authentication::Credentials,
 };
 use rusty_pool::ThreadPool;
 use tera::Tera;

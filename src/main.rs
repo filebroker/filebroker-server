@@ -4,26 +4,26 @@ use chrono::Utc;
 use clokwerk::Scheduler;
 use diesel::{ConnectionError, ConnectionResult};
 use diesel_async::{
+    AsyncPgConnection,
     pg::TransactionBuilder,
     pooled_connection::{
-        deadpool::{Object, Pool},
         AsyncDieselConnectionManager, ManagerConfig,
+        deadpool::{Object, Pool},
     },
     scoped_futures::ScopedBoxFuture,
-    AsyncPgConnection,
 };
 #[cfg(feature = "auto_migration")]
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
 use dotenvy::dotenv;
 use error::{Error, TransactionRuntimeError};
-use futures::{future::BoxFuture, Future, FutureExt, StreamExt, TryFuture};
+use futures::{Future, FutureExt, StreamExt, TryFuture, future::BoxFuture};
 use lazy_static::lazy_static;
 use mime::Mime;
 use query::{PaginationQueryParams, QueryParametersFilter};
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer},
     ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer},
 };
 use std::{
     convert::Infallible,
@@ -32,7 +32,7 @@ use std::{
     io,
     pin::Pin,
     str::FromStr,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
     thread::JoinHandle,
     time::Duration,
 };
@@ -42,20 +42,19 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::Runtime,
 };
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use url::Url;
 use warp::{
+    Filter, Reply,
     host::Authority,
     hyper::{
-        self,
+        self, Body, Request, Server,
         server::{
             accept::{self, Accept},
             conn::AddrIncoming,
         },
         service::Service,
-        Body, Request, Server,
     },
-    Filter, Reply,
 };
 
 use crate::util::OptFmt;

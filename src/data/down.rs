@@ -1,6 +1,6 @@
 use std::cmp;
 
-use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use rand::{Rng, distr::Alphanumeric};
 use s3::Bucket;
 use warp::hyper;
 
@@ -55,7 +55,7 @@ pub fn get_object_response(
         } else {
             // handle multipart byteranges
             check_range_overlap(&parsed_range, size)?;
-            let mut rng = thread_rng();
+            let mut rng = rand::rng();
             let boundary: String = (&mut rng)
                 .sample_iter(Alphanumeric)
                 .take(60)

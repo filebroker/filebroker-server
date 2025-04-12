@@ -3,10 +3,10 @@ use std::fmt;
 use serde::Serialize;
 use thiserror::Error;
 use warp::{
-    http::{header, response, Response},
+    Rejection, Reply,
+    http::{Response, header, response},
     hyper::StatusCode,
     reject::Reject,
-    Rejection, Reply,
 };
 
 use crate::query::compiler;

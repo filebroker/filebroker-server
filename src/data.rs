@@ -3,23 +3,23 @@ use std::collections::{HashMap, HashSet};
 use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
 use diesel::{
-    dsl::{exists, max, not, sum},
     BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
+    dsl::{exists, max, not, sum},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{Stream, TryStreamExt};
 use mime::Mime;
 use mpart_async::server::MultipartStream;
 use ring::digest;
-use s3::{creds::Credentials, Bucket, Region};
+use s3::{Bucket, Region, creds::Credentials};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 use validator::Validate;
 use warp::{
+    Buf, Rejection, Reply,
     hyper::{self, Response},
     path::Peek,
-    Buf, Rejection, Reply,
 };
 
 use crate::{
@@ -28,8 +28,8 @@ use crate::{
     error::Error,
     model::{Broker, NewBroker, S3Object, S3ObjectMetadata, User},
     perms::{
-        self, get_group_access_or_public_condition, get_group_membership_condition,
-        PostJoinedS3Object,
+        self, PostJoinedS3Object, get_group_access_or_public_condition,
+        get_group_membership_condition,
     },
     post,
     query::PostDetailed,

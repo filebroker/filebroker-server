@@ -1,8 +1,8 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -11,7 +11,7 @@ use diesel::{
     query_dsl::methods::FilterDsl,
     sql_types::{Array, VarChar},
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use rusty_pool::ThreadPool;
 use s3::Bucket;
 use tokio::{runtime::Handle, sync::Mutex, task::JoinHandle};
@@ -129,7 +129,9 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         return Ok(());
     }
     if !encode::is_hls_supported_on_current_platform() {
-        log::warn!("Skipping generate_missing_hls_streams because it is unsupported on the current platform");
+        log::warn!(
+            "Skipping generate_missing_hls_streams because it is unsupported on the current platform"
+        );
         return Ok(());
     }
     tokio_handle.block_on(async {

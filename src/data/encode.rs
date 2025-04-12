@@ -8,10 +8,10 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use diesel::{
-    sql_types::{Text, VarChar},
     BoolExpressionMethods, NullableExpressionMethods, OptionalExtension, QueryDsl,
+    sql_types::{Text, VarChar},
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
+use diesel_async::{RunQueryDsl, scoped_futures::ScopedFutureExt};
 use futures::{future::try_join_all, ready};
 use itertools::Itertools;
 use pin_project::pin_project;
@@ -29,7 +29,7 @@ use lazy_static::lazy_static;
 
 use crate::error::TransactionRuntimeError;
 use crate::{
-    acquire_db_connection,
+    CONCURRENT_VIDEO_TRANSCODE_LIMIT, acquire_db_connection,
     diesel::ExpressionMethods,
     error::Error,
     model::{
@@ -39,10 +39,9 @@ use crate::{
     retry_on_serialization_failure, run_retryable_transaction, run_serializable_transaction,
     schema::{hls_stream, post, s3_object, s3_object_metadata},
     util::{
-        deserialize_string_from_number, format_duration, join_api_url, DeStringOrArray,
-        DeserializeOrDefault,
+        DeStringOrArray, DeserializeOrDefault, deserialize_string_from_number, format_duration,
+        join_api_url,
     },
-    CONCURRENT_VIDEO_TRANSCODE_LIMIT,
 };
 
 static VIDEO_TRANSCODE_RESOLUTIONS: [TranscodeResolution; 5] = [
@@ -408,7 +407,9 @@ pub async fn generate_hls_playlist(
     )
     .await
     {
-        log::error!("Failed to await and persist HLS transcode results to db with error: {e}. Going to delete created objects");
+        log::error!(
+            "Failed to await and persist HLS transcode results to db with error: {e}. Going to delete created objects"
+        );
         // ignore deletion results for files that have never been created
         let _ = bucket
             .delete_object(&format!("{}/master.m3u8", &file_id))
@@ -466,7 +467,9 @@ async fn get_video_resolution(source_object_key: &str, object_url: &str) -> Resu
             if !process_output.status.success() || !process_output.stderr.is_empty() {
                 let error_msg = String::from_utf8_lossy(&process_output.stderr);
                 if process_output.status.success() {
-                    log::warn!("ffprobe reported error while getting resolution for {source_object_key}, going to check output validity: {error_msg}");
+                    log::warn!(
+                        "ffprobe reported error while getting resolution for {source_object_key}, going to check output validity: {error_msg}"
+                    );
                 } else {
                     return Err(Error::FfmpegProcessError(format!(
                         "ffprobe failed with status {}: {}",
@@ -531,7 +534,9 @@ async fn media_has_stream(stream: &str, object_url: &str) -> Result<bool, Error>
                     // it should be fine to ignore reported errors if the process exits successfully in this case
                     // (unlike ffmpeg video transcoding where the process exits successfully if the transcoding fails
                     // halfway through) but log the error as a warning just in case
-                    log::warn!("ffprobe reported error selecting streams for {object_url} but the process finished successfully, proceeding: {error_msg}");
+                    log::warn!(
+                        "ffprobe reported error selecting streams for {object_url} but the process finished successfully, proceeding: {error_msg}"
+                    );
                 } else {
                     return Err(Error::FfmpegProcessError(format!(
                         "ffprobe failed with status {}: {}",
@@ -589,7 +594,10 @@ pub async fn generate_thumbnail(
             {
                 Some(sentinel) => Some(sentinel),
                 None => {
-                    log::info!("Aborting thumbnail generation for object {} because it has already been locked", &source_object_key);
+                    log::info!(
+                        "Aborting thumbnail generation for object {} because it has already been locked",
+                        &source_object_key
+                    );
                     return Ok(());
                 }
             }
@@ -667,11 +675,13 @@ pub async fn generate_thumbnail(
         if !process_output.status.success() || !process_output.stderr.is_empty() {
             let error_msg = String::from_utf8_lossy(&process_output.stderr);
             if process_output.status.success() {
-                log::warn!("ffmpeg reported error generating thumbnail for {source_object_key}, going to check output for valid webp: {error_msg}");
+                log::warn!(
+                    "ffmpeg reported error generating thumbnail for {source_object_key}, going to check output for valid webp: {error_msg}"
+                );
                 if webp::Decoder::new(&thumb_bytes).decode().is_none() {
                     return Err(Error::FfmpegProcessError(format!(
-                            "ffmpeg output contains invalid webp data for thumbnail of {source_object_key}"
-                        )));
+                        "ffmpeg output contains invalid webp data for thumbnail of {source_object_key}"
+                    )));
                 }
             } else {
                 return Err(Error::FfmpegProcessError(format!(
@@ -750,7 +760,9 @@ pub async fn generate_thumbnail(
         drop(connection);
 
         if let Err(e) = persist_result {
-            log::error!("Failed to await and persist thumbnail object to db with error: {e}. Going to delete created object");
+            log::error!(
+                "Failed to await and persist thumbnail object to db with error: {e}. Going to delete created object"
+            );
             if let Err(e) = bucket.delete_object(&thumb_path).await {
                 log::error!("Failed to delete obsolete thumbnail {}: {}", thumb_path, e);
             }
@@ -1621,7 +1633,9 @@ async fn persist_hls_transcode_results(
 
     if !process_output.stderr.is_empty() {
         let error_msg = String::from_utf8_lossy(&process_output.stderr);
-        log::warn!("ffmpeg reported error during HLS transcoding of object '{source_object_key}', going to check if output video duration matches input: {error_msg}");
+        log::warn!(
+            "ffmpeg reported error during HLS transcoding of object '{source_object_key}', going to check if output video duration matches input: {error_msg}"
+        );
 
         let object_url = join_api_url(["get-object", source_object_key])?.to_string();
         let mut hls_path = vec!["get-object"];
@@ -1671,10 +1685,13 @@ async fn persist_hls_transcode_results(
                 delete_created_objects(source_object_key, &s3_objects, &master_playlist_result.path)
                     .await
             {
-                log::error!("Failed to delete created database objects after determining that HLS stream for '{source_object_key}' is invalid: {e}");
+                log::error!(
+                    "Failed to delete created database objects after determining that HLS stream for '{source_object_key}' is invalid: {e}"
+                );
             }
             return Err(Error::FfmpegProcessError(format!(
-                "HLS video duration mismatch for object '{source_object_key}', expected {} but got {}. Reported error: {error_msg}", object_duration.duration_str, hls_duration.duration_str
+                "HLS video duration mismatch for object '{source_object_key}', expected {} but got {}. Reported error: {error_msg}",
+                object_duration.duration_str, hls_duration.duration_str
             )));
         }
     }
@@ -1744,12 +1761,12 @@ fn spawn_hls_output_reader(
 
     let hls_stream_pipe = fifo_dir
         .path()
-        .join(hls_stream.stream_file.split('/').last().unwrap());
+        .join(hls_stream.stream_file.split('/').next_back().unwrap());
     nix::unistd::mkfifo(&hls_stream_pipe, nix::sys::stat::Mode::S_IRWXU)
         .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
     let hls_playlist_pipe = fifo_dir
         .path()
-        .join(hls_stream.stream_playlist.split('/').last().unwrap());
+        .join(hls_stream.stream_playlist.split('/').next_back().unwrap());
     nix::unistd::mkfifo(&hls_playlist_pipe, nix::sys::stat::Mode::S_IRWXU)
         .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
 
@@ -1820,7 +1837,7 @@ fn spawn_hls_master_playlist_reader(
 ) -> Result<JoinHandle<Result<S3UploadResult, Error>>, Error> {
     let master_playlist_pipe = fifo_dir
         .path()
-        .join(master_playlist_path.split('/').last().unwrap());
+        .join(master_playlist_path.split('/').next_back().unwrap());
     nix::unistd::mkfifo(&master_playlist_pipe, nix::sys::stat::Mode::S_IRWXU)
         .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
 

@@ -1,10 +1,10 @@
 use std::{cmp::Reverse, collections::HashMap};
 
 use diesel::{
-    dsl::exists, BoolExpressionMethods, ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl,
-    TextExpressionMethods,
+    BoolExpressionMethods, ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl,
+    TextExpressionMethods, dsl::exists,
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -923,7 +923,7 @@ pub async fn handle_entered_and_selected_tags(
 ) -> Result<Vec<Tag>, TransactionRuntimeError> {
     // cannot use hashset because it is not supported as diesel expression
     let mut tags = entered_tags.as_deref().map(sanitize_request_tags);
-    if let Some(ref selected_tags) = selected_tags {
+    if let Some(selected_tags) = selected_tags {
         report_missing_pks!(tag, selected_tags, connection)??;
     }
 
@@ -936,7 +936,7 @@ pub async fn handle_entered_and_selected_tags(
         Vec::new()
     };
 
-    if let Some(ref selected_tags) = selected_tags {
+    if let Some(selected_tags) = selected_tags {
         let loaded_selected_tags =
             load_and_report_missing_pks!(Tag, tag, selected_tags, connection)?;
         set_tags.extend(loaded_selected_tags);

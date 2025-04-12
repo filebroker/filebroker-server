@@ -14,7 +14,7 @@ use super::QueryParameters;
 use crate::{
     model::User,
     perms,
-    query::{Direction, Ordering, DEFAULT_LIMIT_STR, MAX_FULL_LIMIT_STR},
+    query::{DEFAULT_LIMIT_STR, Direction, MAX_FULL_LIMIT_STR, Ordering},
 };
 
 pub mod ast;

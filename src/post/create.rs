@@ -1,6 +1,6 @@
 use chrono::Utc;
 use diesel::{JoinOnDsl, OptionalExtension, QueryDsl, Table};
-use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
+use diesel_async::{RunQueryDsl, scoped_futures::ScopedFutureExt};
 use serde::Deserialize;
 use validator::Validate;
 use warp::{reject::Rejection, reply::Reply};
@@ -15,7 +15,7 @@ use crate::{
         S3ObjectMetadata, User, UserPublic,
     },
     perms,
-    query::{self, report_missing_pks, PostCollectionDetailed, PostDetailed},
+    query::{self, PostCollectionDetailed, PostDetailed, report_missing_pks},
     run_retryable_transaction, run_serializable_transaction,
     schema::{
         self, post, post_collection, post_collection_group_access, post_collection_item,
@@ -27,9 +27,9 @@ use crate::{
 };
 
 use super::{
-    get_post_collection_group_access, get_post_collection_tags, get_post_group_access,
-    get_post_tags, load_post_collection_poster_object, report_inaccessible_groups,
-    GroupAccessDefinition,
+    GroupAccessDefinition, get_post_collection_group_access, get_post_collection_tags,
+    get_post_group_access, get_post_tags, load_post_collection_poster_object,
+    report_inaccessible_groups,
 };
 
 #[derive(Deserialize, Validate)]

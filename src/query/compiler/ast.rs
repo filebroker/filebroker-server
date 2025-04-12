@@ -1,14 +1,14 @@
 use std::{collections::HashMap, fmt::Debug};
 
-use downcast_rs::{impl_downcast, Downcast};
+use downcast_rs::{Downcast, impl_downcast};
 use lazy_static::lazy_static;
 
 use crate::query::{Direction, Ordering, QueryParameters};
 
 use super::{
+    Cte, Error, Location, Log,
     dict::{Scope, Type},
     lexer::Tag,
-    Cte, Error, Location, Log,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -683,7 +683,7 @@ impl QueryBuilderVisitor<'_> {
             let is_string = attr_arg.node_type.get_return_type(scope) == Type::String;
             let nullable = attribute
                 .as_ref()
-                .map_or(false, |attribute| attribute.nullable);
+                .is_some_and(|attribute| attribute.nullable);
             let table = attribute.map_or("--invalid--", |attribute| attribute.table);
             if !self.query_parameters.ordering.is_empty() {
                 let last_ordering = &self.query_parameters.ordering[0];

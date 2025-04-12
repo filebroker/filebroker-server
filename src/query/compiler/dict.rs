@@ -4,8 +4,8 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 use super::{
-    ast::{AttributeNode, ExpressionNode, Node, QueryBuilderVisitor, StringLiteralNode},
     Error, Location, Log,
+    ast::{AttributeNode, ExpressionNode, Node, QueryBuilderVisitor, StringLiteralNode},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

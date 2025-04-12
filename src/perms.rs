@@ -2,10 +2,10 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 use diesel::{
-    dsl::{exists, not},
     JoinOnDsl, NullableExpressionMethods, QueryDsl,
+    dsl::{exists, not},
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use serde::Deserialize;
 use warp::{Rejection, Reply};
 
@@ -784,8 +784,7 @@ pub async fn create_user_group_handler(
         }
         .scope_boxed()
     })
-    .await
-    .map_err(Error::from)?;
+    .await?;
 
     Ok(warp::reply::json(&user_group))
 }

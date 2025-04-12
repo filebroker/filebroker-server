@@ -3,12 +3,12 @@ use std::{ffi::OsStr, io, path::Path};
 use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
 use diesel::{
-    dsl::{exists, not, sum},
     NullableExpressionMethods, OptionalExtension, PgSortExpressionMethods, QueryDsl,
+    dsl::{exists, not, sum},
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
-use futures::{stream::IntoAsyncRead, TryStream};
-use s3::{error::S3Error, Bucket};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
+use futures::{TryStream, stream::IntoAsyncRead};
+use s3::{Bucket, error::S3Error};
 use uuid::Uuid;
 
 use crate::{
@@ -52,7 +52,10 @@ where
     {
         Ok(status) => Ok(status),
         Err(S3Error::Io(e)) if e.kind() == io::ErrorKind::InvalidInput => {
-            log::warn!("Failed upload for object {} because it does not match the provided Filebroker-Upload-Size header", &object_key);
+            log::warn!(
+                "Failed upload for object {} because it does not match the provided Filebroker-Upload-Size header",
+                &object_key
+            );
             Err(Error::InvalidUploadSizeError)
         }
         Err(e) => Err(e.into()),
@@ -83,7 +86,11 @@ where
         if let Some(existing_object) = existing_object {
             // don't hold on to db connection while waiting for deletion
             drop(connection);
-            log::info!("Found existing object {} with same hash as new object {}, going to delete new object", &existing_object.object_key, &object_key);
+            log::info!(
+                "Found existing object {} with same hash as new object {}, going to delete new object",
+                &existing_object.object_key,
+                &object_key
+            );
             match bucket.delete_object(&object_key).await {
                 Ok(delete_response) => {
                     let status_code = delete_response.status_code();
@@ -165,7 +172,12 @@ where
     let s3_object = match inserted_s3_object {
         Ok(s3_object) => s3_object,
         Err(Error::QuotaExceededError(quota, remaining_quota)) => {
-            log::warn!("User {} exceeded quota for broker {} after completed upload of {}, going to delete object", user.pk, broker.pk, &object_key);
+            log::warn!(
+                "User {} exceeded quota for broker {} after completed upload of {}, going to delete object",
+                user.pk,
+                broker.pk,
+                &object_key
+            );
             match bucket.delete_object(&object_key).await {
                 Ok(delete_response) => {
                     let status_code = delete_response.status_code();

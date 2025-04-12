@@ -10,7 +10,7 @@ use regex::Regex;
 use serde::{Deserialize, Deserializer};
 use url::Url;
 
-use crate::{error::Error, API_BASE_URL};
+use crate::{API_BASE_URL, error::Error};
 
 lazy_static! {
     pub static ref NOT_BLANK_REGEX: Regex = Regex::new(r".*\S.*").expect("Failed to compile regex");

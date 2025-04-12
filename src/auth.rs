@@ -1,29 +1,30 @@
 use std::net::SocketAddr;
 
-use bcrypt::{hash, verify, DEFAULT_COST};
-use chrono::{offset::Utc, DateTime, Duration};
+use bcrypt::{DEFAULT_COST, hash, verify};
+use chrono::{DateTime, Duration, offset::Utc};
 use diesel::{dsl::count, expression_methods::BoolExpressionMethods};
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use exec_rs::sync::MutexSync;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use lazy_static::lazy_static;
 use passwords::PasswordGenerator;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
 use warp::{
+    Filter, Rejection, Reply,
     filters::header::headers_cloned,
     host::Authority,
     http::{
-        header::{self, HeaderMap},
         Response, StatusCode,
+        header::{self, HeaderMap},
     },
-    hyper, Filter, Rejection, Reply,
+    hyper,
 };
 use zxcvbn::zxcvbn;
 
 use crate::{
-    acquire_db_connection,
+    CERT_PATH, HOST_BASE_PATH, acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension, QueryDsl},
     error::{Error, TransactionRuntimeError},
     mail,
@@ -31,7 +32,6 @@ use crate::{
     query::functions::lower,
     retry_on_constraint_violation, run_retryable_transaction,
     schema::{email_confirmation_token, one_time_password, refresh_token, registered_user},
-    CERT_PATH, HOST_BASE_PATH,
 };
 
 mod captcha;
@@ -486,9 +486,8 @@ pub async fn register_handler(
     if let Some(ref display_name) = user_registration.display_name {
         zxcvbn_user_data.push(display_name.as_str());
     }
-    let entropy = zxcvbn(&user_registration.password, &zxcvbn_user_data)
-        .map_err(|e| Error::InternalError(e.to_string()))?;
-    if entropy.score() < 3 {
+    let entropy = zxcvbn(&user_registration.password, &zxcvbn_user_data);
+    if <u8>::from(entropy.score()) < 3 {
         return Err(warp::reject::custom(Error::WeakPasswordError));
     }
 
@@ -542,7 +541,7 @@ pub async fn register_handler(
                 Err(e) => {
                     return Err(TransactionRuntimeError::Rollback(Error::QueryError(
                         e.to_string(),
-                    )))
+                    )));
                 }
             };
 
@@ -921,7 +920,7 @@ pub async fn change_password_handler(
             }
         }
         None if captcha::CAPTCHA_SECRET.is_some() && user.password_fail_count >= 10 => {
-            return Err(warp::reject::custom(Error::InvalidCaptchaError))
+            return Err(warp::reject::custom(Error::InvalidCaptchaError));
         }
         None => {}
     };
@@ -953,9 +952,8 @@ pub async fn change_password_handler(
     if let Some(ref display_name) = user.display_name {
         zxcvbn_user_data.push(display_name.as_str());
     }
-    let entropy = zxcvbn(&request.new_password, &zxcvbn_user_data)
-        .map_err(|e| Error::InternalError(e.to_string()))?;
-    if entropy.score() < 3 {
+    let entropy = zxcvbn(&request.new_password, &zxcvbn_user_data);
+    if <u8>::from(entropy.score()) < 3 {
         return Err(warp::reject::custom(Error::WeakPasswordError));
     }
 
@@ -1140,9 +1138,8 @@ pub async fn reset_password_handler(
             if let Some(ref display_name) = user.display_name {
                 zxcvbn_user_data.push(display_name.as_str());
             }
-            let entropy = zxcvbn(&request.new_password, &zxcvbn_user_data)
-                .map_err(|e| TransactionRuntimeError::from(Error::InternalError(e.to_string())))?;
-            if entropy.score() < 3 {
+            let entropy = zxcvbn(&request.new_password, &zxcvbn_user_data);
+            if <u8>::from(entropy.score()) < 3 {
                 return Err(TransactionRuntimeError::from(Error::WeakPasswordError));
             }
 

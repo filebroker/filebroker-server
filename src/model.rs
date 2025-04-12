@@ -5,7 +5,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use chrono::{offset::Utc, DateTime};
+use chrono::{DateTime, offset::Utc};
 use diesel::data_types::PgInterval;
 use diesel::deserialize::{self, FromSql, FromSqlRow};
 use diesel::expression::AsExpression;

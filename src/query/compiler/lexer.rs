@@ -4,9 +4,9 @@ use std::fmt;
 use std::mem;
 
 use super::Error;
+use super::INTEGER_LIMIT;
 use super::Location;
 use super::Log;
-use super::INTEGER_LIMIT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tag {
@@ -112,10 +112,10 @@ impl fmt::Display for ParsedToken {
             f,
             "{}",
             match self {
-                ParsedToken::IdentifierToken(ref val) => format!("IDENTIFIER '{}'", val),
+                ParsedToken::IdentifierToken(val) => format!("IDENTIFIER '{}'", val),
                 ParsedToken::IntegerToken(val) => format!("INTEGER {}", val),
-                ParsedToken::StaticToken(ref val) => format!("TOKEN {:?}", val),
-                ParsedToken::StringToken(ref val) => format!("STRING '{}'", val),
+                ParsedToken::StaticToken(val) => format!("TOKEN {:?}", val),
+                ParsedToken::StringToken(val) => format!("STRING '{}'", val),
             }
         )
     }
@@ -544,8 +544,8 @@ impl StateType {
 mod tests {
 
     use crate::query::compiler::{
-        lexer::{Lexer, ParsedToken, ParsedToken::*, Tag, Token},
         Location, Log,
+        lexer::{Lexer, ParsedToken, ParsedToken::*, Tag, Token},
     };
 
     #[test]
@@ -801,7 +801,12 @@ mod tests {
     fn test_modifiers_functions_and_attributes() {
         let mut log = Log { errors: Vec::new() };
 
-        let lexer = Lexer::new_for_string(String::from("tag @creation_timestamp>=\"2022-06-03\" @score > .max(@score) - 10 %sort(@score, \"DESC\")"), &mut log);
+        let lexer = Lexer::new_for_string(
+            String::from(
+                "tag @creation_timestamp>=\"2022-06-03\" @score > .max(@score) - 10 %sort(@score, \"DESC\")",
+            ),
+            &mut log,
+        );
         let mut token_stream = lexer.read_token_stream().into_iter();
         assert!(log.errors.is_empty());
 
