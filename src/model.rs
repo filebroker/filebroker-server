@@ -912,6 +912,8 @@ pub struct PostUpdateOptional {
     pub public: Option<bool>,
     pub public_edit: Option<bool>,
     pub description: Option<String>,
+    pub edit_timestamp: DateTime<Utc>,
+    pub fk_edit_user: i64,
 }
 
 impl PostUpdateOptional {
@@ -971,6 +973,8 @@ pub struct PostCollectionUpdateOptional {
     pub public_edit: Option<bool>,
     pub poster_object_key: Option<String>,
     pub description: Option<String>,
+    pub edit_timestamp: DateTime<Utc>,
+    pub fk_edit_user: i64,
 }
 
 impl PostCollectionUpdateOptional {

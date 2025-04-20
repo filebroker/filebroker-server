@@ -477,6 +477,8 @@ pub async fn rewind_post_history_snapshot_handler(
                 public: Some(post_snapshot.public),
                 public_edit: Some(post_snapshot.public_edit),
                 description: Some(post_snapshot.description.clone().unwrap_or_default()),
+                edit_timestamp: Utc::now(),
+                fk_edit_user: user.pk,
             };
 
             let mut curr_tags = get_post_tags(post.pk, connection).await?;
@@ -574,22 +576,17 @@ pub async fn rewind_post_history_snapshot_handler(
             };
 
             let update_field_changes = update.get_field_changes(&post);
-            let ret = if update_field_changes.has_changes() {
+
+            if update_field_changes.has_changes()
+                || previous_tags.is_some()
+                || previous_group_access.is_some()
+            {
                 let updated_post = diesel::update(post::table)
                     .filter(post::pk.eq(post.pk))
                     .set(&update)
                     .get_result::<Post>(connection)
                     .await?;
 
-                Ok(updated_post)
-            } else {
-                Ok(post.clone())
-            };
-
-            if update_field_changes.has_changes()
-                || previous_tags.is_some()
-                || previous_group_access.is_some()
-            {
                 let post_edit_history = diesel::insert_into(post_edit_history::table)
                     .values(NewPostEditHistory {
                         fk_post: post.pk,
@@ -646,17 +643,10 @@ pub async fn rewind_post_history_snapshot_handler(
                         .await?;
                 }
 
-                diesel::update(post::table)
-                    .filter(post::pk.eq(post.pk))
-                    .set((
-                        post::edit_timestamp.eq(Utc::now()),
-                        post::fk_edit_user.eq(user.pk),
-                    ))
-                    .execute(connection)
-                    .await?;
+                Ok(updated_post)
+            } else {
+                Ok(post.clone())
             }
-
-            ret
         }
         .scope_boxed()
     })
@@ -718,6 +708,8 @@ pub async fn rewind_post_collection_history_snapshot_handler(
                         .clone()
                         .unwrap_or_default(),
                 ),
+                edit_timestamp: Utc::now(),
+                fk_edit_user: user.pk,
             };
 
             let mut curr_tags = get_post_collection_tags(post_collection.pk, connection).await?;
@@ -836,22 +828,17 @@ pub async fn rewind_post_collection_history_snapshot_handler(
             };
 
             let update_field_changes = update.get_field_changes(&post_collection);
-            let ret = if update_field_changes.has_changes() {
+
+            if update_field_changes.has_changes()
+                || previous_tags.is_some()
+                || previous_group_access.is_some()
+            {
                 let updated_post_collection = diesel::update(post_collection::table)
                     .filter(post_collection::pk.eq(post_collection.pk))
                     .set(&update)
                     .get_result::<PostCollection>(connection)
                     .await?;
 
-                Ok(updated_post_collection)
-            } else {
-                Ok(post_collection.clone())
-            };
-
-            if update_field_changes.has_changes()
-                || previous_tags.is_some()
-                || previous_group_access.is_some()
-            {
                 let post_collection_edit_history =
                     diesel::insert_into(post_collection_edit_history::table)
                         .values(NewPostCollectionEditHistory {
@@ -910,17 +897,10 @@ pub async fn rewind_post_collection_history_snapshot_handler(
                         .await?;
                 }
 
-                diesel::update(post_collection::table)
-                    .filter(post_collection::pk.eq(post_collection.pk))
-                    .set((
-                        post_collection::edit_timestamp.eq(Utc::now()),
-                        post_collection::fk_edit_user.eq(user.pk),
-                    ))
-                    .execute(connection)
-                    .await?;
+                Ok(updated_post_collection)
+            } else {
+                Ok(post_collection.clone())
             }
-
-            ret
         }
         .scope_boxed()
     })

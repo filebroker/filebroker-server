@@ -477,25 +477,22 @@ pub async fn edit_post_handler(
                 public: request.is_public,
                 public_edit: request.public_edit,
                 description: request.description.clone(),
+                edit_timestamp: Utc::now(),
+                fk_edit_user: user.pk,
             };
 
             let update_field_changes = update.get_field_changes(&curr_post);
-            let ret = if update_field_changes.has_changes() {
+
+            if update_field_changes.has_changes()
+                || previous_tags.is_some()
+                || previous_group_access.is_some()
+            {
                 let updated_post = diesel::update(post::table)
                     .filter(post::pk.eq(post_pk))
                     .set(&update)
                     .get_result::<Post>(connection)
                     .await?;
 
-                Ok(updated_post)
-            } else {
-                Ok(curr_post.clone())
-            };
-
-            if update_field_changes.has_changes()
-                || previous_tags.is_some()
-                || previous_group_access.is_some()
-            {
                 let post_edit_history = diesel::insert_into(post_edit_history::table)
                     .values(NewPostEditHistory {
                         fk_post: curr_post.pk,
@@ -552,17 +549,10 @@ pub async fn edit_post_handler(
                         .await?;
                 }
 
-                diesel::update(post::table)
-                    .filter(post::pk.eq(post_pk))
-                    .set((
-                        post::edit_timestamp.eq(Utc::now()),
-                        post::fk_edit_user.eq(user.pk),
-                    ))
-                    .execute(connection)
-                    .await?;
+                Ok(updated_post)
+            } else {
+                Ok(curr_post.clone())
             }
-
-            ret
         }
         .scope_boxed()
     })
@@ -844,22 +834,19 @@ pub async fn edit_post_collection_handler(
                 public_edit: request.public_edit,
                 poster_object_key,
                 description: request.description.clone(),
+                edit_timestamp: Utc::now(),
+                fk_edit_user: user.pk,
             };
 
             let update_field_changes = update.get_field_changes(&curr_post_collection);
-            let res = if update_field_changes.has_changes() {
+
+            if update_field_changes.has_changes() || previous_tags.is_some() || previous_group_access.is_some() {
                 let updated_post_collection = diesel::update(post_collection::table)
                     .filter(post_collection::pk.eq(post_collection_pk))
                     .set(&update)
                     .get_result::<PostCollection>(connection)
                     .await?;
 
-                Ok(updated_post_collection)
-            } else {
-                Ok(curr_post_collection.clone())
-            };
-
-            if update_field_changes.has_changes() || previous_tags.is_some() || previous_group_access.is_some() {
                 let post_collection_edit_history = diesel::insert_into(post_collection_edit_history::table)
                     .values(NewPostCollectionEditHistory {
                         fk_post_collection: curr_post_collection.pk,
@@ -904,14 +891,10 @@ pub async fn edit_post_collection_handler(
                             .await?;
                     }
 
-                    diesel::update(post_collection::table)
-                        .filter(post_collection::pk.eq(post_collection_pk))
-                        .set((post_collection::edit_timestamp.eq(Utc::now()), post_collection::fk_edit_user.eq(user.pk)))
-                        .execute(connection)
-                        .await?;
+                Ok(updated_post_collection)
+            } else {
+                Ok(curr_post_collection.clone())
             }
-
-            res
         }
         .scope_boxed()
     })

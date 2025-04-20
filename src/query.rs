@@ -521,6 +521,7 @@ pub struct PostCollectionDetailed {
     pub create_user: UserPublic,
     pub edit_user: UserPublic,
     pub creation_timestamp: DateTime<Utc>,
+    pub edit_timestamp: DateTime<Utc>,
     #[serde(rename = "is_public")]
     pub public: bool,
     pub public_edit: bool,
@@ -567,6 +568,7 @@ pub async fn get_post_collection_handler(
         create_user,
         edit_user,
         creation_timestamp: post_collection.creation_timestamp,
+        edit_timestamp: post_collection.edit_timestamp,
         public: post_collection.public,
         public_edit: post_collection.public_edit,
         poster_object,
