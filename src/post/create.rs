@@ -452,6 +452,7 @@ pub async fn create_post_collection_handler(
                 create_user,
                 edit_user,
                 creation_timestamp: post_collection.creation_timestamp,
+                edit_timestamp: post_collection.edit_timestamp,
                 public: post_collection.public,
                 public_edit: post_collection.public_edit,
                 poster_object,
