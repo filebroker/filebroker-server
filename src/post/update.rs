@@ -517,36 +517,40 @@ pub async fn edit_post_handler(
                     .await?;
 
                 if let Some(previous_tags) = previous_tags {
-                    diesel::insert_into(post_edit_history_tag::table)
-                        .values(
-                            previous_tags
-                                .iter()
-                                .map(|tag| PostEditHistoryTag {
-                                    fk_post_edit_history: post_edit_history.pk,
-                                    fk_tag: tag.pk,
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                        .execute(connection)
-                        .await?;
+                    if !previous_tags.is_empty() {
+                        diesel::insert_into(post_edit_history_tag::table)
+                            .values(
+                                previous_tags
+                                    .iter()
+                                    .map(|tag| PostEditHistoryTag {
+                                        fk_post_edit_history: post_edit_history.pk,
+                                        fk_tag: tag.pk,
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                            .execute(connection)
+                            .await?;
+                    }
                 }
 
                 if let Some(previous_group_access) = previous_group_access {
-                    diesel::insert_into(post_edit_history_group_access::table)
-                        .values(
-                            previous_group_access
-                                .iter()
-                                .map(|group_access| PostEditHistoryGroupAccess {
-                                    fk_post_edit_history: post_edit_history.pk,
-                                    fk_granted_group: group_access.fk_granted_group,
-                                    write: group_access.write,
-                                    fk_granted_by: group_access.fk_granted_by,
-                                    creation_timestamp: group_access.creation_timestamp,
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                        .execute(connection)
-                        .await?;
+                    if !previous_group_access.is_empty() {
+                        diesel::insert_into(post_edit_history_group_access::table)
+                            .values(
+                                previous_group_access
+                                    .iter()
+                                    .map(|group_access| PostEditHistoryGroupAccess {
+                                        fk_post_edit_history: post_edit_history.pk,
+                                        fk_granted_group: group_access.fk_granted_group,
+                                        write: group_access.write,
+                                        fk_granted_by: group_access.fk_granted_by,
+                                        creation_timestamp: group_access.creation_timestamp,
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                            .execute(connection)
+                            .await?;
+                    }
                 }
 
                 Ok(updated_post)
@@ -869,26 +873,30 @@ pub async fn edit_post_collection_handler(
                     .await?;
 
                     if let Some(previous_tags) = previous_tags {
-                        diesel::insert_into(post_collection_edit_history_tag::table)
-                            .values(previous_tags.iter().map(|tag| PostCollectionEditHistoryTag {
-                                fk_post_collection_edit_history: post_collection_edit_history.pk,
-                                fk_tag: tag.pk,
-                            }).collect::<Vec<_>>())
-                            .execute(connection)
-                            .await?;
+                        if !previous_tags.is_empty() {
+                            diesel::insert_into(post_collection_edit_history_tag::table)
+                                .values(previous_tags.iter().map(|tag| PostCollectionEditHistoryTag {
+                                    fk_post_collection_edit_history: post_collection_edit_history.pk,
+                                    fk_tag: tag.pk,
+                                }).collect::<Vec<_>>())
+                                .execute(connection)
+                                .await?;
+                        }
                     }
 
                     if let Some(previous_group_access) = previous_group_access {
-                        diesel::insert_into(post_collection_edit_history_group_access::table)
-                            .values(previous_group_access.iter().map(|group_access| PostCollectionEditHistoryGroupAccess {
-                                fk_post_collection_edit_history: post_collection_edit_history.pk,
-                                fk_granted_group: group_access.fk_granted_group,
-                                write: group_access.write,
-                                fk_granted_by: group_access.fk_granted_by,
-                                creation_timestamp: group_access.creation_timestamp,
-                            }).collect::<Vec<_>>())
-                            .execute(connection)
-                            .await?;
+                        if !previous_group_access.is_empty() {
+                            diesel::insert_into(post_collection_edit_history_group_access::table)
+                                .values(previous_group_access.iter().map(|group_access| PostCollectionEditHistoryGroupAccess {
+                                    fk_post_collection_edit_history: post_collection_edit_history.pk,
+                                    fk_granted_group: group_access.fk_granted_group,
+                                    write: group_access.write,
+                                    fk_granted_by: group_access.fk_granted_by,
+                                    creation_timestamp: group_access.creation_timestamp,
+                                }).collect::<Vec<_>>())
+                                .execute(connection)
+                                .await?;
+                        }
                     }
 
                 Ok(updated_post_collection)
