@@ -445,18 +445,21 @@ pub async fn load_post_collection_secured(
         )
         .filter(
             post_collection::pk.eq(post_collection_pk).and(
-                post_collection::fk_create_user
-                    .nullable()
-                    .eq(&user_pk)
-                    .or(post_collection::public)
-                    .or(exists(post_collection_group_access::table.filter(
-                        get_group_access_condition!(
-                            post_collection_group_access::fk_post_collection,
-                            post_collection::pk,
-                            &user_pk,
-                            post_collection_group_access
-                        ),
-                    ))),
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post_collection::fk_create_user
+                        .nullable()
+                        .eq(&user_pk)
+                        .or(post_collection::public)
+                        .or(exists(post_collection_group_access::table.filter(
+                            get_group_access_condition!(
+                                post_collection_group_access::fk_post_collection,
+                                post_collection::pk,
+                                &user_pk,
+                                post_collection_group_access
+                            ),
+                        )))),
             ),
         )
         .get_result::<(PostCollection, UserPublic, Option<S3Object>, UserPublic)>(connection)
@@ -481,9 +484,10 @@ pub struct PostJoinedS3Object {
 
 pub async fn load_s3_object_posts(
     s3_object_key: &str,
-    user_pk: i64,
+    user: Option<&User>,
     connection: &mut AsyncPgConnection,
 ) -> Result<Vec<PostJoinedS3Object>, Error> {
+    let user_pk = user.map(|u| u.pk);
     let (create_user, edit_user) = diesel::alias!(
         schema::registered_user as create_user,
         schema::registered_user as edit_user,
@@ -497,18 +501,21 @@ pub async fn load_s3_object_posts(
         .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::s3_object.eq(s3_object_key).and(
-                post::fk_create_user
-                    .nullable()
-                    .eq(user_pk)
-                    .or(post::public)
-                    .or(exists(post_group_access::table.filter(
-                        get_group_access_condition!(
-                            post_group_access::fk_post,
-                            post::pk,
-                            user_pk,
-                            post_group_access
-                        ),
-                    ))),
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post::fk_create_user
+                        .nullable()
+                        .eq(user_pk)
+                        .or(post::public)
+                        .or(exists(post_group_access::table.filter(
+                            get_group_access_condition!(
+                                post_group_access::fk_post,
+                                post::pk,
+                                user_pk,
+                                post_group_access
+                            ),
+                        )))),
             ),
         )
         .load::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
@@ -585,7 +592,11 @@ pub async fn get_user_groups_secured(
 ) -> Result<Vec<UserGroup>, Error> {
     let user_pk = user.map(|u| u.pk);
     user_group::table
-        .filter(not(user_group::hidden).or(get_group_membership_condition!(user_pk)))
+        .filter(
+            not(user_group::hidden)
+                .or(user.map(|u| u.is_admin).unwrap_or(false).into_sql::<Bool>())
+                .or(get_group_membership_condition!(user_pk)),
+        )
         .load::<UserGroup>(connection)
         .await
         .map_err(|e| Error::QueryError(e.to_string()))
@@ -643,16 +654,19 @@ pub async fn filter_posts_editable(
         .select(post::pk)
         .filter(
             post::pk.eq_any(post_pks).and(
-                post::public_edit
-                    .or(post::fk_create_user.nullable().eq(user_pk))
-                    .or(exists(post_group_access::table.filter(
-                        get_group_access_write_condition!(
-                            post_group_access::fk_post,
-                            post::pk,
-                            &user_pk,
-                            post_group_access
-                        ),
-                    ))),
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post::public_edit
+                        .or(post::fk_create_user.nullable().eq(user_pk))
+                        .or(exists(post_group_access::table.filter(
+                            get_group_access_write_condition!(
+                                post_group_access::fk_post,
+                                post::pk,
+                                &user_pk,
+                                post_group_access
+                            ),
+                        )))),
             ),
         )
         .load::<i64>(connection)
@@ -704,17 +718,18 @@ pub async fn filter_posts_deletable(
         .left_join(broker::table.on(s3_object::fk_broker.eq(broker::pk)))
         .select(post::pk)
         .filter(
-            post::pk
-                .eq_any(post_pks)
-                .and(
-                    post::fk_create_user
+            post::pk.eq_any(post_pks).and(
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post::fk_create_user
                         .nullable()
                         .eq(user_pk)
                         .or(broker::fk_owner.nullable().eq(user_pk).or(exists(
                             broker_access::table
                                 .filter(get_broker_group_access_write_condition!(user_pk)),
-                        ))),
-                ),
+                        )))),
+            ),
         )
         .load::<i64>(connection)
         .await

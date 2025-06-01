@@ -135,9 +135,12 @@ pub async fn upload_handler(
             let mut posts_detailed = Vec::new();
             if is_existing {
                 let mut connection = acquire_db_connection().await?;
-                let posts =
-                    perms::load_s3_object_posts(&s3_object.object_key, user.pk, &mut connection)
-                        .await?;
+                let posts = perms::load_s3_object_posts(
+                    &s3_object.object_key,
+                    Some(&user),
+                    &mut connection,
+                )
+                .await?;
 
                 for PostJoinedS3Object {
                     post,
