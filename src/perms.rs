@@ -314,18 +314,21 @@ pub async fn load_post_collection_item_secured(
                             )))),
                 )
                 .and(
-                    post_collection::fk_create_user
-                        .nullable()
-                        .eq(&user_pk)
-                        .or(post_collection::public)
-                        .or(exists(post_collection_group_access::table.filter(
-                            get_group_access_condition!(
-                                post_collection_group_access::fk_post_collection,
-                                post_collection::pk,
-                                &user_pk,
-                                post_collection_group_access
-                            ),
-                        ))),
+                    user.map(|u| u.is_admin)
+                        .unwrap_or(false)
+                        .into_sql::<Bool>()
+                        .or(post_collection::fk_create_user
+                            .nullable()
+                            .eq(&user_pk)
+                            .or(post_collection::public)
+                            .or(exists(post_collection_group_access::table.filter(
+                                get_group_access_condition!(
+                                    post_collection_group_access::fk_post_collection,
+                                    post_collection::pk,
+                                    &user_pk,
+                                    post_collection_group_access
+                                ),
+                            )))),
                 ),
         )
         .get_result::<(
