@@ -11,6 +11,10 @@ use self::{
 
 use super::QueryParameters;
 
+use crate::query::compiler::ast::{
+    ExpressionStatement, Operator, StatementNode, combine_expressions,
+};
+use crate::query::compiler::dict::Type;
 use crate::{
     model::User,
     perms,
@@ -52,6 +56,134 @@ pub struct Cte {
     pub expression: String,
 }
 
+#[allow(dead_code)] // keep both for completion's sake
+pub enum Junction {
+    And,
+    Or,
+}
+
+pub fn compile_conditions(
+    conditions: Vec<String>,
+    junction: Junction,
+    mut query_parameters: QueryParameters,
+    scope: &Scope,
+    user: &Option<User>,
+) -> Result<String, crate::Error> {
+    let (source_conditions, instant) = if log::log_enabled!(log::Level::Debug) {
+        (Some(conditions.clone()), Some(std::time::Instant::now()))
+    } else {
+        (None, None)
+    };
+    let mut log = Log { errors: Vec::new() };
+
+    let mut root_node = compile_conditions_ast(conditions, junction, scope, &mut log)?;
+
+    let mut query_builder_visitor = QueryBuilderVisitor::new(&mut query_parameters);
+    root_node.accept(&mut query_builder_visitor, scope, &mut log);
+    if !log.errors.is_empty() {
+        return Err(crate::Error::QueryCompilationError(
+            String::from("query builder"),
+            log.errors,
+        ));
+    }
+
+    let sql_query = build_sql_string(
+        query_builder_visitor.ctes,
+        query_builder_visitor.where_expressions,
+        query_parameters,
+        user,
+    )?;
+    log::debug!(
+        "Compiled conditions [{:?}] (in {} microseconds) to sql {}",
+        source_conditions.unwrap_or_else(Vec::new),
+        instant
+            .map(|instant| instant.elapsed().as_micros())
+            .unwrap_or(0),
+        &sql_query
+    );
+
+    Ok(sql_query)
+}
+
+pub fn compile_conditions_ast(
+    conditions: Vec<String>,
+    junction: Junction,
+    scope: &Scope,
+    log: &mut Log,
+) -> Result<Node<QueryNode>, crate::Error> {
+    let mut root_expression = None;
+
+    for condition in conditions {
+        let mut ast = compile_ast(condition, log, true)?;
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor {};
+        ast.accept(&mut semantic_analysis_visitor, scope, log);
+
+        let mut condition_expression = None;
+        for statement in ast.node_type.statements {
+            let expression_statement = statement.node_type.downcast_ref::<ExpressionStatement>();
+            match expression_statement {
+                Some(expression_statement) if expression_statement.expression_node.node_type.get_return_type(scope) == Type::Boolean => {
+                    let expression_node = expression_statement.expression_node.clone_boxed_node();
+                    condition_expression = match condition_expression {
+                        None => Some(expression_node),
+                        Some(existing_expression) => Some(combine_expressions(existing_expression, expression_node, Operator::And)),
+                    };
+                }
+                _ => {
+                    log.errors.push(Error {
+                        location: statement.location,
+                        msg: format!("All statements used in FQL condition must be boolean expression but got {:?}", &statement.node_type),
+                    })
+                }
+            }
+        }
+
+        if !log.errors.is_empty() {
+            return Err(crate::Error::QueryCompilationError(
+                String::from("semantic analysis"),
+                log.errors.clone(),
+            ));
+        }
+
+        root_expression = match root_expression {
+            None => condition_expression,
+            Some(existing_expression) => {
+                if let Some(condition_expression) = condition_expression {
+                    Some(combine_expressions(
+                        existing_expression,
+                        condition_expression,
+                        match junction {
+                            Junction::And => Operator::And,
+                            Junction::Or => Operator::Or,
+                        },
+                    ))
+                } else {
+                    Some(existing_expression)
+                }
+            }
+        }
+    }
+
+    let root_node = Node {
+        location: Location { start: 0, end: 0 },
+        node_type: QueryNode {
+            statements: root_expression
+                .into_iter()
+                .map(|root_expression| {
+                    Box::new(Node {
+                        location: Location { start: 0, end: 0 },
+                        node_type: ExpressionStatement {
+                            expression_node: root_expression,
+                        },
+                    }) as Box<Node<dyn StatementNode>>
+                })
+                .collect(),
+        },
+    };
+
+    Ok(root_node)
+}
+
 pub fn compile_sql(
     query: Option<String>,
     mut query_parameters: QueryParameters,
@@ -64,55 +196,82 @@ pub fn compile_sql(
         (None, None)
     };
 
-    let (ctes, mut where_expressions) = if let Some(query) = query {
+    let (ctes, where_expressions) = if let Some(query) = query {
         compile_expressions(query, &mut query_parameters, scope)?
     } else {
         (HashMap::new(), Vec::new())
     };
 
+    let sql_query = build_sql_string(ctes, where_expressions, query_parameters, user)?;
+    log::debug!(
+        "Compiled query [{}] (in {} microseconds) to sql {}",
+        &source_query.as_deref().unwrap_or(""),
+        instant
+            .map(|instant| instant.elapsed().as_micros())
+            .unwrap_or(0),
+        &sql_query
+    );
+
+    Ok(sql_query)
+}
+
+fn build_sql_string(
+    ctes: HashMap<String, Cte>,
+    mut where_expressions: Vec<String>,
+    mut query_parameters: QueryParameters,
+    user: &Option<User>,
+) -> Result<String, crate::Error> {
     let mut sql_query = String::new();
-
-    apply_ctes(&mut sql_query, &ctes)?;
-
-    if ctes.is_empty() {
-        sql_query.push_str("WITH ");
-    } else {
-        sql_query.push_str(", ");
-    }
 
     let from_table_name = query_parameters
         .from_table_override
         .unwrap_or(query_parameters.base_table_name);
 
-    // Load a full set of PKs limited by MAX_FULL_LIMIT_STR (10000) to create a limited count of results
-    // as well as a limited set of PKs to shuffle (shuffling is too slow for larger results)
-    sql_query.push_str("limitedPkSet AS (SELECT ");
-    sql_query.push_str(from_table_name);
-    sql_query.push_str(".pk FROM ");
-    sql_query.push_str(from_table_name);
-    if !query_parameters.join_statements.is_empty() {
-        sql_query.push(' ');
-        sql_query.push_str(&query_parameters.join_statements.join(" "));
-    }
-    perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
-    apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
-    sql_query.push_str(" LIMIT ");
-    sql_query.push_str(MAX_FULL_LIMIT_STR);
-    sql_query.push_str("), countCte AS (SELECT NULLIF((SELECT count(*) FROM limitedPkSet), ");
-    sql_query.push_str(MAX_FULL_LIMIT_STR);
-    sql_query.push_str(") AS full_count)");
+    if query_parameters.include_full_count {
+        apply_ctes(&mut sql_query, &ctes)?;
 
-    sql_query.push_str(" SELECT ");
-    sql_query.push_str(&query_parameters.select_statements.join(", "));
-    sql_query.push_str(", (SELECT full_count FROM countCte), ");
+        if ctes.is_empty() {
+            sql_query.push_str("WITH ");
+        } else {
+            sql_query.push_str(", ");
+        }
+
+        // Load a full set of PKs limited by MAX_FULL_LIMIT_STR (10000) to create a limited count of results
+        // as well as a limited set of PKs to shuffle (shuffling is too slow for larger results)
+        sql_query.push_str("limitedPkSet AS (SELECT ");
+        sql_query.push_str(from_table_name);
+        sql_query.push_str(".pk FROM ");
+        sql_query.push_str(from_table_name);
+        if !query_parameters.join_statements.is_empty() {
+            sql_query.push(' ');
+            sql_query.push_str(&query_parameters.join_statements.join(" "));
+        }
+        perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
+        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+        sql_query.push_str(" LIMIT ");
+        sql_query.push_str(MAX_FULL_LIMIT_STR);
+        sql_query.push_str("), countCte AS (SELECT NULLIF((SELECT count(*) FROM limitedPkSet), ");
+        sql_query.push_str(MAX_FULL_LIMIT_STR);
+        sql_query.push_str(") AS full_count)");
+
+        sql_query.push_str(" SELECT ");
+        sql_query.push_str(&query_parameters.select_statements.join(", "));
+        sql_query.push_str(", (SELECT full_count FROM countCte)");
+    } else {
+        sql_query.push_str("SELECT ");
+        sql_query.push_str(&query_parameters.select_statements.join(", "));
+    }
+
     // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
     // since the effective limit is needed to calculate the number of pages
-    let limit = query_parameters
-        .limit
-        .as_deref()
-        .unwrap_or(DEFAULT_LIMIT_STR);
-    sql_query.push_str(limit);
-    sql_query.push_str(" AS evaluated_limit FROM ");
+    if let Some(ref pagination) = query_parameters.pagination {
+        let limit = pagination.limit.as_deref().unwrap_or(DEFAULT_LIMIT_STR);
+        sql_query.push_str(", ");
+        sql_query.push_str(limit);
+        sql_query.push_str(" AS evaluated_limit");
+    }
+
+    sql_query.push_str(" FROM ");
     sql_query.push_str(from_table_name);
     if !query_parameters.join_statements.is_empty() {
         sql_query.push(' ');
@@ -131,16 +290,7 @@ pub fn compile_sql(
             &query_parameters.fallback_orderings,
         )?;
     }
-    apply_pagination(&mut sql_query, &query_parameters, limit, false)?;
-
-    log::debug!(
-        "Compiled query [{}] (in {} microseconds) to sql {}",
-        &source_query.as_deref().unwrap_or(""),
-        instant
-            .map(|instant| instant.elapsed().as_micros())
-            .unwrap_or(0),
-        &sql_query
-    );
+    apply_pagination(&mut sql_query, &query_parameters, false)?;
 
     Ok(sql_query)
 }
@@ -195,17 +345,19 @@ pub fn compile_window_query(
             &mut query_parameters.ordering,
             &query_parameters.fallback_orderings,
         )?;
-        sql_query.push_str(" ) AS next, ");
+        sql_query.push_str(" ) AS next");
 
         // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
         // since the effective limit is needed to calculate the number of pages
-        let limit = query_parameters
-            .limit
-            .as_deref()
-            .unwrap_or(DEFAULT_LIMIT_STR);
+        if let Some(ref pagination) = query_parameters.pagination {
+            let limit = pagination.limit.as_deref().unwrap_or(DEFAULT_LIMIT_STR);
+            sql_query.push_str(", ");
+            sql_query.push_str(limit);
+            sql_query.push_str(" AS evaluated_limit FROM ");
+        } else {
+            sql_query.push_str(" FROM ");
+        }
 
-        sql_query.push_str(limit);
-        sql_query.push_str(" AS evaluated_limit FROM ");
         sql_query.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
             sql_query.push(' ');
@@ -220,7 +372,7 @@ pub fn compile_window_query(
             &query_parameters.fallback_orderings,
         )?;
 
-        apply_pagination(&mut sql_query, &query_parameters, limit, true)?;
+        apply_pagination(&mut sql_query, &query_parameters, true)?;
 
         sql_query.push_str(") sub WHERE pk = ");
         sql_query.push_str(&current_pk.to_string());
@@ -456,52 +608,341 @@ pub fn apply_ordering(
 pub fn apply_pagination(
     sql_query: &mut String,
     query_parameters: &QueryParameters,
-    limit: &str,
     include_window: bool,
 ) -> Result<(), crate::Error> {
-    let page = query_parameters.page.unwrap_or(0);
+    if let Some(ref pagination) = query_parameters.pagination {
+        let page = pagination.page.unwrap_or(0);
+        let limit = pagination.limit.as_deref().unwrap_or(DEFAULT_LIMIT_STR);
 
-    // If the limit is not a valid u16 (e.g. if it's a binary expression '50 + 10'), the error is returned
-    // after the query has been evaluated, the limit is supplied to the LEAST function to protect against large
-    // limits and enforce max limit
-    if let Ok(parsed_limit) = limit.parse::<u32>() {
-        if parsed_limit > query_parameters.max_limit {
-            return Err(crate::Error::IllegalQueryInputError(format!(
-                "Limit '{}' exceeds maximum limit of {}.",
-                parsed_limit, query_parameters.max_limit
-            )));
+        // If the limit is not a valid u16 (e.g. if it's a binary expression '50 + 10'), the error is returned
+        // after the query has been evaluated, the limit is supplied to the LEAST function to protect against large
+        // limits and enforce max limit
+        if let Ok(parsed_limit) = limit.parse::<u32>() {
+            if parsed_limit > pagination.max_limit {
+                return Err(crate::Error::IllegalQueryInputError(format!(
+                    "Limit '{}' exceeds maximum limit of {}.",
+                    parsed_limit, pagination.max_limit
+                )));
+            }
+        }
+
+        // for window queries, increase the limit by 2 and subtract 1 from the offset
+        // to include the last post from the previous page and the first post from the next page
+        sql_query.push_str(" LIMIT LEAST(");
+        if include_window {
+            sql_query.push('(');
+            sql_query.push_str(limit);
+            sql_query.push_str(" + 2)");
+        } else {
+            sql_query.push_str(limit);
+        }
+        sql_query.push_str(", ");
+        let max_limit_str = pagination.max_limit.to_string();
+        if include_window {
+            sql_query.push('(');
+            sql_query.push_str(&max_limit_str);
+            sql_query.push_str(" + 2)");
+        } else {
+            sql_query.push_str(&max_limit_str);
+        }
+        sql_query.push_str(") OFFSET (");
+        if include_window {
+            sql_query.push_str("GREATEST(((");
+        }
+        sql_query.push_str(limit);
+        sql_query.push_str(") * ");
+        sql_query.push_str(&page.to_string());
+        if include_window {
+            sql_query.push_str(") - 1, 0))");
         }
     }
 
-    // for window queries, increase the limit by 2 and subtract 1 from the offset
-    // to include the last post from the previous page and the first post from the next page
-    sql_query.push_str(" LIMIT LEAST(");
-    if include_window {
-        sql_query.push('(');
-        sql_query.push_str(limit);
-        sql_query.push_str(" + 2)");
-    } else {
-        sql_query.push_str(limit);
-    }
-    sql_query.push_str(", ");
-    let max_limit_str = query_parameters.max_limit.to_string();
-    if include_window {
-        sql_query.push('(');
-        sql_query.push_str(&max_limit_str);
-        sql_query.push_str(" + 2)");
-    } else {
-        sql_query.push_str(&max_limit_str);
-    }
-    sql_query.push_str(") OFFSET (");
-    if include_window {
-        sql_query.push_str("GREATEST(((");
-    }
-    sql_query.push_str(limit);
-    sql_query.push_str(") * ");
-    sql_query.push_str(&page.to_string());
-    if include_window {
-        sql_query.push_str(") - 1, 0))");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::query::compiler::ast::{
+        AttributeNode, BinaryExpressionNode, ExpressionStatement, Operator, PostTagNode,
+        VariableNode,
+    };
+    use crate::query::compiler::dict::Scope;
+    use crate::query::compiler::{Junction, Log, compile_conditions_ast};
+
+    #[test]
+    fn test_compile_single_condition() {
+        let mut log = Log { errors: Vec::new() };
+        let ast = compile_conditions_ast(
+            vec![String::from("Liara")],
+            Junction::And,
+            &Scope::Post,
+            &mut log,
+        )
+        .expect("Failed to compile conditions");
+        assert_eq!(ast.node_type.statements.len(), 1);
+
+        let expression_statement = ast.node_type.statements[0]
+            .node_type
+            .downcast_ref::<ExpressionStatement>()
+            .unwrap();
+        let post_tag_node = expression_statement
+            .expression_node
+            .node_type
+            .downcast_ref::<PostTagNode>()
+            .unwrap();
+        assert_eq!(post_tag_node.identifier, "liara");
     }
 
-    Ok(())
+    #[test]
+    fn test_compile_single_condition_with_multiple_statements() {
+        let mut log = Log { errors: Vec::new() };
+        let ast = compile_conditions_ast(
+            vec![String::from("Liara tag2")],
+            Junction::And,
+            &Scope::Post,
+            &mut log,
+        )
+        .expect("Failed to compile conditions");
+        // compile_conditions_ast logic still combines each condition into a single statement
+        assert_eq!(ast.node_type.statements.len(), 1);
+
+        let expression_statement = ast.node_type.statements[0]
+            .node_type
+            .downcast_ref::<ExpressionStatement>()
+            .unwrap();
+        let binary_expression_node = expression_statement
+            .expression_node
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+        assert_eq!(binary_expression_node.op, Operator::And);
+        assert_eq!(
+            binary_expression_node
+                .left
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "liara"
+        );
+        assert_eq!(
+            binary_expression_node
+                .right
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "tag2"
+        );
+    }
+
+    #[test]
+    fn test_compile_multiple_conditions_with_single_statement() {
+        let mut log = Log { errors: Vec::new() };
+        let ast = compile_conditions_ast(
+            vec![String::from("Liara"), String::from("tag2")],
+            Junction::And,
+            &Scope::Post,
+            &mut log,
+        )
+        .expect("Failed to compile conditions");
+        // compile_conditions_ast logic still combines each condition into a single statement
+        assert_eq!(ast.node_type.statements.len(), 1);
+
+        let expression_statement = ast.node_type.statements[0]
+            .node_type
+            .downcast_ref::<ExpressionStatement>()
+            .unwrap();
+        let binary_expression_node = expression_statement
+            .expression_node
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+        assert_eq!(binary_expression_node.op, Operator::And);
+        assert_eq!(
+            binary_expression_node
+                .left
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "liara"
+        );
+        assert_eq!(
+            binary_expression_node
+                .right
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "tag2"
+        );
+    }
+
+    #[test]
+    fn test_compile_multiple_conditions_with_multiple_statements() {
+        let mut log = Log { errors: Vec::new() };
+        let ast = compile_conditions_ast(
+            vec![
+                String::from("Liara tag2"),
+                String::from("tag3 @uploader = :self"),
+                String::from(
+                    "(`Linkin Park` AND `Nu Metal`) OR (`Bring Me The Horizon` AND Metalcore)",
+                ),
+            ],
+            Junction::Or,
+            &Scope::Post,
+            &mut log,
+        )
+        .expect("Failed to compile conditions");
+        // compile_conditions_ast logic still combines each condition into a single statement
+        assert_eq!(ast.node_type.statements.len(), 1);
+
+        let expression_statement = ast.node_type.statements[0]
+            .node_type
+            .downcast_ref::<ExpressionStatement>()
+            .unwrap();
+        let binary_expression_node = expression_statement
+            .expression_node
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+        assert_eq!(binary_expression_node.op, Operator::Or);
+
+        // BinaryExpressionNode {
+        //     left: BinaryExpressionNode {
+        //         left: BinaryExpression (first condition)
+        //         op: Or,
+        //         right: BinaryExpression (second condition)
+        //     }
+        //     op: Or,
+        //     right: BinaryExpressionNode (third condition)
+        // }
+        let left_binary_expression_node = binary_expression_node
+            .left
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+        assert_eq!(left_binary_expression_node.op, Operator::Or);
+        let first_binary_expression_node = left_binary_expression_node
+            .left
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+        let second_binary_expression_node = left_binary_expression_node
+            .right
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+        let third_binary_expression_node = binary_expression_node
+            .right
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+
+        assert_eq!(
+            first_binary_expression_node
+                .left
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "liara"
+        );
+        assert_eq!(first_binary_expression_node.op, Operator::And);
+        assert_eq!(
+            first_binary_expression_node
+                .right
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "tag2"
+        );
+
+        assert_eq!(
+            second_binary_expression_node
+                .left
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "tag3"
+        );
+        assert_eq!(second_binary_expression_node.op, Operator::And);
+        let attr_comparison_node = second_binary_expression_node
+            .right
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+        assert_eq!(
+            attr_comparison_node
+                .left
+                .node_type
+                .downcast_ref::<AttributeNode>()
+                .unwrap()
+                .identifier,
+            "uploader"
+        );
+        assert_eq!(attr_comparison_node.op, Operator::Equal);
+        assert_eq!(
+            attr_comparison_node
+                .right
+                .node_type
+                .downcast_ref::<VariableNode>()
+                .unwrap()
+                .identifier,
+            "self"
+        );
+
+        let third_node_left = third_binary_expression_node
+            .left
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+        let third_node_right = third_binary_expression_node
+            .right
+            .node_type
+            .downcast_ref::<BinaryExpressionNode>()
+            .unwrap();
+        assert_eq!(
+            third_node_left
+                .left
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "linkin park"
+        );
+        assert_eq!(third_node_left.op, Operator::And);
+        assert_eq!(
+            third_node_left
+                .right
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "nu metal"
+        );
+        assert_eq!(third_binary_expression_node.op, Operator::Or);
+        assert_eq!(
+            third_node_right
+                .left
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "bring me the horizon"
+        );
+        assert_eq!(third_node_right.op, Operator::And);
+        assert_eq!(
+            third_node_right
+                .right
+                .node_type
+                .downcast_ref::<PostTagNode>()
+                .unwrap()
+                .identifier,
+            "metalcore"
+        );
+    }
 }

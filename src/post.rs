@@ -8,6 +8,7 @@ use diesel::{
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 
+use crate::tag::TagUsage;
 use crate::{
     diesel::{ExpressionMethods, NullableExpressionMethods, QueryDsl},
     error::Error,
@@ -130,31 +131,38 @@ pub struct PostCollectionGroupAccessDetailed {
 pub async fn get_post_tags(
     post_pk: i64,
     connection: &mut AsyncPgConnection,
-) -> Result<Vec<Tag>, diesel::result::Error> {
-    post_tag::table
+) -> Result<Vec<TagUsage>, diesel::result::Error> {
+    Ok(post_tag::table
         .inner_join(tag::table)
-        .select(tag::table::all_columns())
+        .select((tag::table::all_columns(), post_tag::auto_matched))
         .filter(post_tag::fk_post.eq(post_pk))
-        .load::<Tag>(connection)
-        .await
+        .load::<(Tag, bool)>(connection)
+        .await?
+        .into_iter()
+        .map(|(tag, auto_matched)| TagUsage { tag, auto_matched })
+        .collect::<Vec<_>>())
 }
 
 pub async fn get_posts_tags(
     post_pks: &[i64],
     connection: &mut AsyncPgConnection,
-) -> Result<HashMap<i64, Vec<Tag>>, diesel::result::Error> {
+) -> Result<HashMap<i64, Vec<TagUsage>>, diesel::result::Error> {
     let mut post_tags_map = HashMap::new();
     let post_tags = post_tag::table
         .inner_join(tag::table)
-        .select((post_tag::fk_post, tag::table::all_columns()))
+        .select((
+            post_tag::fk_post,
+            tag::table::all_columns(),
+            post_tag::auto_matched,
+        ))
         .filter(post_tag::fk_post.eq_any(post_pks))
-        .load::<(i64, Tag)>(connection)
+        .load::<(i64, Tag, bool)>(connection)
         .await?;
-    for (post_pk, tag) in post_tags {
+    for (post_pk, tag, auto_matched) in post_tags {
         post_tags_map
             .entry(post_pk)
             .or_insert_with(Vec::new)
-            .push(tag);
+            .push(TagUsage { tag, auto_matched });
     }
     Ok(post_tags_map)
 }
@@ -162,13 +170,16 @@ pub async fn get_posts_tags(
 pub async fn get_post_collection_tags(
     post_collection_pk: i64,
     connection: &mut AsyncPgConnection,
-) -> Result<Vec<Tag>, diesel::result::Error> {
-    post_collection_tag::table
+) -> Result<Vec<TagUsage>, diesel::result::Error> {
+    Ok(post_collection_tag::table
         .inner_join(tag::table)
-        .select(tag::table::all_columns())
+        .select((tag::table::all_columns(), post_collection_tag::auto_matched))
         .filter(post_collection_tag::fk_post_collection.eq(post_collection_pk))
-        .load::<Tag>(connection)
-        .await
+        .load::<(Tag, bool)>(connection)
+        .await?
+        .into_iter()
+        .map(|(tag, auto_matched)| TagUsage { tag, auto_matched })
+        .collect::<Vec<_>>())
 }
 
 pub async fn get_post_group_access(

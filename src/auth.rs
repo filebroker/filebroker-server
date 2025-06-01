@@ -607,23 +607,33 @@ pub async fn register_handler(
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserInfo {
+    pub pk: i64,
     pub user_name: String,
     pub email: Option<String>,
     pub avatar_url: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub email_confirmed: bool,
     pub display_name: Option<String>,
+    pub jwt_version: i32,
+    pub password_fail_count: i32,
+    pub is_admin: bool,
+    pub is_banned: bool,
 }
 
 impl From<User> for UserInfo {
     fn from(user: User) -> Self {
         Self {
+            pk: user.pk,
             user_name: user.user_name,
             email: user.email,
             avatar_url: user.avatar_url,
             creation_timestamp: user.creation_timestamp,
             email_confirmed: user.email_confirmed,
             display_name: user.display_name,
+            jwt_version: user.jwt_version,
+            password_fail_count: user.password_fail_count,
+            is_admin: user.is_admin,
+            is_banned: user.is_banned,
         }
     }
 }

@@ -5,6 +5,10 @@ use std::{
     hash::{Hash, Hasher},
 };
 
+use crate::error::Error;
+use crate::query::{SearchQueryResultObject, SearchResult};
+use crate::util::string_value_updated;
+use crate::{perms, schema::*};
 use chrono::{DateTime, offset::Utc};
 use diesel::data_types::PgInterval;
 use diesel::deserialize::{self, FromSql, FromSqlRow};
@@ -16,12 +20,8 @@ use diesel::sql_types::{
 };
 use diesel::{Associations, Identifiable, Insertable, Queryable};
 use diesel_async::AsyncPgConnection;
-use serde::{Serialize, Serializer};
-
-use crate::error::Error;
-use crate::query::{SearchQueryResultObject, SearchResult};
-use crate::util::string_value_updated;
-use crate::{perms, schema::*};
+use serde::{Deserialize, Serialize, Serializer};
+use validator::{Validate, ValidationError};
 
 #[derive(Identifiable, Queryable, QueryableByName, Serialize, Clone)]
 #[diesel(table_name = registered_user)]
@@ -49,6 +49,32 @@ pub struct User {
     pub jwt_version: i32,
     #[diesel(sql_type = Int4)]
     pub password_fail_count: i32,
+    #[diesel(sql_type = Bool)]
+    pub is_admin: bool,
+    #[diesel(sql_type = Bool)]
+    pub is_banned: bool,
+}
+
+pub fn get_system_user() -> User {
+    User {
+        pk: 0,
+        user_name: "system".to_string(),
+        password: "".to_string(),
+        email: None,
+        avatar_url: None,
+        creation_timestamp: Default::default(),
+        email_confirmed: false,
+        display_name: None,
+        jwt_version: 0,
+        password_fail_count: 0,
+        is_admin: true,
+        is_banned: false,
+    }
+}
+
+#[inline]
+pub fn is_system_user(user: &User) -> bool {
+    user.pk == 0
 }
 
 /// A struct representing a user that serializes public information only.
@@ -81,6 +107,10 @@ pub struct UserPublic {
     #[diesel(sql_type = Int4)]
     #[serde(skip_serializing)]
     pub password_fail_count: i32,
+    #[diesel(sql_type = Bool)]
+    pub is_admin: bool,
+    #[diesel(sql_type = Bool)]
+    pub is_banned: bool,
 }
 
 impl From<User> for UserPublic {
@@ -96,6 +126,8 @@ impl From<User> for UserPublic {
             display_name: value.display_name,
             jwt_version: value.jwt_version,
             password_fail_count: value.password_fail_count,
+            is_admin: value.is_admin,
+            is_banned: value.is_banned,
         }
     }
 }
@@ -113,6 +145,8 @@ impl From<UserPublic> for User {
             display_name: value.display_name,
             jwt_version: value.jwt_version,
             password_fail_count: value.password_fail_count,
+            is_admin: value.is_admin,
+            is_banned: value.is_banned,
         }
     }
 }
@@ -172,7 +206,7 @@ impl Post {
             return Ok(true);
         }
         if let Some(user) = user {
-            if user.pk == self.fk_create_user {
+            if user.is_admin || user.pk == self.fk_create_user {
                 return Ok(true);
             }
         }
@@ -186,7 +220,7 @@ impl Post {
         connection: &mut AsyncPgConnection,
     ) -> Result<bool, Error> {
         if let Some(user) = user {
-            if user.pk == self.fk_create_user {
+            if user.is_admin || user.pk == self.fk_create_user {
                 return Ok(true);
             }
         }
@@ -1031,15 +1065,53 @@ impl PostCollectionUpdateFieldChanges {
 pub struct PostTag {
     pub fk_post: i64,
     pub fk_tag: i64,
+    pub auto_matched: bool,
 }
 
-#[derive(Clone, Identifiable, Queryable, Serialize)]
+#[derive(Associations, Clone, Identifiable, Queryable, Serialize)]
 #[diesel(table_name = tag)]
 #[diesel(primary_key(pk))]
+#[diesel(belongs_to(TagCategory, foreign_key = tag_category))]
 pub struct Tag {
     pub pk: i64,
     pub tag_name: String,
     pub creation_timestamp: DateTime<Utc>,
+    pub fk_create_user: i64,
+    pub edit_timestamp: DateTime<Utc>,
+    pub fk_edit_user: i64,
+    pub tag_category: Option<String>,
+    pub auto_match_condition_post: Option<String>,
+    pub auto_match_condition_collection: Option<String>,
+    #[serde(skip_serializing)]
+    pub compiled_auto_match_condition_post: Option<String>,
+    #[serde(skip_serializing)]
+    pub compiled_auto_match_condition_collection: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Identifiable, Insertable, Queryable, Serialize, Validate)]
+#[diesel(table_name = tag_category)]
+#[diesel(primary_key(id))]
+pub struct TagCategory {
+    #[validate(length(min = 1, max = 255), custom(function = "validate_tag_category"))]
+    pub id: String,
+    #[validate(length(min = 1, max = 255))]
+    pub label: String,
+    #[validate(length(max = 1000))]
+    pub auto_match_condition_post: Option<String>,
+    #[validate(length(max = 1000))]
+    pub auto_match_condition_collection: Option<String>,
+}
+
+fn validate_tag_category(value: &str) -> Result<(), ValidationError> {
+    if !value
+        .chars()
+        .all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric())
+    {
+        return Err(ValidationError::new(
+            "Category id must contain only alphanumeric characters, underscores, or dashes",
+        ));
+    }
+    Ok(())
 }
 
 impl PartialEq for Tag {
@@ -1072,6 +1144,10 @@ impl Ord for Tag {
 #[diesel(table_name = tag)]
 pub struct NewTag {
     pub tag_name: String,
+    pub fk_create_user: i64,
+    pub tag_category: Option<String>,
+    pub auto_match_condition_post: Option<String>,
+    pub auto_match_condition_collection: Option<String>,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
@@ -1241,7 +1317,7 @@ impl PostCollection {
             return Ok(true);
         }
         if let Some(user) = user {
-            if user.pk == self.fk_create_user {
+            if user.is_admin || user.pk == self.fk_create_user {
                 return Ok(true);
             }
         }
@@ -1255,7 +1331,7 @@ impl PostCollection {
         connection: &mut AsyncPgConnection,
     ) -> Result<bool, Error> {
         if let Some(user) = user {
-            if user.pk == self.fk_create_user {
+            if user.is_admin || user.pk == self.fk_create_user {
                 return Ok(true);
             }
         }
@@ -1333,6 +1409,7 @@ pub struct PostCollectionGroupAccess {
 pub struct PostCollectionTag {
     pub fk_post_collection: i64,
     pub fk_tag: i64,
+    pub auto_matched: bool,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -1516,6 +1593,7 @@ pub struct NewPostEditHistory {
 pub struct PostEditHistoryTag {
     pub fk_post_edit_history: i64,
     pub fk_tag: i64,
+    pub auto_matched: bool,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -1583,6 +1661,7 @@ pub struct NewPostCollectionEditHistory {
 pub struct PostCollectionEditHistoryTag {
     pub fk_post_collection_edit_history: i64,
     pub fk_tag: i64,
+    pub auto_matched: bool,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -1596,4 +1675,79 @@ pub struct PostCollectionEditHistoryGroupAccess {
     pub write: bool,
     pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(Tag, foreign_key = fk_tag))]
+#[diesel(belongs_to(User, foreign_key = fk_edit_user))]
+#[diesel(table_name = tag_edit_history)]
+#[diesel(primary_key(pk))]
+pub struct TagEditHistory {
+    pub pk: i64,
+    pub fk_tag: i64,
+    pub fk_edit_user: i64,
+    pub edit_timestamp: DateTime<Utc>,
+    pub tag_category: Option<String>,
+    pub tag_category_changed: bool,
+    pub parents_changed: bool,
+    pub aliases_changed: bool,
+}
+
+#[derive(Clone, Insertable)]
+#[diesel(table_name = tag_edit_history)]
+pub struct NewTagEditHistory {
+    pub fk_tag: i64,
+    pub fk_edit_user: i64,
+    pub edit_timestamp: DateTime<Utc>,
+    pub tag_category: Option<String>,
+    pub tag_category_changed: bool,
+    pub parents_changed: bool,
+    pub aliases_changed: bool,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(TagEditHistory, foreign_key = fk_tag_edit_history))]
+#[diesel(belongs_to(Tag, foreign_key = fk_parent))]
+#[diesel(table_name = tag_edit_history_parent)]
+#[diesel(primary_key(fk_tag_edit_history, fk_parent))]
+pub struct TagEditHistoryParent {
+    pub fk_tag_edit_history: i64,
+    pub fk_parent: i64,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(TagEditHistory, foreign_key = fk_tag_edit_history))]
+#[diesel(belongs_to(Tag, foreign_key = fk_alias))]
+#[diesel(table_name = tag_edit_history_alias)]
+#[diesel(primary_key(fk_tag_edit_history, fk_alias))]
+pub struct TagEditHistoryAlias {
+    pub fk_tag_edit_history: i64,
+    pub fk_alias: i64,
+}
+
+#[derive(
+    Associations, Clone, Debug, Identifiable, Insertable, Queryable, QueryableByName, Serialize,
+)]
+#[diesel(belongs_to(Tag, foreign_key = tag_to_apply))]
+#[diesel(belongs_to(TagCategory, foreign_key = tag_category_to_apply))]
+#[diesel(belongs_to(Post, foreign_key = post_to_apply))]
+#[diesel(belongs_to(PostCollection, foreign_key = post_collection_to_apply))]
+#[diesel(table_name = apply_auto_tags_task)]
+#[diesel(primary_key(pk))]
+pub struct ApplyAutoTagsTask {
+    pub pk: i64,
+    pub creation_timestamp: DateTime<Utc>,
+    pub tag_to_apply: Option<i64>,
+    pub tag_category_to_apply: Option<String>,
+    pub post_to_apply: Option<i64>,
+    pub post_collection_to_apply: Option<i64>,
+}
+
+#[derive(Clone, Debug, Insertable)]
+#[diesel(table_name = apply_auto_tags_task)]
+pub struct NewApplyAutoTagsTask {
+    pub tag_to_apply: Option<i64>,
+    pub tag_category_to_apply: Option<String>,
+    pub post_to_apply: Option<i64>,
+    pub post_collection_to_apply: Option<i64>,
 }

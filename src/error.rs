@@ -73,6 +73,8 @@ pub enum Error {
     InaccessibleS3ObjectError(String),
     #[error("Cannot access objects with provided pks {0:?}")]
     InaccessibleObjectsError(Vec<i64>),
+    #[error("User must be admin to perform this action")]
+    UserNotAdmin,
 
     // 404
     #[error("The requested entity was not found")]
@@ -126,7 +128,8 @@ impl Error {
             Error::NotFoundError => StatusCode::NOT_FOUND,
             Error::InaccessibleObjectError(_)
             | Error::InaccessibleS3ObjectError(_)
-            | Error::InaccessibleObjectsError(_) => StatusCode::FORBIDDEN,
+            | Error::InaccessibleObjectsError(_)
+            | Error::UserNotAdmin => StatusCode::FORBIDDEN,
             Error::InvalidCredentialsError
             | Error::MissingAuthHeaderError
             | Error::InvalidJwtError
@@ -204,6 +207,7 @@ impl Error {
             Self::InaccessibleObjectError(_) => 403_001,
             Self::InaccessibleS3ObjectError(_) => 403_002,
             Self::InaccessibleObjectsError(_) => 403_003,
+            Self::UserNotAdmin => 403_004,
 
             Self::NotFoundError => 404_001,
 

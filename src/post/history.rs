@@ -8,6 +8,10 @@ use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureE
 use serde::Serialize;
 use warp::{Reply, reject::Rejection};
 
+use super::{
+    get_post_collection_tags, get_post_tags, load_post_collection_detailed, load_post_detailed,
+};
+use crate::tag::TagUsage;
 use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, NullableExpressionMethods, QueryDsl},
@@ -22,8 +26,7 @@ use crate::{
     perms::{self, PostCollectionJoined, PostJoined},
     post::{
         PostCollectionGroupAccessDetailed, PostGroupAccess, PostGroupAccessDetailed,
-        get_post_collection_group_access, get_post_collection_tags, get_post_group_access,
-        get_post_tags,
+        get_post_collection_group_access, get_post_group_access,
     },
     query::PaginationQueryParams,
     run_serializable_transaction,
@@ -36,8 +39,6 @@ use crate::{
     },
     util::vec_eq_sorted,
 };
-
-use super::{load_post_collection_detailed, load_post_detailed};
 
 #[derive(Serialize)]
 pub struct PostEditHistorySnapshot {
@@ -60,7 +61,7 @@ pub struct PostEditHistorySnapshot {
     pub description_changed: bool,
     pub tags_changed: bool,
     pub group_access_changed: bool,
-    pub tags: Vec<Tag>,
+    pub tags: Vec<TagUsage>,
     pub group_access: Vec<PostGroupAccessDetailed>,
 }
 
@@ -158,8 +159,8 @@ async fn get_post_snapshot_tags(
     post_edit_history_snapshot: &PostEditHistory,
     post: &Post,
     connection: &mut AsyncPgConnection,
-) -> Result<Vec<Tag>, Error> {
-    // snaphots store the previous value and only store tags if they have changed,
+) -> Result<Vec<TagUsage>, Error> {
+    // snapshots store the previous value and only store tags if they have changed,
     // thus we need to load the tags from the next snapshot where tags_changed is true,
     // or the post's current tags if no such snapshot exists
     let relevant_tag_snapshot = if post_edit_history_snapshot.tags_changed {
@@ -177,10 +178,16 @@ async fn get_post_snapshot_tags(
     let tags = if let Some(relevant_tag_snapshot) = relevant_tag_snapshot {
         PostEditHistoryTag::belonging_to(&relevant_tag_snapshot)
             .inner_join(tag::table)
-            .select(tag::table::all_columns())
-            .load::<Tag>(connection)
+            .select((
+                tag::table::all_columns(),
+                post_edit_history_tag::auto_matched,
+            ))
+            .load::<(Tag, bool)>(connection)
             .await
             .map_err(Error::from)?
+            .into_iter()
+            .map(|(tag, auto_matched)| TagUsage { tag, auto_matched })
+            .collect::<Vec<_>>()
     } else {
         get_post_tags(post.pk, connection)
             .await
@@ -254,7 +261,7 @@ pub struct PostCollectionEditHistorySnapshot {
     pub poster_object_key_changed: bool,
     pub tags_changed: bool,
     pub group_access_changed: bool,
-    pub tags: Vec<Tag>,
+    pub tags: Vec<TagUsage>,
     pub group_access: Vec<PostCollectionGroupAccessDetailed>,
 }
 
@@ -359,7 +366,7 @@ async fn get_post_collection_snapshot_tags(
     post_collection_edit_history_snapshot: &PostCollectionEditHistory,
     post_collection: &PostCollection,
     connection: &mut AsyncPgConnection,
-) -> Result<Vec<Tag>, Error> {
+) -> Result<Vec<TagUsage>, Error> {
     // snaphots store the previous value and only store tags if they have changed,
     // thus we need to load the tags from the next snapshot where tags_changed is true,
     // or the collection's current tags if no such snapshot exists
@@ -378,10 +385,16 @@ async fn get_post_collection_snapshot_tags(
     let tags = if let Some(relevant_tag_snapshot) = relevant_tag_snapshot {
         PostCollectionEditHistoryTag::belonging_to(&relevant_tag_snapshot)
             .inner_join(tag::table)
-            .select(tag::table::all_columns())
-            .load::<Tag>(connection)
+            .select((
+                tag::table::all_columns(),
+                post_collection_edit_history_tag::auto_matched,
+            ))
+            .load::<(Tag, bool)>(connection)
             .await
             .map_err(Error::from)?
+            .into_iter()
+            .map(|(tag, auto_matched)| TagUsage { tag, auto_matched })
+            .collect::<Vec<_>>()
     } else {
         get_post_collection_tags(post_collection.pk, connection)
             .await
@@ -494,9 +507,10 @@ pub async fn rewind_post_history_snapshot_handler(
                     .values(
                         snapshot_tags
                             .iter()
-                            .map(|tag| PostTag {
+                            .map(|tag_usage| PostTag {
                                 fk_post: post.pk,
-                                fk_tag: tag.pk,
+                                fk_tag: tag_usage.tag.pk,
+                                auto_matched: tag_usage.auto_matched,
                             })
                             .collect::<Vec<_>>(),
                     )
@@ -617,9 +631,10 @@ pub async fn rewind_post_history_snapshot_handler(
                             .values(
                                 previous_tags
                                     .iter()
-                                    .map(|tag| PostEditHistoryTag {
+                                    .map(|tag_usage| PostEditHistoryTag {
                                         fk_post_edit_history: post_edit_history.pk,
-                                        fk_tag: tag.pk,
+                                        fk_tag: tag_usage.tag.pk,
+                                        auto_matched: tag_usage.auto_matched,
                                     })
                                     .collect::<Vec<_>>(),
                             )
@@ -736,9 +751,10 @@ pub async fn rewind_post_collection_history_snapshot_handler(
                     .values(
                         snapshot_tags
                             .iter()
-                            .map(|tag| PostCollectionTag {
+                            .map(|tag_usage| PostCollectionTag {
                                 fk_post_collection: post_collection.pk,
-                                fk_tag: tag.pk,
+                                fk_tag: tag_usage.tag.pk,
+                                auto_matched: tag_usage.auto_matched,
                             })
                             .collect::<Vec<_>>(),
                     )
@@ -873,10 +889,11 @@ pub async fn rewind_post_collection_history_snapshot_handler(
                             .values(
                                 previous_tags
                                     .iter()
-                                    .map(|tag| PostCollectionEditHistoryTag {
+                                    .map(|tag_usage| PostCollectionEditHistoryTag {
                                         fk_post_collection_edit_history:
                                             post_collection_edit_history.pk,
-                                        fk_tag: tag.pk,
+                                        fk_tag: tag_usage.tag.pk,
+                                        auto_matched: tag_usage.auto_matched,
                                     })
                                     .collect::<Vec<_>>(),
                             )

@@ -1,6 +1,18 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    apply_auto_tags_task (pk) {
+        pk -> Int8,
+        creation_timestamp -> Timestamptz,
+        tag_to_apply -> Nullable<Int8>,
+        #[max_length = 255]
+        tag_category_to_apply -> Nullable<Varchar>,
+        post_to_apply -> Nullable<Int8>,
+        post_collection_to_apply -> Nullable<Int8>,
+    }
+}
+
+diesel::table! {
     broker (pk) {
         pk -> Int8,
         #[max_length = 255]
@@ -160,6 +172,7 @@ diesel::table! {
     post_collection_edit_history_tag (fk_post_collection_edit_history, fk_tag) {
         fk_post_collection_edit_history -> Int8,
         fk_tag -> Int8,
+        auto_matched -> Bool,
     }
 }
 
@@ -188,6 +201,7 @@ diesel::table! {
     post_collection_tag (fk_post_collection, fk_tag) {
         fk_post_collection -> Int8,
         fk_tag -> Int8,
+        auto_matched -> Bool,
     }
 }
 
@@ -231,6 +245,7 @@ diesel::table! {
     post_edit_history_tag (fk_post_edit_history, fk_tag) {
         fk_post_edit_history -> Int8,
         fk_tag -> Int8,
+        auto_matched -> Bool,
     }
 }
 
@@ -248,6 +263,7 @@ diesel::table! {
     post_tag (fk_post, fk_tag) {
         fk_post -> Int8,
         fk_tag -> Int8,
+        auto_matched -> Bool,
     }
 }
 
@@ -277,6 +293,8 @@ diesel::table! {
         display_name -> Nullable<Varchar>,
         jwt_version -> Int4,
         password_fail_count -> Int4,
+        is_admin -> Bool,
+        is_banned -> Bool,
     }
 }
 
@@ -356,6 +374,17 @@ diesel::table! {
         #[max_length = 50]
         tag_name -> Varchar,
         creation_timestamp -> Timestamptz,
+        fk_create_user -> Int8,
+        edit_timestamp -> Timestamptz,
+        fk_edit_user -> Int8,
+        #[max_length = 255]
+        tag_category -> Nullable<Varchar>,
+        #[max_length = 1023]
+        auto_match_condition_post -> Nullable<Varchar>,
+        #[max_length = 1023]
+        auto_match_condition_collection -> Nullable<Varchar>,
+        compiled_auto_match_condition_post -> Nullable<Text>,
+        compiled_auto_match_condition_collection -> Nullable<Text>,
     }
 }
 
@@ -363,6 +392,19 @@ diesel::table! {
     tag_alias (fk_source, fk_target) {
         fk_source -> Int8,
         fk_target -> Int8,
+    }
+}
+
+diesel::table! {
+    tag_category (id) {
+        #[max_length = 255]
+        id -> Varchar,
+        #[max_length = 255]
+        label -> Varchar,
+        #[max_length = 1023]
+        auto_match_condition_post -> Nullable<Varchar>,
+        #[max_length = 1023]
+        auto_match_condition_collection -> Nullable<Varchar>,
     }
 }
 
@@ -379,6 +421,34 @@ diesel::table! {
     tag_edge (fk_parent, fk_child) {
         fk_parent -> Int8,
         fk_child -> Int8,
+    }
+}
+
+diesel::table! {
+    tag_edit_history (pk) {
+        pk -> Int8,
+        fk_tag -> Int8,
+        fk_edit_user -> Int8,
+        edit_timestamp -> Timestamptz,
+        #[max_length = 255]
+        tag_category -> Nullable<Varchar>,
+        tag_category_changed -> Bool,
+        parents_changed -> Bool,
+        aliases_changed -> Bool,
+    }
+}
+
+diesel::table! {
+    tag_edit_history_alias (fk_tag_edit_history, fk_alias) {
+        fk_tag_edit_history -> Int8,
+        fk_alias -> Int8,
+    }
+}
+
+diesel::table! {
+    tag_edit_history_parent (fk_tag_edit_history, fk_parent) {
+        fk_tag_edit_history -> Int8,
+        fk_parent -> Int8,
     }
 }
 
@@ -405,6 +475,10 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(apply_auto_tags_task -> post (post_to_apply));
+diesel::joinable!(apply_auto_tags_task -> post_collection (post_collection_to_apply));
+diesel::joinable!(apply_auto_tags_task -> tag (tag_to_apply));
+diesel::joinable!(apply_auto_tags_task -> tag_category (tag_category_to_apply));
 diesel::joinable!(broker -> registered_user (fk_owner));
 diesel::joinable!(broker_access -> broker (fk_broker));
 diesel::joinable!(broker_access -> registered_user (fk_granted_by));
@@ -445,10 +519,19 @@ diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
 diesel::joinable!(s3_object -> registered_user (fk_uploader));
 diesel::joinable!(s3_object_metadata -> s3_object (object_key));
+diesel::joinable!(tag -> tag_category (tag_category));
+diesel::joinable!(tag_edit_history -> registered_user (fk_edit_user));
+diesel::joinable!(tag_edit_history -> tag (fk_tag));
+diesel::joinable!(tag_edit_history -> tag_category (tag_category));
+diesel::joinable!(tag_edit_history_alias -> tag (fk_alias));
+diesel::joinable!(tag_edit_history_alias -> tag_edit_history (fk_tag_edit_history));
+diesel::joinable!(tag_edit_history_parent -> tag (fk_parent));
+diesel::joinable!(tag_edit_history_parent -> tag_edit_history (fk_tag_edit_history));
 diesel::joinable!(user_group -> registered_user (fk_owner));
 diesel::joinable!(user_group_membership -> user_group (fk_group));
 
 diesel::allow_tables_to_appear_in_same_query!(
+    apply_auto_tags_task,
     broker,
     broker_access,
     deferred_s3_object_deletion,
@@ -474,8 +557,12 @@ diesel::allow_tables_to_appear_in_same_query!(
     s3_object_metadata,
     tag,
     tag_alias,
+    tag_category,
     tag_closure_table,
     tag_edge,
+    tag_edit_history,
+    tag_edit_history_alias,
+    tag_edit_history_parent,
     user_group,
     user_group_membership,
 );

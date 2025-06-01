@@ -1,12 +1,12 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
-use lazy_static::lazy_static;
-use regex::Regex;
-
 use super::{
     Error, Location, Log,
     ast::{AttributeNode, ExpressionNode, Node, QueryBuilderVisitor, StringLiteralNode},
 };
+use crate::query::compiler::ast::{VariableNode, sanitize_string_literal};
+use lazy_static::lazy_static;
+use regex::Regex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Type {
@@ -60,14 +60,19 @@ pub struct Modifier {
 
 pub struct Variable {
     pub return_type: Type,
+    pub get_value_plain_fn: fn(&HashMap<String, String>) -> Option<String>,
     pub get_expression_fn: fn(&HashMap<String, String>) -> String,
 }
+
 #[derive(Debug, PartialEq)]
 pub enum Scope {
     Global,
     Post,
     Collection,
     CollectionItem { collection_pk: i64 },
+    // Scopes for tag auto match conditions
+    TagAutoMatchPost,
+    TagAutoMatchCollection,
 }
 
 impl FromStr for Scope {
@@ -79,6 +84,8 @@ impl FromStr for Scope {
             "post" => Ok(Self::Post),
             "collection" => Ok(Self::Collection),
             "collection_item" => Ok(Self::CollectionItem { collection_pk: -1 }),
+            "tag_auto_match_post" => Ok(Self::TagAutoMatchPost),
+            "tag_auto_match_collection" => Ok(Self::TagAutoMatchCollection),
             _ => {
                 lazy_static! {
                     static ref COLLECTION_ITEM_REGEX: Regex =
@@ -119,6 +126,8 @@ impl Scope {
                 );
                 post_attributes
             }
+            Self::TagAutoMatchPost => POST_ATTRIBUTES.clone(),
+            Self::TagAutoMatchCollection => COLLECTION_ATTRIBUTES.clone(),
         }
     }
 
@@ -128,6 +137,8 @@ impl Scope {
             Self::Post => GLOBAL_FUNCTIONS.clone(),
             Self::Collection => GLOBAL_FUNCTIONS.clone(),
             Self::CollectionItem { .. } => GLOBAL_FUNCTIONS.clone(),
+            Self::TagAutoMatchPost => GLOBAL_FUNCTIONS.clone(),
+            Self::TagAutoMatchCollection => GLOBAL_FUNCTIONS.clone(),
         }
     }
 
@@ -137,6 +148,8 @@ impl Scope {
             Self::Post => GLOBAL_MODIFIERS.clone(),
             Self::Collection => GLOBAL_MODIFIERS.clone(),
             Self::CollectionItem { .. } => GLOBAL_MODIFIERS.clone(),
+            Self::TagAutoMatchPost => HashMap::new(),
+            Self::TagAutoMatchCollection => HashMap::new(),
         }
     }
 
@@ -146,6 +159,23 @@ impl Scope {
             Self::Post => GLOBAL_VARIABLES.clone(),
             Self::Collection => GLOBAL_VARIABLES.clone(),
             Self::CollectionItem { .. } => GLOBAL_VARIABLES.clone(),
+            Self::TagAutoMatchPost | Self::TagAutoMatchCollection => {
+                let mut global_variables = GLOBAL_VARIABLES.clone();
+                global_variables.remove("self");
+                global_variables.insert(
+                    "tag_name",
+                    Arc::new(Variable {
+                        return_type: Type::String,
+                        get_value_plain_fn: |vars| vars.get("tag_name").cloned(),
+                        get_expression_fn: |vars| {
+                            vars.get("tag_name")
+                                .map(|s| format!("'{}'", s))
+                                .unwrap_or_else(|| String::from("NULL"))
+                        },
+                    }),
+                );
+                global_variables
+            }
         }
     }
 }
@@ -187,7 +217,7 @@ lazy_static! {
                 return_type: Type::Number,
                 accept_arguments,
                 write_expression_fn: |visitor, args, scope, _location, log| {
-                    write_post_aggregate_function_expr("MIX", visitor, args, scope, log)
+                    write_post_aggregate_function_expr("MIN", visitor, args, scope, log)
                 }
             })
         ),
@@ -211,6 +241,76 @@ lazy_static! {
                         log,
                     )
                 }
+            })
+        ),
+        (
+            "delimited_string_contains",
+            Arc::new(Function {
+                params: vec![Parameter {
+                    parameter_type: ParameterType::Attribute(Type::String)
+                }, Parameter {
+                    parameter_type: ParameterType::Object(Type::String)
+                }],
+                return_type: Type::Boolean,
+                accept_arguments: |params: &[Parameter], arguments: &[Box<Node<dyn ExpressionNode>>], scope: &Scope, location: Location, log: &mut Log| {
+                    accept_arguments(params, arguments, scope, location, log);
+                    if arguments.len() >= 2 {
+                        let argument = &arguments[1].node_type;
+                        if let Some(variable_node) = argument.downcast_ref::<VariableNode>() {
+                            let ident = variable_node.identifier.as_str();
+                            if !scope.get_variables().contains_key(ident) {
+                                log.errors.push(Error {
+                                    location,
+                                    msg: format!("No such variable '{}'", ident),
+                                });
+                            }
+                        } else {
+                            let string_literal = argument.downcast_ref::<StringLiteralNode>();
+                            if string_literal.is_none() {
+                                log.errors.push(Error {
+                                    location,
+                                    msg: format!(
+                                        "Expected argument to be a string literal but got expression {:?}",
+                                        &argument
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                },
+                write_expression_fn: |visitor, args, scope, _location, log| {
+                    if args.len() >= 2 {
+                        let variable_value = if let Some(variable_node) = args[1].node_type.downcast_ref::<VariableNode>() {
+                            let identifier: &str = &variable_node.identifier;
+                            let value = scope.get_variables().get(identifier).and_then(|var| (var.get_value_plain_fn)(&visitor.query_parameters.variables));
+                            if value.is_none() {
+                                // variable is undefined and cannot match, fast return FALSE
+                                visitor.write_buff("FALSE");
+                                return;
+                            }
+                            value
+                        } else {
+                            None
+                        };
+
+                        let attribute_arg = &mut args[0];
+                        attribute_arg.accept(visitor, scope, log);
+                        visitor.write_buff(" ~* ");
+                        let value = if let Some(value) = variable_value {
+                            sanitize_string_literal(&value)
+                        } else if let Some(string_literal) = args[1].node_type.downcast_ref::<StringLiteralNode>() {
+                            sanitize_string_literal(&string_literal.val)
+                        } else {
+                            visitor.write_buff("NULL");
+                            return;
+                        };
+                        visitor.write_buff(r"'(^|[,&;]\s*)");
+                        let escaped = regex::escape(&value);
+                        visitor.write_buff(&escaped);
+                        visitor.write_buff(r"(\s*[,&;]|$)");
+                        visitor.write_buff("'");
+                    }
+                },
             })
         )
     ]);
@@ -262,6 +362,7 @@ lazy_static! {
             "self",
             Arc::new(Variable {
                 return_type: Type::Number,
+                get_value_plain_fn: |vars| vars.get("current_user_key").cloned(),
                 get_expression_fn: |vars| vars
                     .get("current_user_key")
                     .cloned()
@@ -272,6 +373,7 @@ lazy_static! {
             "now",
             Arc::new(Variable {
                 return_type: Type::DateTime,
+                get_value_plain_fn: |vars| vars.get("current_utc_timestamp").cloned(),
                 get_expression_fn: |vars| vars
                     .get("current_utc_timestamp")
                     .map(|s| format!("'{}'", s))
@@ -282,6 +384,7 @@ lazy_static! {
             "now_date",
             Arc::new(Variable {
                 return_type: Type::Date,
+                get_value_plain_fn: |vars| vars.get("current_utc_date").cloned(),
                 get_expression_fn: |vars| vars
                     .get("current_utc_date")
                     .map(|s| format!("'{}'", s))
@@ -292,6 +395,7 @@ lazy_static! {
             "random",
             Arc::new(Variable {
                 return_type: Type::Number,
+                get_value_plain_fn: |_vars| None,
                 get_expression_fn: |_vars| String::from("RANDOM()")
             })
         )

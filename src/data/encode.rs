@@ -28,6 +28,7 @@ use uuid::Uuid;
 use lazy_static::lazy_static;
 
 use crate::error::TransactionRuntimeError;
+use crate::tag::auto_matching::apply_auto_tags_for_post;
 use crate::{
     CONCURRENT_VIDEO_TRANSCODE_LIMIT, acquire_db_connection,
     diesel::ExpressionMethods,
@@ -1262,6 +1263,18 @@ pub async fn load_object_metadata(
                         post_update_count,
                         &s3_object_metadata.object_key
                     );
+                }
+
+                let related_posts = post::table
+                    .select(post::pk)
+                    .filter(post::s3_object.eq(&s3_object_metadata.object_key))
+                    .load::<i64>(connection)
+                    .await?;
+
+                for post_pk in related_posts {
+                    if let Err(e) = apply_auto_tags_for_post(post_pk, connection).await {
+                        log::error!("Failed to apply auto tags for post {post_pk} after {} object metadata extraction: {e}", &s3_object_metadata.object_key);
+                    }
                 }
             }
             Ok(s3_object_metadata)
