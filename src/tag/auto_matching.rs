@@ -19,8 +19,10 @@ use diesel::sql_types::BigInt;
 use diesel::{BelongingToDsl, BoolExpressionMethods, ExpressionMethods, QueryDsl};
 use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use lazy_static::lazy_static;
 use serde::Serialize;
 use std::collections::HashMap;
+use tokio::sync::Semaphore;
 
 pub enum AutoMatchTarget {
     Post,
@@ -107,8 +109,20 @@ pub async fn create_apply_auto_tags_for_collection_task(
         .map_err(Error::from)
 }
 
+lazy_static! {
+    pub static ref APPLY_AUTO_TAGS_SEMAPHORE: Semaphore = Semaphore::new(4);
+}
+
 pub fn spawn_apply_auto_tags_task(task: ApplyAutoTagsTask) {
     tokio::spawn(async move {
+        let _semaphore = match APPLY_AUTO_TAGS_SEMAPHORE.acquire().await {
+            Ok(semaphore) => semaphore,
+            Err(e) => {
+                log::error!("Failed to acquire semaphore for apply_auto_tags_task: {e}");
+                return;
+            }
+        };
+
         let connection = acquire_db_connection().await;
         match connection {
             Ok(mut connection) => {
