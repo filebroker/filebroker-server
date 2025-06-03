@@ -21,10 +21,7 @@ use uuid::Uuid;
 use lazy_static::lazy_static;
 
 use crate::error::TransactionRuntimeError;
-use crate::schema::apply_auto_tags_task;
-use crate::tag::auto_matching::{
-    apply_auto_tags_for_post, create_apply_auto_tags_for_post_task, spawn_apply_auto_tags_task,
-};
+use crate::tag::auto_matching::apply_auto_tags_for_post;
 use crate::task::LockedObjectsTaskSentinel;
 use crate::{
     CONCURRENT_VIDEO_TRANSCODE_LIMIT, acquire_db_connection,
@@ -1165,132 +1162,125 @@ pub async fn load_object_metadata(
         &source_object_key,
     );
 
-    let (s3_object_metadata, apply_auto_tags_tasks) =
-        run_retryable_transaction(&mut connection, |connection| {
-            async move {
-                let object = s3_object::table
-                    .filter(s3_object::object_key.eq(&source_object_key))
-                    .get_result::<S3Object>(connection)
+    let s3_object_metadata = run_retryable_transaction(&mut connection, |connection| {
+        async move {
+            let object = s3_object::table
+                .filter(s3_object::object_key.eq(&source_object_key))
+                .get_result::<S3Object>(connection)
+                .await?;
+
+            let metadata_to_insert = S3ObjectMetadata {
+                object_key: object.object_key,
+                file_type: exif_output.file_type.into_inner(),
+                file_type_extension: exif_output.file_type_extension.into_inner(),
+                mime_type: exif_output
+                    .mime_type
+                    .into_inner()
+                    .or(Some(object.mime_type)),
+                title: exif_output
+                    .title
+                    .into_inner()
+                    .or(ffprobe_tags.title.into_inner()),
+                artist: exif_output
+                    .artist
+                    .into_inner()
+                    .map(DeStringOrArray::into_inner)
+                    .or(ffprobe_tags.artist.into_inner()),
+                album: exif_output
+                    .album
+                    .into_inner()
+                    .or(ffprobe_tags.album.into_inner()),
+                album_artist: exif_output
+                    .album_artist
+                    .into_inner()
+                    .or(ffprobe_tags.album_artist.into_inner()),
+                composer: exif_output
+                    .composer
+                    .into_inner()
+                    .or(ffprobe_tags.composer.into_inner()),
+                genre: exif_output
+                    .genre
+                    .into_inner()
+                    .map(DeStringOrArray::into_inner)
+                    .or(ffprobe_tags.genre.into_inner()),
+                date,
+                track_number,
+                disc_number,
+                duration: duration.map(PgIntervalWrapper),
+                width: *exif_output.width,
+                height: *exif_output.height,
+                size: size.or(Some(object.size_bytes)),
+                bit_rate,
+                format_name,
+                format_long_name,
+                video_stream_count,
+                video_codec_name,
+                video_codec_long_name,
+                video_frame_rate: (*exif_output.frame_rate).or(video_frame_rate),
+                video_bit_rate_max,
+                audio_stream_count,
+                audio_codec_name,
+                audio_codec_long_name,
+                audio_sample_rate: exif_output
+                    .audio_sample_rate
+                    .or(exif_output.sample_rate.into_inner()),
+                audio_channels: *exif_output.audio_channels,
+                audio_bit_rate_max,
+                raw,
+                loaded: true,
+                track_count,
+                disc_count,
+            };
+
+            let s3_object_metadata = diesel::insert_into(s3_object_metadata::table)
+                .values(&metadata_to_insert)
+                .on_conflict(s3_object_metadata::object_key)
+                .do_update()
+                .set(&metadata_to_insert)
+                .get_result::<S3ObjectMetadata>(connection)
+                .await?;
+
+            if let Some(ref title) = s3_object_metadata.title {
+                let post_update_count = diesel::update(post::table)
+                    .filter(
+                        post::s3_object
+                            .eq(&s3_object_metadata.object_key)
+                            .and(post::title.is_null()),
+                    )
+                    .set(post::title.eq(substring(title, 1, 300).nullable()))
+                    .execute(connection)
                     .await?;
 
-                let metadata_to_insert = S3ObjectMetadata {
-                    object_key: object.object_key,
-                    file_type: exif_output.file_type.into_inner(),
-                    file_type_extension: exif_output.file_type_extension.into_inner(),
-                    mime_type: exif_output
-                        .mime_type
-                        .into_inner()
-                        .or(Some(object.mime_type)),
-                    title: exif_output
-                        .title
-                        .into_inner()
-                        .or(ffprobe_tags.title.into_inner()),
-                    artist: exif_output
-                        .artist
-                        .into_inner()
-                        .map(DeStringOrArray::into_inner)
-                        .or(ffprobe_tags.artist.into_inner()),
-                    album: exif_output
-                        .album
-                        .into_inner()
-                        .or(ffprobe_tags.album.into_inner()),
-                    album_artist: exif_output
-                        .album_artist
-                        .into_inner()
-                        .or(ffprobe_tags.album_artist.into_inner()),
-                    composer: exif_output
-                        .composer
-                        .into_inner()
-                        .or(ffprobe_tags.composer.into_inner()),
-                    genre: exif_output
-                        .genre
-                        .into_inner()
-                        .map(DeStringOrArray::into_inner)
-                        .or(ffprobe_tags.genre.into_inner()),
-                    date,
-                    track_number,
-                    disc_number,
-                    duration: duration.map(PgIntervalWrapper),
-                    width: *exif_output.width,
-                    height: *exif_output.height,
-                    size: size.or(Some(object.size_bytes)),
-                    bit_rate,
-                    format_name,
-                    format_long_name,
-                    video_stream_count,
-                    video_codec_name,
-                    video_codec_long_name,
-                    video_frame_rate: (*exif_output.frame_rate).or(video_frame_rate),
-                    video_bit_rate_max,
-                    audio_stream_count,
-                    audio_codec_name,
-                    audio_codec_long_name,
-                    audio_sample_rate: exif_output
-                        .audio_sample_rate
-                        .or(exif_output.sample_rate.into_inner()),
-                    audio_channels: *exif_output.audio_channels,
-                    audio_bit_rate_max,
-                    raw,
-                    loaded: true,
-                    track_count,
-                    disc_count,
-                };
-
-                let s3_object_metadata = diesel::insert_into(s3_object_metadata::table)
-                    .values(&metadata_to_insert)
-                    .on_conflict(s3_object_metadata::object_key)
-                    .do_update()
-                    .set(&metadata_to_insert)
-                    .get_result::<S3ObjectMetadata>(connection)
-                    .await?;
-
-                if let Some(ref title) = s3_object_metadata.title {
-                    let post_update_count = diesel::update(post::table)
-                        .filter(
-                            post::s3_object
-                                .eq(&s3_object_metadata.object_key)
-                                .and(post::title.is_null()),
-                        )
-                        .set(post::title.eq(substring(title, 1, 300).nullable()))
-                        .execute(connection)
-                        .await?;
-
-                    if post_update_count > 0 {
-                        log::info!(
-                            "Updated {} posts with title from metadata for object {}",
-                            post_update_count,
-                            &s3_object_metadata.object_key
-                        );
-                    }
+                if post_update_count > 0 {
+                    log::info!(
+                        "Updated {} posts with title from metadata for object {}",
+                        post_update_count,
+                        &s3_object_metadata.object_key
+                    );
                 }
-
-                let mut apply_auto_tags_tasks = Vec::new();
-
-                let related_posts = post::table
-                    .select(post::pk)
-                    .filter(post::s3_object.eq(&s3_object_metadata.object_key))
-                    .load::<i64>(connection)
-                    .await?;
-
-                for post_pk in related_posts {
-                    let apply_auto_tags_task =
-                        create_apply_auto_tags_for_post_task(post_pk, connection).await?;
-                    apply_auto_tags_tasks.push(apply_auto_tags_task);
-                }
-                Ok((s3_object_metadata, apply_auto_tags_tasks))
             }
-            .scope_boxed()
-        })
-        .await?;
+
+            let related_posts = post::table
+                .select(post::pk)
+                .filter(post::s3_object.eq(&s3_object_metadata.object_key))
+                .load::<i64>(connection)
+                .await?;
+
+            for post_pk in related_posts {
+                if let Err(e) = apply_auto_tags_for_post(post_pk, connection).await {
+                    log::error!("Failed to apply auto tags for post {post_pk} after {} object metadata extraction: {e}", &s3_object_metadata.object_key);
+                }
+            }
+            Ok(s3_object_metadata)
+        }
+        .scope_boxed()
+    })
+    .await?;
 
     log::info!(
         "Completed metadata extraction for {}",
         &s3_object_metadata.object_key
     );
-
-    for apply_auto_tags_task in apply_auto_tags_tasks {
-        spawn_apply_auto_tags_task(apply_auto_tags_task);
-    }
 
     Ok(())
 }
