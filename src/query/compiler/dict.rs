@@ -169,7 +169,7 @@ impl Scope {
                         get_value_plain_fn: |vars| vars.get("tag_name").cloned(),
                         get_expression_fn: |vars| {
                             vars.get("tag_name")
-                                .map(|s| format!("'{}'", s))
+                                .map(|s| format!("'{}'", sanitize_string_literal(s.as_str())))
                                 .unwrap_or_else(|| String::from("NULL"))
                         },
                     }),
