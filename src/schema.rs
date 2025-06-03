@@ -9,6 +9,8 @@ diesel::table! {
         tag_category_to_apply -> Nullable<Varchar>,
         post_to_apply -> Nullable<Int8>,
         post_collection_to_apply -> Nullable<Int8>,
+        locked_at -> Nullable<Timestamptz>,
+        fail_count -> Int4,
     }
 }
 

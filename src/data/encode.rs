@@ -3,14 +3,10 @@ use std::{
     collections::HashSet,
     fmt::Write,
     process::{Command, Output, Stdio},
-    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
-use diesel::{
-    BoolExpressionMethods, NullableExpressionMethods, OptionalExtension, QueryDsl,
-    sql_types::{Text, VarChar},
-};
+use diesel::{BoolExpressionMethods, NullableExpressionMethods, QueryDsl, sql_types::Text};
 use diesel_async::{RunQueryDsl, scoped_futures::ScopedFutureExt};
 use futures::{future::try_join_all, ready};
 use itertools::Itertools;
@@ -19,16 +15,14 @@ use regex::Regex;
 use rusty_pool::ThreadPool;
 use s3::Bucket;
 use serde::Deserialize;
-use tokio::{
-    sync::{Mutex, Semaphore},
-    task::JoinHandle,
-};
+use tokio::{sync::Semaphore, task::JoinHandle};
 use uuid::Uuid;
 
 use lazy_static::lazy_static;
 
 use crate::error::TransactionRuntimeError;
 use crate::tag::auto_matching::apply_auto_tags_for_post;
+use crate::task::LockedObjectsTaskSentinel;
 use crate::{
     CONCURRENT_VIDEO_TRANSCODE_LIMIT, acquire_db_connection,
     diesel::ExpressionMethods,
@@ -152,7 +146,7 @@ pub async fn generate_hls_playlist(
             .await
             .map_err(|_| Error::CancellationError)?;
 
-        match LockedObjectTaskSentinel::new(
+        match LockedObjectsTaskSentinel::acquire(
             "hls_locked_at",
             "hls_master_playlist",
             source_object_key.clone(),
@@ -586,7 +580,7 @@ pub async fn generate_thumbnail(
         let _locked_object_task_sentinel = if thumbnail_lock_acquired {
             None
         } else {
-            match LockedObjectTaskSentinel::new(
+            match LockedObjectsTaskSentinel::acquire(
                 "thumbnail_locked_at",
                 "thumbnail_object_key",
                 source_object_key.clone(),
@@ -890,7 +884,7 @@ pub async fn load_object_metadata(
     let _locked_object_task_sentinel = if metadata_lock_acquired {
         None
     } else {
-        match LockedObjectTaskSentinel::new_with_condition(
+        match LockedObjectsTaskSentinel::acquire_with_condition(
             "metadata_locked_at",
             "NOT EXISTS(SELECT * FROM s3_object_metadata WHERE object_key = s3_object.object_key AND loaded)",
             source_object_key.clone(),
@@ -1264,17 +1258,17 @@ pub async fn load_object_metadata(
                         &s3_object_metadata.object_key
                     );
                 }
+            }
 
-                let related_posts = post::table
-                    .select(post::pk)
-                    .filter(post::s3_object.eq(&s3_object_metadata.object_key))
-                    .load::<i64>(connection)
-                    .await?;
+            let related_posts = post::table
+                .select(post::pk)
+                .filter(post::s3_object.eq(&s3_object_metadata.object_key))
+                .load::<i64>(connection)
+                .await?;
 
-                for post_pk in related_posts {
-                    if let Err(e) = apply_auto_tags_for_post(post_pk, connection).await {
-                        log::error!("Failed to apply auto tags for post {post_pk} after {} object metadata extraction: {e}", &s3_object_metadata.object_key);
-                    }
+            for post_pk in related_posts {
+                if let Err(e) = apply_auto_tags_for_post(post_pk, connection).await {
+                    log::error!("Failed to apply auto tags for post {post_pk} after {} object metadata extraction: {e}", &s3_object_metadata.object_key);
                 }
             }
             Ok(s3_object_metadata)
@@ -1917,113 +1911,6 @@ fn upload_tokio_file(
                 response_status: res,
             })
         })
-}
-
-struct LockedObjectTaskSentinel {
-    lock_column: &'static str,
-    object_key: String,
-    refresh_task_join_handle: JoinHandle<()>,
-    update_mutex: Arc<Mutex<()>>,
-}
-
-impl LockedObjectTaskSentinel {
-    /// Try to acquire a hls_lock or thumbnail_lock, returning `None` if already locked
-    async fn new(
-        lock_column: &'static str,
-        locked_column: &'static str,
-        object_key: String,
-    ) -> Result<Option<Self>, Error> {
-        Self::new_with_condition(lock_column, &format!("{locked_column} IS NULL"), object_key).await
-    }
-
-    async fn new_with_condition(
-        lock_column: &'static str,
-        condition: &str,
-        object_key: String,
-    ) -> Result<Option<Self>, Error> {
-        let mut connection = acquire_db_connection().await?;
-        let update_result = diesel::sql_query(format!(
-            "UPDATE s3_object SET {lock_column} = NOW() WHERE object_key = $1 AND {lock_column} IS NULL AND {condition} RETURNING *",
-        ))
-        .bind::<VarChar, _>(&object_key)
-        .get_result::<S3Object>(&mut connection)
-        .await
-        .optional()?;
-
-        if update_result.is_none() {
-            return Ok(None);
-        }
-
-        let key_to_refresh = object_key.clone();
-        let update_mutex = Arc::new(Mutex::new(()));
-        let background_mutex = update_mutex.clone();
-        let refresh_task_join_handle = tokio::spawn(async move {
-            // refresh lock every 15 minutes
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60 * 15)).await;
-                let _mutex_guard = background_mutex.lock().await;
-                match acquire_db_connection().await {
-                    Ok(mut connection) => {
-                        if let Err(e) = diesel::sql_query(format!(
-                            "UPDATE s3_object SET {} = NOW() WHERE object_key = $1",
-                            lock_column
-                        ))
-                        .bind::<VarChar, _>(&key_to_refresh)
-                        .execute(&mut connection)
-                        .await
-                        {
-                            log::error!(
-                                "Failed to refresh {lock_column} for object {}: {e}",
-                                &key_to_refresh
-                            );
-                        }
-                    }
-                    Err(e) => log::error!(
-                        "Failed to refresh {lock_column} for object {}: {e}",
-                        &key_to_refresh
-                    ),
-                }
-            }
-        });
-
-        Ok(Some(Self {
-            lock_column,
-            object_key,
-            refresh_task_join_handle,
-            update_mutex,
-        }))
-    }
-}
-
-impl Drop for LockedObjectTaskSentinel {
-    fn drop(&mut self) {
-        self.refresh_task_join_handle.abort();
-        let update_mutex = self.update_mutex.clone();
-        let object_key = std::mem::take(&mut self.object_key);
-        let lock_column = self.lock_column;
-        tokio::spawn(async move {
-            let _update_mutex = update_mutex.lock().await;
-            let mut connection = match acquire_db_connection().await {
-                Ok(connection) => connection,
-                Err(e) => {
-                    log::error!("Could not unlock object {}: {e}", &object_key);
-                    return;
-                }
-            };
-
-            let res = diesel::sql_query(format!(
-                "UPDATE s3_object SET {} = NULL WHERE object_key = $1",
-                lock_column
-            ))
-            .bind::<VarChar, _>(&object_key)
-            .execute(&mut connection)
-            .await;
-
-            if let Err(e) = res {
-                log::error!("Could not unlock object {}: {e}", &object_key);
-            }
-        });
-    }
 }
 
 struct SubmittedHlsTranscodingSentinel<'a> {

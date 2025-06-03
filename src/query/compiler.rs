@@ -227,9 +227,8 @@ fn build_sql_string(
         .from_table_override
         .unwrap_or(query_parameters.base_table_name);
 
+    apply_ctes(&mut sql_query, &ctes)?;
     if query_parameters.include_full_count {
-        apply_ctes(&mut sql_query, &ctes)?;
-
         if ctes.is_empty() {
             sql_query.push_str("WITH ");
         } else {
@@ -258,7 +257,11 @@ fn build_sql_string(
         sql_query.push_str(&query_parameters.select_statements.join(", "));
         sql_query.push_str(", (SELECT full_count FROM countCte)");
     } else {
-        sql_query.push_str("SELECT ");
+        if ctes.is_empty() {
+            sql_query.push_str("SELECT ");
+        } else {
+            sql_query.push_str(" SELECT ");
+        }
         sql_query.push_str(&query_parameters.select_statements.join(", "));
     }
 

@@ -1741,6 +1741,8 @@ pub struct ApplyAutoTagsTask {
     pub tag_category_to_apply: Option<String>,
     pub post_to_apply: Option<i64>,
     pub post_collection_to_apply: Option<i64>,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub fail_count: i32,
 }
 
 #[derive(Clone, Debug, Insertable)]

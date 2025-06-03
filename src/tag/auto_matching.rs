@@ -11,6 +11,7 @@ use crate::query::compiler::{Junction, compile_conditions};
 use crate::query::functions::evaluate_tag_auto_match_condition;
 use crate::query::{QueryParametersFilter, prepare_query_parameters};
 use crate::schema::{apply_auto_tags_task, post_collection_tag, post_tag, tag, tag_category};
+use crate::task::LockedObjectsTaskSentinel;
 use crate::util::NOT_BLANK_REGEX;
 use crate::{acquire_db_connection, run_serializable_transaction};
 use diesel::dsl::not;
@@ -111,22 +112,60 @@ pub fn spawn_apply_auto_tags_task(task: ApplyAutoTagsTask) {
         let connection = acquire_db_connection().await;
         match connection {
             Ok(mut connection) => {
-                let res = run_serializable_transaction(&mut connection, |connection| async {
-                    let delete_task_res = diesel::delete(apply_auto_tags_task::table)
-                        .filter(apply_auto_tags_task::pk.eq(task.pk))
-                        .execute(connection)
-                        .await?;
-
-                    if delete_task_res == 0 {
-                        log::info!("Aborting task apply_auto_tags_task because task {:?} has already been deleted", &task);
-                        return Ok(());
+                let sentinel = LockedObjectsTaskSentinel::acquire_with_values(
+                    "apply_auto_tags_task",
+                    "pk",
+                    "locked_at",
+                    "true",
+                    task.pk,
+                )
+                .await;
+                let _sentinel = match sentinel {
+                    Ok(Some(sentinel)) => sentinel,
+                    Ok(None) => {
+                        log::info!(
+                            "Aborting task apply_auto_tags_task because task {:?} has already been locked",
+                            &task
+                        );
+                        return;
                     }
-                    // scheduled task deleted successfully, meaning no other node has claimed the work, proceed to run task here
+                    Err(e) => {
+                        log::error!(
+                            "Failed to acquire LockedObjectsTaskSentinel for apply_auto_tags_task {}: {e}",
+                            task.pk
+                        );
+                        return;
+                    }
+                };
 
-                    run_apply_auto_tags_task(&task, connection).await
-                }.scope_boxed()).await;
+                let res = run_serializable_transaction(&mut connection, |connection| {
+                    async { run_apply_auto_tags_task(&task, connection).await }.scope_boxed()
+                })
+                .await;
                 if let Err(e) = res {
                     log::error!("Failed to apply auto tags for task {:?}: {e}", &task);
+                    let res = diesel::update(apply_auto_tags_task::table)
+                        .filter(apply_auto_tags_task::pk.eq(task.pk))
+                        .set(
+                            apply_auto_tags_task::fail_count
+                                .eq(apply_auto_tags_task::fail_count + 1),
+                        )
+                        .execute(&mut connection)
+                        .await;
+                    if let Err(e) = res {
+                        log::error!(
+                            "Failed to increment fail_count for apply_auto_tags_task {}: {e}",
+                            task.pk
+                        );
+                    }
+                } else {
+                    let delete_task_res = diesel::delete(apply_auto_tags_task::table)
+                        .filter(apply_auto_tags_task::pk.eq(task.pk))
+                        .execute(&mut connection)
+                        .await;
+                    if let Err(e) = delete_task_res {
+                        log::error!("Failed to delete apply_auto_tags_task {}: {e}", task.pk);
+                    }
                 }
             }
             Err(e) => {

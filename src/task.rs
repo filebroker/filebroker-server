@@ -8,7 +8,7 @@ use std::{
 
 use chrono::Utc;
 use diesel::{
-    OptionalExtension, QueryDsl,
+    QueryDsl,
     sql_types::{Array, VarChar},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
@@ -182,7 +182,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                 relevant_objects
                     .iter()
                     .map(|o| o.object_key.clone())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<String>>(),
                 &tokio_handle,
             ).await;
 
@@ -310,7 +310,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                 relevant_objects
                     .iter()
                     .map(|o| o.object_key.clone())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<String>>(),
                 &tokio_handle,
             ).await;
 
@@ -437,7 +437,7 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
                 relevant_objects
                     .iter()
                     .map(|o| o.object_key.clone())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<String>>(),
                 &tokio_handle,
             ).await;
 
@@ -592,7 +592,7 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
                 deferred_deletions
                     .iter()
                     .map(|o| o.object_key.clone())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<String>>(),
                 &tokio_handle,
             ).await;
 
@@ -667,78 +667,186 @@ pub fn run_apply_auto_tags_tasks(tokio_handle: Handle) -> Result<(), Error> {
             }
 
             let mut connection = acquire_db_connection().await?;
-            let executed_task = run_serializable_transaction(&mut connection, |connection| {
-                async {
-                    let apply_auto_tags_task = diesel::sql_query(
-                        "
-                        DELETE FROM apply_auto_tags_task
-                        WHERE pk = (
-                            SELECT pk FROM apply_auto_tags_task
-                            ORDER BY pk ASC
-                            FOR UPDATE SKIP LOCKED
-                            LIMIT 1
-                        )
-                        RETURNING *;
-                    ",
+            let tasks = run_serializable_transaction(&mut connection, |connection| async move {
+                diesel::sql_query("
+                    WITH relevant_apply_auto_tags_tasks AS(
+                        SELECT * FROM apply_auto_tags_task
+                        WHERE locked_at IS NULL
+                        AND fail_count < 3
+                        ORDER BY fail_count ASC NULLS FIRST, creation_timestamp ASC
+                        LIMIT 5
                     )
-                    .get_result::<ApplyAutoTagsTask>(connection)
-                    .await
-                    .optional()
-                    .map_err(retry_on_serialization_failure)?;
+                    UPDATE apply_auto_tags_task SET locked_at = NOW() WHERE locked_at IS NULL AND pk IN(SELECT pk FROM relevant_apply_auto_tags_tasks) RETURNING *;
+                ")
+                .load::<ApplyAutoTagsTask>(connection)
+                .await
+                .map_err(retry_on_serialization_failure)
+            }.scope_boxed()).await?;
 
-                    if let Some(ref apply_auto_tags_task) = apply_auto_tags_task {
-                        if let Err(e) =
-                            run_apply_auto_tags_task(apply_auto_tags_task, connection).await
-                        {
-                            log::error!(
-                                "Failed to run apply_auto_tags_task {:?}: {e}",
-                                apply_auto_tags_task
-                            );
-                        }
-                    }
+            if tasks.is_empty() {
+                break;
+            }
 
-                    Ok(apply_auto_tags_task)
+            log::info!("Found {} apply_auto_tags_tasks to run", tasks.len());
+
+            let _sentinel = LockedObjectsTaskSentinel::new_with_values(
+                "locked_at",
+                "apply_auto_tags_task",
+                "pk",
+                tasks.iter().map(|t| t.pk).collect::<Vec<i64>>(),
+                &tokio_handle,
+            ).await;
+
+            for task in tasks {
+                if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                    log::warn!("Stopping task run_apply_auto_tags_tasks because the task pool is shutting down");
+                    return Ok(());
                 }
-                .scope_boxed()
-            })
-            .await?;
 
-            if let Some(apply_auto_tags_task) = executed_task {
-                // ensure task is actually deleted, if transaction did not return error and was committed by diesel,
-                // if there was a query error postgres will roll back
-                diesel::delete(apply_auto_tags_task::table)
-                    .filter(apply_auto_tags_task::pk.eq(apply_auto_tags_task.pk))
-                    .execute(&mut connection)
-                    .await?;
-            } else {
-                break Ok(());
+                let task_to_run = task.clone();
+                let res = run_serializable_transaction(&mut connection, |connection| async move{
+                    run_apply_auto_tags_task(&task_to_run, connection).await
+                }.scope_boxed()).await;
+
+                if let Err(e) = res {
+                    log::error!(
+                        "Failed to run apply_auto_tags_task {:?}: {e}",
+                        task
+                    );
+                    let res = diesel::update(apply_auto_tags_task::table)
+                        .filter(apply_auto_tags_task::pk.eq(task.pk))
+                        .set(
+                            apply_auto_tags_task::fail_count
+                                .eq(apply_auto_tags_task::fail_count + 1),
+                        )
+                        .execute(&mut connection)
+                        .await;
+                    if let Err(e) = res {
+                        log::error!(
+                            "Failed to increment fail_count for apply_auto_tags_task {}: {e}",
+                            task.pk
+                        );
+                    }
+                } else {
+                    let delete_task_res = diesel::delete(apply_auto_tags_task::table)
+                        .filter(apply_auto_tags_task::pk.eq(task.pk))
+                        .execute(&mut connection)
+                        .await;
+                    if let Err(e) = delete_task_res {
+                        log::error!("Failed to delete apply_auto_tags_task {}: {e}", task.pk);
+                    }
+                }
             }
         }
+
+        Ok(())
     })
 }
 
-struct LockedObjectsTaskSentinel {
-    lock_column: &'static str,
-    table_name: &'static str,
-    key_column: &'static str,
-    object_keys: Vec<String>,
-    refresh_task_join_handle: JoinHandle<()>,
-    update_mutex: Arc<Mutex<()>>,
+pub trait RustTypeToSqlType:
+    diesel::serialize::ToSql<Self::Sql, diesel::pg::Pg> + Clone + Sized + Send + Sync + 'static
+where
+    diesel::pg::Pg: diesel::sql_types::HasSqlType<Self::Sql>,
+{
+    type Sql: diesel::query_builder::QueryId + diesel::sql_types::SqlType + Send + 'static;
 }
 
-impl LockedObjectsTaskSentinel {
-    async fn new(
+impl RustTypeToSqlType for String {
+    type Sql = VarChar;
+}
+
+impl RustTypeToSqlType for i32 {
+    type Sql = diesel::sql_types::Integer;
+}
+
+impl RustTypeToSqlType for i64 {
+    type Sql = diesel::sql_types::BigInt;
+}
+
+pub struct LockedObjectsTaskSentinel<T: RustTypeToSqlType>
+where
+    diesel::pg::Pg: diesel::sql_types::HasSqlType<T::Sql>,
+{
+    pub lock_column: &'static str,
+    pub table_name: &'static str,
+    pub key_column: &'static str,
+    pub object_keys: Vec<T>,
+    pub refresh_task_join_handle: JoinHandle<()>,
+    pub update_mutex: Arc<Mutex<()>>,
+}
+
+impl<T> LockedObjectsTaskSentinel<T>
+where
+    T: RustTypeToSqlType,
+    diesel::pg::Pg: diesel::sql_types::HasSqlType<T::Sql>,
+{
+    pub async fn acquire(
         lock_column: &'static str,
-        object_keys: Vec<String>,
+        locked_column: &'static str,
+        object_key: T,
+    ) -> Result<Option<Self>, Error> {
+        Self::acquire_with_condition(lock_column, &format!("{locked_column} IS NULL"), object_key)
+            .await
+    }
+
+    pub async fn acquire_with_condition(
+        lock_column: &'static str,
+        condition: &str,
+        object_key: T,
+    ) -> Result<Option<Self>, Error> {
+        Self::acquire_with_values(
+            "s3_object",
+            "object_key",
+            lock_column,
+            condition,
+            object_key,
+        )
+        .await
+    }
+
+    pub async fn acquire_with_values(
+        table_name: &'static str,
+        key_column: &'static str,
+        lock_column: &'static str,
+        condition: &str,
+        object_key: T,
+    ) -> Result<Option<Self>, Error> {
+        let mut connection = acquire_db_connection().await?;
+        let update_result = diesel::sql_query(format!(
+                "UPDATE {table_name} SET {lock_column} = NOW() WHERE {key_column} = $1 AND {lock_column} IS NULL AND {condition}",
+            ))
+            .bind::<<T as RustTypeToSqlType>::Sql, _>(&object_key)
+            .execute(&mut connection)
+            .await?;
+
+        if update_result == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(
+            Self::new_with_values(
+                lock_column,
+                table_name,
+                key_column,
+                vec![object_key],
+                &Handle::current(),
+            )
+            .await,
+        ))
+    }
+
+    pub async fn new(
+        lock_column: &'static str,
+        object_keys: Vec<T>,
         tokio_handle: &Handle,
     ) -> Self {
         Self::new_for_table(lock_column, "s3_object", object_keys, tokio_handle).await
     }
 
-    async fn new_for_table(
+    pub async fn new_for_table(
         lock_column: &'static str,
         table_name: &'static str,
-        object_keys: Vec<String>,
+        object_keys: Vec<T>,
         tokio_handle: &Handle,
     ) -> Self {
         Self::new_with_values(
@@ -751,27 +859,28 @@ impl LockedObjectsTaskSentinel {
         .await
     }
 
-    async fn new_with_values(
+    pub async fn new_with_values(
         lock_column: &'static str,
         table_name: &'static str,
         key_column: &'static str,
-        object_keys: Vec<String>,
+        object_keys: Vec<T>,
         tokio_handle: &Handle,
     ) -> Self {
         let keys_to_refresh = object_keys.clone();
         let update_mutex = Arc::new(Mutex::new(()));
         let background_mutex = update_mutex.clone();
         let refresh_task_join_handle = tokio_handle.spawn(async move {
-            // refresh lock every 15 minutes
+            // refresh lock every minute
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60 * 15)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 let _mutex_guard = background_mutex.lock().await;
+                log::debug!("LockedObjectsTaskSentinel: Refreshing lock {lock_column} on {table_name} for key {key_column} in {:?}", &keys_to_refresh);
                 match acquire_db_connection().await {
                     Ok(mut connection) => {
                         if let Err(e) = diesel::sql_query(format!(
-                            "UPDATE {table_name} SET {lock_column} = NOW() WHERE {key_column} = ANY($1)"
-                        ))
-                            .bind::<Array<VarChar>, _>(&keys_to_refresh)
+                                "UPDATE {table_name} SET {lock_column} = NOW() WHERE {key_column} = ANY($1)"
+                            ))
+                            .bind::<Array<<T as RustTypeToSqlType>::Sql>, _>(&keys_to_refresh)
                             .execute(&mut connection)
                             .await
                         {
@@ -794,7 +903,11 @@ impl LockedObjectsTaskSentinel {
     }
 }
 
-impl Drop for LockedObjectsTaskSentinel {
+impl<T> Drop for LockedObjectsTaskSentinel<T>
+where
+    T: RustTypeToSqlType,
+    diesel::pg::Pg: diesel::sql_types::HasSqlType<T::Sql>,
+{
     fn drop(&mut self) {
         self.refresh_task_join_handle.abort();
         let update_mutex = self.update_mutex.clone();
@@ -804,6 +917,10 @@ impl Drop for LockedObjectsTaskSentinel {
         let lock_column = self.lock_column;
         tokio::spawn(async move {
             let _update_mutex = update_mutex.lock().await;
+            log::debug!(
+                "LockedObjectsTaskSentinel: Releasing lock {lock_column} on {table_name} for key {key_column} in {:?}",
+                &object_keys
+            );
             let mut connection = match acquire_db_connection().await {
                 Ok(connection) => connection,
                 Err(e) => {
@@ -815,7 +932,7 @@ impl Drop for LockedObjectsTaskSentinel {
             let res = diesel::sql_query(format!(
                 "UPDATE {table_name} SET {lock_column} = NULL WHERE {key_column} = ANY($1)",
             ))
-            .bind::<Array<VarChar>, _>(&object_keys)
+            .bind::<Array<<T as RustTypeToSqlType>::Sql>, _>(&object_keys)
             .execute(&mut connection)
             .await;
 
