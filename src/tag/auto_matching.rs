@@ -349,7 +349,7 @@ pub async fn find_auto_tags_for_collection(
     let tags = tag::table
         .filter(evaluate_tag_auto_match_condition(
             tag::compiled_auto_match_condition_collection,
-            format!("post_collection_item.pk = {post_collection_pk}"),
+            format!("post_collection.pk = {post_collection_pk}"),
         ))
         .load::<Tag>(connection)
         .await
