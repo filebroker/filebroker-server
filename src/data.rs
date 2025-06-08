@@ -110,9 +110,7 @@ pub async fn upload_handler(
                 parsed_content_type.to_string()
             };
 
-            let async_read = field
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-                .into_async_read();
+            let async_read = field.map_err(std::io::Error::other).into_async_read();
 
             let reader = s3utils::FileReader {
                 async_read,

@@ -922,10 +922,9 @@ fn load_private_key(key_path: &str) -> io::Result<PrivateKeyDer<'static>> {
         rustls_pemfile::rsa_private_keys(&mut reader).collect::<Vec<_>>();
 
     if keys.len() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            String::from("Expected a single private key"),
-        ));
+        return Err(io::Error::other(String::from(
+            "Expected a single private key",
+        )));
     }
 
     keys.pop().unwrap().map(|key| key.into())

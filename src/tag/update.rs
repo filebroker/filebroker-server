@@ -92,7 +92,7 @@ pub async fn upsert_tag_handler(
 
                 let (tag, _, apply_auto_tags_task) = if inserted {
                     if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
-                        if parent_pks.iter().any(|parent_pk| *parent_pk == tag.pk) {
+                        if parent_pks.contains(&tag.pk) {
                             return Err(TransactionRuntimeError::Rollback(
                                 Error::InvalidRequestInputError(format!(
                                     "Cannot set tag {} as its own parent",
@@ -115,7 +115,7 @@ pub async fn upsert_tag_handler(
 
                     if let Some(ref alias_pks) = upsert_tag_request.alias_pks {
                         if !alias_pks.is_empty() {
-                            if alias_pks.iter().any(|alias_pk| *alias_pk == tag.pk) {
+                            if alias_pks.contains(&tag.pk) {
                                 return Err(TransactionRuntimeError::Rollback(
                                     Error::InvalidRequestInputError(format!(
                                         "Cannot set tag {} as an alias of itself",
@@ -419,10 +419,7 @@ pub async fn update_tag(
     if let Some(ref mut added_parent_pks) = added_parent_pks {
         added_parent_pks.retain(|tag_pk| !curr_parent_pks.contains(tag_pk));
         if !added_parent_pks.is_empty() {
-            if added_parent_pks
-                .iter()
-                .any(|parent_pk| *parent_pk == tag.pk)
-            {
+            if added_parent_pks.contains(&tag.pk) {
                 return Err(TransactionRuntimeError::Rollback(
                     Error::InvalidRequestInputError(format!(
                         "Cannot set tag {} as its own parent",
@@ -497,7 +494,7 @@ pub async fn update_tag(
     if let Some(ref mut added_alias_pks) = added_alias_pks {
         added_alias_pks.retain(|tag_pk| !curr_alias_pks.contains(tag_pk));
         if !added_alias_pks.is_empty() {
-            if added_alias_pks.iter().any(|alias_pk| *alias_pk == tag.pk) {
+            if added_alias_pks.contains(&tag.pk) {
                 return Err(TransactionRuntimeError::Rollback(
                     Error::InvalidRequestInputError(format!(
                         "Cannot set tag {} as an alias of itself",
