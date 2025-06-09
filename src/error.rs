@@ -332,8 +332,10 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
         let message = e.to_string();
         let error_code = e.error_code();
 
-        if let StatusCode::INTERNAL_SERVER_ERROR = status_code {
-            log::error!("Encountered internal server error: {}", e);
+        if status_code.is_server_error() {
+            log::error!("Encountered internal server error ({error_code}): {e}");
+        } else if status_code.is_client_error() {
+            log::warn!("Encountered client error ({error_code}): {e}");
         }
 
         let compilation_errors = if let Error::QueryCompilationError(_, errors) = e {
