@@ -687,6 +687,11 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(auth::with_user())
         .and_then(tag::history::rewind_tag_history_snapshot_handler);
 
+    let get_presigned_hls_playlist_route = warp::path("get-presigned-hls-playlist")
+        .and(warp::get())
+        .and(warp::filters::path::peek())
+        .and_then(data::get_presigned_hls_playlist_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -746,7 +751,8 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .or(create_tag_category_route)
         .or(update_tag_category_route)
         .or(get_tag_edit_history_route)
-        .or(rewind_tag_history_snapshot_handler);
+        .or(rewind_tag_history_snapshot_handler)
+        .or(get_presigned_hls_playlist_route);
 
     let filter = routes
         .recover(error::handle_rejection)

@@ -93,4 +93,6 @@ if you send your mails through an SMTP relay that manages DKIM for you this is r
 
 `FILEBROKER_PG_SSL_CERT_PATH` (optional, string): Path to the SSL certificate used for postgres connections, used in addition to the native certificate store. Meaningless if `FILEBROKER_PG_ENABLE_SSL` is not enabled.
 
+`FILEBROKER_PRESIGNED_GET_EXPIRATION_SECS` (optional, u32): Number of seconds after which S3 presigned get URLs expire. May be set to 0 to disable presigned get URLs entirely, forcing clients to always use filebroker's /get-object endpoint. Defaults to 28800 (8 hours).
+
 Note that CORS headers are only set when running debug binaries for development, for production you need to set up nginx.

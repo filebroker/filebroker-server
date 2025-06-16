@@ -31,6 +31,7 @@ jsonwebtoken = "9.3.0"
 lazy_static = "1.4.0"
 lettre = { version = "0.11.7", features = ["dkim"] }
 log = "0.4.17"
+m3u8-rs = "6.0.0"
 mime = "0.3.16"
 mime_guess = "2.0.4"
 mpart-async = "0.7.0"

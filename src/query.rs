@@ -104,6 +104,7 @@ macro_rules! load_and_report_missing_pks {
     }};
 }
 
+use crate::data::{PRESIGNED_GET_EXPIRATION_SECS, create_bucket};
 use crate::tag::TagUsage;
 pub(crate) use load_and_report_missing_pks;
 
@@ -263,7 +264,11 @@ pub struct PostDetailed {
     pub s3_object: S3Object,
     pub s3_object_metadata: S3ObjectMetadata,
     pub thumbnail_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s3_object_presigned_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_post: Option<PostWindowObject>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_post: Option<PostWindowObject>,
     #[serde(rename = "is_public")]
     pub public: bool,
@@ -344,6 +349,7 @@ pub async fn get_posts_handler(
             s3_object: post.s3_object,
             s3_object_metadata: post.s3_object_metadata,
             thumbnail_url: post.post.thumbnail_url,
+            s3_object_presigned_url: None,
             prev_post: None,
             next_post: None,
             public: post.post.public,
@@ -427,6 +433,7 @@ pub async fn get_post_handler(
         create_user,
         s3_object,
         s3_object_metadata,
+        broker,
         edit_user,
     } = post;
 
@@ -500,6 +507,43 @@ pub async fn get_post_handler(
         .await
         .map_err(Error::from)?;
 
+    let s3_object_presigned_url =
+        if *PRESIGNED_GET_EXPIRATION_SECS > 0 && broker.enable_presigned_get {
+            let now = std::time::Instant::now();
+            match create_bucket(
+                &broker.bucket,
+                &broker.endpoint,
+                &broker.access_key,
+                &broker.secret_key,
+                broker.is_aws_region,
+            )
+            .and_then(|bucket| {
+                bucket
+                    .presign_get(&s3_object.object_key, *PRESIGNED_GET_EXPIRATION_SECS, None)
+                    .map_err(Error::from)
+            }) {
+                Ok(presigned_url) => {
+                    log::debug!(
+                        "Generated presigned URL for post {} object {} after {}ms: {presigned_url}",
+                        post.pk,
+                        &s3_object.object_key,
+                        now.elapsed().as_millis()
+                    );
+                    Some(presigned_url)
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to generate presigned url for object {} of post {}: {e}",
+                        &s3_object.object_key,
+                        post.pk
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     Ok(warp::reply::json(&PostDetailed {
         pk: post.pk,
         data_url: post.data_url,
@@ -513,6 +557,7 @@ pub async fn get_post_handler(
         s3_object,
         s3_object_metadata,
         thumbnail_url: post.thumbnail_url,
+        s3_object_presigned_url,
         prev_post,
         next_post,
         public: post.public,

@@ -1,18 +1,17 @@
-use std::collections::{HashMap, HashSet};
-
 use bigdecimal::{BigDecimal, ToPrimitive};
-use chrono::Utc;
 use diesel::{
     BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
     dsl::{exists, max, not, sum},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{Stream, TryStreamExt};
+use lazy_static::lazy_static;
 use mime::Mime;
 use mpart_async::server::MultipartStream;
 use ring::digest;
 use s3::{Bucket, Region, creds::Credentials};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use url::Url;
 use uuid::Uuid;
 use validator::Validate;
@@ -43,6 +42,15 @@ pub mod down;
 pub mod encode;
 pub mod s3utils;
 pub mod up;
+
+lazy_static! {
+    pub static ref PRESIGNED_GET_EXPIRATION_SECS: u32 =
+        std::env::var("FILEBROKER_PRESIGNED_GET_EXPIRATION_SECS")
+            .map(|v| v
+                .parse::<u32>()
+                .expect("FILEBROKER_PRESIGNED_GET_EXPIRATION_SECS is not a valid u32"))
+            .unwrap_or(28800);// 8 hours
+}
 
 #[derive(Serialize)]
 pub struct UploadResponse {
@@ -171,6 +179,7 @@ pub async fn upload_handler(
                         s3_object,
                         s3_object_metadata,
                         thumbnail_url: post.thumbnail_url,
+                        s3_object_presigned_url: None,
                         prev_post: None,
                         next_post: None,
                         public: post.public,
@@ -295,6 +304,7 @@ pub async fn get_object_head_handler(
     } = down::get_object_response(range, object, bucket, None)?;
 
     let mut response_builder = Response::builder()
+        .status(200)
         .header("Content-Type", &content_type)
         .header("Accept-Ranges", "bytes")
         .header("Cache-Control", "max-age=31536000, immutable")
@@ -308,6 +318,111 @@ pub async fn get_object_head_handler(
         .status(response_status)
         .body(hyper::Body::empty())
         .map_err(|e| Error::SerialisationError(e.to_string()))?)
+}
+
+pub async fn get_presigned_hls_playlist_handler(
+    requested_path: Peek,
+) -> Result<impl Reply, Rejection> {
+    let object_key = requested_path.as_str();
+
+    if !object_key.ends_with(".m3u8") {
+        return Err(warp::reject::custom(Error::InvalidRequestInputError(
+            format!("Invalid path: {}, expected m3u8 file", object_key),
+        )));
+    }
+
+    let now = std::time::Instant::now();
+    let mut connection = acquire_db_connection().await?;
+    let (object, broker) = load_object(object_key, &mut connection).await?;
+    drop(connection);
+
+    if *PRESIGNED_GET_EXPIRATION_SECS == 0 || !broker.enable_presigned_get {
+        return Err(warp::reject::custom(Error::BadRequestError(String::from(
+            "Presigned get is disabled",
+        ))));
+    }
+
+    // reject files larger than 16MB as this is unrealistic for real HLS playlists and,
+    // since the whole file is loaded into memory, could be used as an attack vector
+    if object.size_bytes > 16 << 20 {
+        return Err(warp::reject::custom(Error::InternalError(String::from(
+            "Size of HLS playlist exceeds maximum of 16MB",
+        ))));
+    }
+
+    let bucket = create_bucket(
+        &broker.bucket,
+        &broker.endpoint,
+        &broker.access_key,
+        &broker.secret_key,
+        broker.is_aws_region,
+    )?;
+
+    let object_response = bucket.get_object(object_key).await.map_err(Error::from)?;
+    if object_response.status_code() >= 300 {
+        return Err(warp::reject::custom(Error::S3ResponseError(
+            object_response.status_code(),
+        )));
+    }
+
+    let mut response_builder = Response::builder()
+        .header("Content-Type", "application/vnd.apple.mpegurl")
+        .header("Accept-Ranges", "none")
+        .header("Cache-Control", "no-store");
+
+    if m3u8_rs::is_master_playlist(object_response.bytes()) {
+        // nothing needs to be done for master playlists as it only contains the relative file names for the media playlists,
+        // which will then be retrieved from the same path leading to this endpoint
+        log::debug!(
+            "Called get_presigned_hls_playlist_handler for master playlist {object_key}, returning master playlist as is (duration {}ms)",
+            now.elapsed().as_millis()
+        );
+        response_builder = response_builder.header("Content-Length", object_response.bytes().len());
+        Ok(response_builder
+            .body(Vec::from(object_response.bytes()))
+            .map_err(|e| Error::HyperError(e.to_string()))?)
+    } else {
+        match m3u8_rs::parse_media_playlist(object_response.bytes()) {
+            Ok((_, mut pl)) => {
+                let mut presigned_url_map = HashMap::<String, String>::new();
+                for segment in pl.segments.iter_mut() {
+                    if presigned_url_map.contains_key(&segment.uri) {
+                        segment.uri = presigned_url_map[&segment.uri].clone();
+                    } else {
+                        let object_path = if let Some(last_slash) = object_key.rfind('/') {
+                            let dir = &object_key[..=last_slash];
+                            format!("{}{}", dir, segment.uri)
+                        } else {
+                            segment.uri.to_string()
+                        };
+                        let presigned_url = bucket
+                            .presign_get(&object_path, *PRESIGNED_GET_EXPIRATION_SECS, None)
+                            .map_err(Error::from)?;
+                        log::debug!(
+                            "Generated presigned URL for {object_key} segment {object_path}: {presigned_url}"
+                        );
+                        presigned_url_map.insert(segment.uri.clone(), presigned_url.clone());
+                        segment.uri = presigned_url;
+                    }
+                }
+
+                let mut buff = Vec::with_capacity(object_response.bytes().len());
+                pl.write_to(&mut buff)
+                    .map_err(|e| Error::IoError(e.to_string()))?;
+
+                log::debug!(
+                    "Called get_presigned_hls_playlist_handler for media playlist {object_key}, returning media playlist with presigned URLs (duration {}ms)",
+                    now.elapsed().as_millis()
+                );
+
+                response_builder = response_builder.header("Content-Length", buff.len());
+                Ok(response_builder
+                    .body(buff)
+                    .map_err(|e| Error::HyperError(e.to_string()))?)
+            }
+            Err(e) => Err(warp::reject::custom(Error::M3U8ParseError(e.to_string()))),
+        }
+    }
 }
 
 #[derive(Deserialize, Validate)]
@@ -324,6 +439,7 @@ pub struct CreateBrokerRequest {
     pub secret_key: String,
     pub is_aws_region: bool,
     pub remove_duplicate_files: bool,
+    pub enable_presigned_get: Option<bool>,
 }
 
 pub async fn create_broker_handler(
@@ -376,8 +492,8 @@ pub async fn create_broker_handler(
             is_aws_region: create_broker_request.is_aws_region,
             remove_duplicate_files: create_broker_request.remove_duplicate_files,
             fk_owner: user.pk,
-            creation_timestamp: Utc::now(),
             hls_enabled: false,
+            enable_presigned_get: create_broker_request.enable_presigned_get.unwrap_or(true),
         })
         .get_result::<Broker>(&mut connection)
         .await

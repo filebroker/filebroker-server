@@ -361,6 +361,7 @@ pub async fn load_post_detailed(
         s3_object,
         s3_object_metadata,
         thumbnail_url: post.thumbnail_url,
+        s3_object_presigned_url: None,
         prev_post: None,
         next_post: None,
         public: post.public,

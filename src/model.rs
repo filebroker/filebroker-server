@@ -1186,13 +1186,16 @@ pub struct Broker {
     pub name: String,
     pub bucket: String,
     pub endpoint: String,
+    #[serde(skip_serializing)]
     pub access_key: String,
+    #[serde(skip_serializing)]
     pub secret_key: String,
     pub is_aws_region: bool,
     pub remove_duplicate_files: bool,
     pub fk_owner: i64,
     pub creation_timestamp: DateTime<Utc>,
     pub hls_enabled: bool,
+    pub enable_presigned_get: bool,
 }
 
 #[derive(Insertable)]
@@ -1206,8 +1209,8 @@ pub struct NewBroker {
     pub is_aws_region: bool,
     pub remove_duplicate_files: bool,
     pub fk_owner: i64,
-    pub creation_timestamp: DateTime<Utc>,
     pub hls_enabled: bool,
+    pub enable_presigned_get: bool,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, QueryableByName, Serialize)]

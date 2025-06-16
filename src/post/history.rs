@@ -85,6 +85,7 @@ pub async fn get_post_edit_history_handler(
         create_user: _,
         s3_object: _,
         s3_object_metadata: _,
+        broker: _,
         edit_user,
     } = perms::load_post_secured(post_pk, &mut connection, Some(&user)).await?;
     if !post.is_editable(Some(&user), &mut connection).await? {
@@ -475,6 +476,7 @@ pub async fn rewind_post_history_snapshot_handler(
                 create_user: _,
                 s3_object: _,
                 s3_object_metadata: _,
+                broker: _,
                 edit_user: _,
             } = perms::load_post_secured(post_snapshot.fk_post, connection, Some(&user)).await?;
             if !post.is_editable(Some(&user), connection).await? {

@@ -32,6 +32,7 @@ diesel::table! {
         fk_owner -> Int8,
         creation_timestamp -> Timestamptz,
         hls_enabled -> Bool,
+        enable_presigned_get -> Bool,
     }
 }
 

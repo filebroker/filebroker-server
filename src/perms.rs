@@ -163,6 +163,7 @@ pub struct PostJoined {
     pub create_user: UserPublic,
     pub s3_object: S3Object,
     pub s3_object_metadata: S3ObjectMetadata,
+    pub broker: Broker,
     pub edit_user: UserPublic,
 }
 
@@ -196,6 +197,7 @@ pub async fn load_post_secured(
         .inner_join(
             s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
         )
+        .inner_join(broker::table.on(broker::pk.eq(s3_object::fk_broker)))
         .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::pk.eq(post_pk).and(
@@ -216,7 +218,14 @@ pub async fn load_post_secured(
                         )))),
             ),
         )
-        .get_result::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
+        .get_result::<(
+            Post,
+            UserPublic,
+            S3Object,
+            S3ObjectMetadata,
+            Broker,
+            UserPublic,
+        )>(connection)
         .await
         .optional()?
         .ok_or(Error::InaccessibleObjectError(post_pk))
@@ -225,7 +234,8 @@ pub async fn load_post_secured(
             create_user: tuple.1,
             s3_object: tuple.2,
             s3_object_metadata: tuple.3,
-            edit_user: tuple.4,
+            broker: tuple.4,
+            edit_user: tuple.5,
         })
 }
 
@@ -292,6 +302,7 @@ pub async fn load_post_collection_item_secured(
                 .field(s3_object::object_key)
                 .eq(s3_object_metadata::object_key)),
         )
+        .inner_join(broker::table.on(broker::pk.eq(post_s3_object.field(s3_object::fk_broker))))
         .filter(
             post_collection_item::pk
                 .eq(post_collection_item_pk)
@@ -343,6 +354,7 @@ pub async fn load_post_collection_item_secured(
             UserPublic,
             Option<S3Object>,
             S3ObjectMetadata,
+            Broker,
         )>(connection)
         .await
         .optional()?
@@ -355,6 +367,7 @@ pub async fn load_post_collection_item_secured(
                 create_user: tuple.3,
                 s3_object: tuple.5,
                 s3_object_metadata: tuple.10,
+                broker: tuple.11,
                 edit_user: tuple.4,
             },
             post_collection: PostCollectionJoined {
@@ -382,6 +395,7 @@ pub async fn load_posts_secured(
         .inner_join(
             s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
         )
+        .inner_join(broker::table.on(broker::pk.eq(s3_object::fk_broker)))
         .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::pk.eq_any(post_pks).and(
@@ -402,7 +416,14 @@ pub async fn load_posts_secured(
                         )))),
             ),
         )
-        .load::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
+        .load::<(
+            Post,
+            UserPublic,
+            S3Object,
+            S3ObjectMetadata,
+            Broker,
+            UserPublic,
+        )>(connection)
         .await?;
 
     let found_pks = results.iter().map(|res| res.0.pk).collect::<HashSet<_>>();
@@ -419,7 +440,8 @@ pub async fn load_posts_secured(
                 create_user: tuple.1,
                 s3_object: tuple.2,
                 s3_object_metadata: tuple.3,
-                edit_user: tuple.4,
+                broker: tuple.4,
+                edit_user: tuple.5,
             })
             .collect::<Vec<_>>())
     } else {

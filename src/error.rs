@@ -115,6 +115,8 @@ pub enum Error {
     ReqwestError(String),
     #[error("Error occurred in child process: {0}")]
     ChildProcessError(String),
+    #[error("Failed to parse m3u8 playlist: {0}")]
+    M3U8ParseError(String),
 
     #[error("Received error response code from S3: {0}")]
     S3ResponseError(u16),
@@ -168,7 +170,8 @@ impl Error {
             | Error::IoError(_)
             | Error::InvalidUrlError(_)
             | Error::ReqwestError(_)
-            | Error::ChildProcessError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | Error::ChildProcessError(_)
+            | Error::M3U8ParseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::IllegalRangeError(..) => StatusCode::RANGE_NOT_SATISFIABLE,
             Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => {
                 StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -228,9 +231,10 @@ impl Error {
             Self::InvalidUrlError(_) => 500_013,
             Self::ReqwestError(_) => 500_014,
             Self::ChildProcessError(_) => 500_015,
+            Self::M3U8ParseError(_) => 500_016,
 
-            Self::S3ResponseError(_) => 600_001,
-            Self::S3ResponseErrorMsg(..) => 600_002,
+            Self::S3ResponseError(_) => 500_998,
+            Self::S3ResponseErrorMsg(..) => 500_999,
         }
     }
 
