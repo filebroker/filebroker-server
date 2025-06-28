@@ -431,6 +431,7 @@ pub async fn apply_auto_tag(
                     &tag.tag_name,
                     unmatched_post
                 );
+                return Err(e);
             }
         }
     }
@@ -456,6 +457,7 @@ pub async fn apply_auto_tag(
                     &tag.tag_name,
                     unmatched_collection
                 );
+                return Err(e);
             }
         }
     }
@@ -474,6 +476,7 @@ pub async fn apply_auto_tag(
                 &tag.tag_name,
                 post_pk
             );
+            return Err(e);
         }
     }
     log::debug!(
@@ -493,6 +496,7 @@ pub async fn apply_auto_tag(
                 &tag.tag_name,
                 post_collection_pk
             );
+            return Err(e);
         }
     }
 
@@ -636,6 +640,7 @@ pub async fn apply_tag_category_auto_tags(
 
         if let Err(e) = update_post(post_pk, &get_system_user(), request, connection).await {
             log::error!("Failed to apply auto tags for post {}: {e}", post_pk);
+            return Err(e);
         }
     }
     for (post_collection_pk, mut tag_auto_matches) in post_collection_tag_map {
@@ -679,6 +684,7 @@ pub async fn apply_tag_category_auto_tags(
                 "Failed to apply auto tags for collection {}: {e}",
                 post_collection_pk
             );
+            return Err(e);
         }
     }
 
