@@ -247,7 +247,9 @@ where
         match transaction_result {
             Err(TransactionRuntimeError::Retry(_)) if retry_count <= 10 => {
                 /* retry max 10 attempts */
-                log::debug!("Retrying transaction after serialization failure");
+                log::warn!(
+                    "Retrying transaction after serialization failure, constraint violation or other Retry Error"
+                );
             }
             Err(TransactionRuntimeError::Retry(e)) => break Err(e),
             Err(TransactionRuntimeError::Rollback(e)) => break Err(e),
