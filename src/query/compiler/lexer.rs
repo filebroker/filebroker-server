@@ -271,7 +271,8 @@ impl State {
                     return State {
                         conception_idx: pos,
                         state_type: StateType::IdentifierState(String::new()),
-                    };
+                    }
+                    .handle_char(c, pos, token_stream, log, true);
                 } else if char::is_ascii_digit(&c) {
                     return State {
                         conception_idx: pos,
