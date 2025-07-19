@@ -503,8 +503,7 @@ pub fn apply_ctes(sql_query: &mut String, ctes: &HashMap<String, Cte>) -> Result
     let cte_len = ctes.len();
     if cte_len > 50 {
         return Err(crate::Error::IllegalQueryInputError(format!(
-            "Exceeded maximum number of CTEs of 50 (recorded {}), too many tags supplied.",
-            cte_len
+            "Exceeded maximum number of CTEs of 50 (recorded {cte_len}), too many tags supplied."
         )));
     } else if cte_len > 0 {
         sql_query.push_str("WITH ");

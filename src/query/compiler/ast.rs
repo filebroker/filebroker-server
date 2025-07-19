@@ -340,7 +340,7 @@ impl Visitor for SemanticAnalysisVisitor {
         if return_type != Type::Boolean && return_type != Type::Null {
             log.errors.push(Error {
                 location,
-                msg: format!("Expressions used as statement must evaluate to a boolean value but got type {:?}", return_type)
+                msg: format!("Expressions used as statement must evaluate to a boolean value but got type {return_type:?}")
             });
         }
     }
@@ -539,8 +539,7 @@ impl Visitor for SemanticAnalysisVisitor {
             log.errors.push(Error {
                 location,
                 msg: format!(
-                    "Operator {:?} cannot be applied to unary expression of type {:?}",
-                    op, expression_type
+                    "Operator {op:?} cannot be applied to unary expression of type {expression_type:?}"
                 ),
             });
         }
@@ -557,7 +556,7 @@ impl Visitor for SemanticAnalysisVisitor {
         if !scope.get_attributes().contains_key(identifier) {
             log.errors.push(Error {
                 location,
-                msg: format!("No such attribute '{}'", identifier),
+                msg: format!("No such attribute '{identifier}'"),
             });
         }
     }
@@ -580,7 +579,7 @@ impl Visitor for SemanticAnalysisVisitor {
         } else {
             log.errors.push(Error {
                 location,
-                msg: format!("No such function '{}'", identifier),
+                msg: format!("No such function '{identifier}'"),
             });
         }
     }
@@ -603,7 +602,7 @@ impl Visitor for SemanticAnalysisVisitor {
         } else {
             log.errors.push(Error {
                 location,
-                msg: format!("No such modifier '{}'", identifier),
+                msg: format!("No such modifier '{identifier}'"),
             });
         }
     }
@@ -619,7 +618,7 @@ impl Visitor for SemanticAnalysisVisitor {
         if !scope.get_variables().contains_key(identifier) {
             log.errors.push(Error {
                 location,
-                msg: format!("No such variable '{}'", identifier),
+                msg: format!("No such variable '{identifier}'"),
             });
         }
     }

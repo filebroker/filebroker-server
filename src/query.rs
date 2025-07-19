@@ -183,10 +183,7 @@ pub async fn search_handler(
     query_parameters_filter: QueryParametersFilter,
 ) -> Result<impl Reply, Rejection> {
     query_parameters_filter.validate().map_err(|e| {
-        Error::InvalidRequestInputError(format!(
-            "Validation failed for QueryParametersFilter: {}",
-            e
-        ))
+        Error::InvalidRequestInputError(format!("Validation failed for QueryParametersFilter: {e}"))
     })?;
 
     let mut scope = scope
@@ -375,10 +372,7 @@ pub async fn get_post_handler(
     query_parameters_filter: QueryParametersFilter,
 ) -> Result<impl Reply, Rejection> {
     query_parameters_filter.validate().map_err(|e| {
-        Error::InvalidRequestInputError(format!(
-            "Validation failed for QueryParametersFilter: {}",
-            e
-        ))
+        Error::InvalidRequestInputError(format!("Validation failed for QueryParametersFilter: {e}"))
     })?;
 
     let mut connection = acquire_db_connection().await?;
@@ -463,7 +457,7 @@ pub async fn get_post_handler(
             if let Some(max_limit) = max_limit {
                 if limit > max_limit as i32 {
                     return Err(warp::reject::custom(Error::IllegalQueryInputError(
-                        format!("Limit '{}' exceeds maximum limit of {}.", limit, MAX_LIMIT),
+                        format!("Limit '{limit}' exceeds maximum limit of {MAX_LIMIT}."),
                     )));
                 }
             }
@@ -700,8 +694,7 @@ pub trait SearchQueryResultObject {
             if let Some(max_limit) = max_limit {
                 if limit > max_limit as i32 {
                     return Err(Error::IllegalQueryInputError(format!(
-                        "Limit '{}' exceeds maximum limit of {}.",
-                        limit, max_limit
+                        "Limit '{limit}' exceeds maximum limit of {max_limit}."
                     )));
                 }
             }
@@ -1332,7 +1325,7 @@ pub struct QueryCompilationError {
 
 pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
-        Error::InvalidRequestInputError(format!("Validation failed for AnalyzeQueryRequest: {}", e))
+        Error::InvalidRequestInputError(format!("Validation failed for AnalyzeQueryRequest: {e}"))
     })?;
 
     let mut log = Log { errors: Vec::new() };
@@ -1531,10 +1524,7 @@ fn find_matching_map_keys<T>(
         .into_iter()
         .take(10)
         .map(|key| QueryAutocompleteSuggestion {
-            text: format!(
-                "{}{}{}",
-                suggestion_type_prefix, key, suggestion_type_suffix
-            ),
+            text: format!("{suggestion_type_prefix}{key}{suggestion_type_suffix}"),
             display: String::from(*key),
             target_location,
             suggestion_type: QueryAutocompleteSuggestionType {

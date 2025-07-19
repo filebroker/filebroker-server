@@ -58,8 +58,7 @@ pub async fn upsert_tag_handler(
 ) -> Result<impl Reply, Rejection> {
     upsert_tag_request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for UpsertTagRequest: {}",
-            e
+            "Validation failed for UpsertTagRequest: {e}"
         )))
     })?;
 
@@ -305,8 +304,7 @@ pub async fn update_tag_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for UpdateTagRequest: {}",
-            e
+            "Validation failed for UpdateTagRequest: {e}"
         )))
     })?;
 
@@ -773,8 +771,7 @@ pub async fn update_tag_category_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for TagCategoryUpdateRequest: {}",
-            e
+            "Validation failed for TagCategoryUpdateRequest: {e}"
         )))
     })?;
 

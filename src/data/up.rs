@@ -220,14 +220,14 @@ where
         )
         .await
         {
-            log::error!("Failed to generate thumbnail for '{path}': {}", e);
+            log::error!("Failed to generate thumbnail for '{path}': {e}");
         }
     });
 
     let path = s3_object.object_key.clone();
     tokio::spawn(async move {
         if let Err(e) = load_object_metadata(path.clone(), false).await {
-            log::error!("Failed to load metadata for '{path}': {}", e);
+            log::error!("Failed to load metadata for '{path}': {e}");
         }
     });
 
@@ -247,7 +247,7 @@ where
             )
             .await
             {
-                log::error!("Error occurred transcoding video '{path}' to HLS: {}", e);
+                log::error!("Error occurred transcoding video '{path}' to HLS: {e}");
             }
         });
     }

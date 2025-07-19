@@ -646,10 +646,7 @@ pub async fn generate_thumbnail(
             ]
         };
 
-        log::info!(
-            "Spawning ffmpeg process to generate thumbnail for {}",
-            source_object_key
-        );
+        log::info!("Spawning ffmpeg process to generate thumbnail for {source_object_key}");
         let process = Command::new("ffmpeg")
             .args(args)
             .stdout(Stdio::piped())
@@ -687,7 +684,7 @@ pub async fn generate_thumbnail(
         }
 
         if thumb_bytes.is_empty() {
-            log::warn!("Received 0 bytes for thumbnail {}", file_id);
+            log::warn!("Received 0 bytes for thumbnail {file_id}");
             return Ok(());
         }
 
@@ -738,12 +735,9 @@ pub async fn generate_thumbnail(
 
                 if update_count == 0 {
                     // object no longer exists, delete thumb
-                    log::info!("Created thumbnail for object {} that no longer exists, deleting created thumbnail {}", source_object_key, thumb_path);
+                    log::info!("Created thumbnail for object {source_object_key} that no longer exists, deleting created thumbnail {thumb_path}");
                     return Err(TransactionRuntimeError::Rollback(Error::QueryError(
-                        format!(
-                            "Source object {} for thumbnail no longer exists",
-                            source_object_key
-                        ),
+                        format!("Source object {source_object_key} for thumbnail no longer exists"),
                     )));
                 }
 
@@ -759,17 +753,14 @@ pub async fn generate_thumbnail(
                 "Failed to await and persist thumbnail object to db with error: {e}. Going to delete created object"
             );
             if let Err(e) = bucket.delete_object(&thumb_path).await {
-                log::error!("Failed to delete obsolete thumbnail {}: {}", thumb_path, e);
+                log::error!("Failed to delete obsolete thumbnail {thumb_path}: {e}");
             }
             return Err(e);
         }
 
         Ok(())
     } else {
-        log::debug!(
-            "Not creating thumbnail for unsupported content type '{}'",
-            content_type
-        );
+        log::debug!("Not creating thumbnail for unsupported content type '{content_type}'");
         Ok(())
     }
 }
@@ -1038,10 +1029,7 @@ pub async fn load_object_metadata(
                     let minute = &caps[5];
                     let second = caps.get(6).map_or(":00", |m| m.as_str()); // Fallback to ":00" if $6 / seconds is not present
                     let timezone = caps.get(7).map_or("Z", |m| m.as_str()); // Fallback to Z if $7 / timezone is not present
-                    format!(
-                        "{}-{}-{} {}:{}{}{}",
-                        year, month, day, hour, minute, second, timezone
-                    )
+                    format!("{year}-{month}-{day} {hour}:{minute}{second}{timezone}")
                 })
                 .to_string();
             let parsed_date = DateTime::parse_from_str(&postgres_date, "%Y-%m-%d %H:%M:%S%.f%#z")?;
@@ -1091,7 +1079,7 @@ pub async fn load_object_metadata(
             Err(e) => {
                 if let Some(ffprobe_duration) = duration_secs {
                     let pg_interval = diesel::sql_query("SELECT $1::interval AS pg_interval")
-                        .bind::<Text, _>(format!("{}s", ffprobe_duration))
+                        .bind::<Text, _>(format!("{ffprobe_duration}s"))
                         .get_result::<PgIntervalQuery>(&mut connection)
                         .await;
                     match pg_interval {
@@ -1632,8 +1620,7 @@ async fn persist_hls_transcode_results(
                 // source object no longer exists, delete HLS transcode
                 return Err(TransactionRuntimeError::Rollback(Error::QueryError(
                     format!(
-                        "Source object {} for HLS transcoding no longer exists",
-                        source_object_key
+                        "Source object {source_object_key} for HLS transcoding no longer exists"
                     ),
                 )));
             }
@@ -1736,7 +1723,7 @@ async fn get_object_duration(object_url: &str) -> Result<ObjectDuration, Error> 
     let ffprobe_output = spawn_blocking(|| {
         process
             .wait_with_output()
-            .map_err(|e| Error::FfmpegProcessError(format!("ffprobe failed: {}", e)))
+            .map_err(|e| Error::FfmpegProcessError(format!("ffprobe failed: {e}")))
     })
     .await?;
 

@@ -28,7 +28,7 @@ fn item_plural(f: &mut fmt::Formatter, started: &mut bool, name: &str, value: u6
         if *started {
             f.write_str(" ")?;
         }
-        write!(f, "{}{}", value, name)?;
+        write!(f, "{value}{name}")?;
         if value > 1 {
             f.write_str("s")?;
         }
@@ -42,7 +42,7 @@ fn item(f: &mut fmt::Formatter, started: &mut bool, name: &str, value: u32) -> f
         if *started {
             f.write_str(" ")?;
         }
-        write!(f, "{}{}", value, name)?;
+        write!(f, "{value}{name}")?;
         *started = true;
     }
     Ok(())
@@ -58,7 +58,7 @@ fn item_if_not_started(
         if *started {
             f.write_str(" ")?;
         }
-        write!(f, "{}{}", value, name)?;
+        write!(f, "{value}{name}")?;
         *started = true;
     }
     Ok(())

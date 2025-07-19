@@ -412,8 +412,7 @@ pub async fn edit_post_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for EditPostRequest: {}",
-            e
+            "Validation failed for EditPostRequest: {e}"
         )))
     })?;
 
@@ -651,8 +650,7 @@ pub async fn edit_post_collection_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for EditPostCollectionRequest: {}",
-            e
+            "Validation failed for EditPostCollectionRequest: {e}"
         )))
     })?;
 

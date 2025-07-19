@@ -36,8 +36,7 @@ pub async fn create_tags_handler(
 ) -> Result<impl Reply, Rejection> {
     create_tags_request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for CreateTagsRequest: {}",
-            e
+            "Validation failed for CreateTagsRequest: {e}"
         )))
     })?;
 
@@ -150,8 +149,7 @@ pub async fn create_tag_category_handler(
 ) -> Result<impl Reply, Rejection> {
     tag_category.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for TagCategory: {}",
-            e
+            "Validation failed for TagCategory: {e}"
         )))
     })?;
 

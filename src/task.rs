@@ -99,7 +99,7 @@ pub fn submit_task(
             log::info!("Starting task {task_id}");
             let now = std::time::Instant::now();
             if let Err(e) = task(tokio_handle) {
-                log::error!("Error executing task {task_id}: {}", e);
+                log::error!("Error executing task {task_id}: {e}");
             }
             log::info!("Finished task {task_id} after {:?}", now.elapsed());
         } else {
@@ -710,9 +710,7 @@ pub fn run_apply_auto_tags_tasks(tokio_handle: Handle) -> Result<(), Error> {
 
                 if let Err(e) = res {
                     log::error!(
-                        "Failed to run apply_auto_tags_task {:?}: {e}",
-                        task
-                    );
+                        "Failed to run apply_auto_tags_task {task:?}: {e}");
                     let res = diesel::update(apply_auto_tags_task::table)
                         .filter(apply_auto_tags_task::pk.eq(task.pk))
                         .set(
@@ -924,7 +922,7 @@ where
             let mut connection = match acquire_db_connection().await {
                 Ok(connection) => connection,
                 Err(e) => {
-                    log::error!("Could not unlock objects: {}", e);
+                    log::error!("Could not unlock objects: {e}");
                     return;
                 }
             };
@@ -937,7 +935,7 @@ where
             .await;
 
             if let Err(e) = res {
-                log::error!("Could not unlock objects: {}", e);
+                log::error!("Could not unlock objects: {e}");
             }
         });
     }

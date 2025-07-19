@@ -261,7 +261,7 @@ lazy_static! {
                             if !scope.get_variables().contains_key(ident) {
                                 log.errors.push(Error {
                                     location,
-                                    msg: format!("No such variable '{}'", ident),
+                                    msg: format!("No such variable '{ident}'"),
                                 });
                             }
                         } else {
@@ -376,7 +376,7 @@ lazy_static! {
                 get_value_plain_fn: |vars| vars.get("current_utc_timestamp").cloned(),
                 get_expression_fn: |vars| vars
                     .get("current_utc_timestamp")
-                    .map(|s| format!("'{}'", s))
+                    .map(|s| format!("'{s}'"))
                     .unwrap_or_else(|| String::from("NULL"))
             })
         ),
@@ -387,7 +387,7 @@ lazy_static! {
                 get_value_plain_fn: |vars| vars.get("current_utc_date").cloned(),
                 get_expression_fn: |vars| vars
                     .get("current_utc_date")
-                    .map(|s| format!("'{}'", s))
+                    .map(|s| format!("'{s}'"))
                     .unwrap_or_else(|| String::from("NULL"))
             })
         ),
@@ -652,8 +652,7 @@ fn accept_arguments(
                         log.errors.push(Error {
                             location,
                             msg: format!(
-                                "Expected attribute to be of type {:?} but got {:?}",
-                                attr_type, arg_type
+                                "Expected attribute to be of type {attr_type:?} but got {arg_type:?}"
                             ),
                         });
                     }
@@ -674,8 +673,7 @@ fn accept_arguments(
                     log.errors.push(Error {
                         location,
                         msg: format!(
-                            "Expected argument to be of type {:?} but got {:?}",
-                            obj_type, arg_type
+                            "Expected argument to be of type {obj_type:?} but got {arg_type:?}"
                         ),
                     });
                 }

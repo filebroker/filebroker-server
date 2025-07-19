@@ -112,10 +112,10 @@ impl fmt::Display for ParsedToken {
             f,
             "{}",
             match self {
-                ParsedToken::IdentifierToken(val) => format!("IDENTIFIER '{}'", val),
-                ParsedToken::IntegerToken(val) => format!("INTEGER {}", val),
-                ParsedToken::StaticToken(val) => format!("TOKEN {:?}", val),
-                ParsedToken::StringToken(val) => format!("STRING '{}'", val),
+                ParsedToken::IdentifierToken(val) => format!("IDENTIFIER '{val}'"),
+                ParsedToken::IntegerToken(val) => format!("INTEGER {val}"),
+                ParsedToken::StaticToken(val) => format!("TOKEN {val:?}"),
+                ParsedToken::StringToken(val) => format!("STRING '{val}'"),
             }
         )
     }
@@ -157,7 +157,7 @@ impl Lexer<'_> {
                             start: pos,
                             end: pos,
                         },
-                        msg: format!("Illegal escape character '{}'", c),
+                        msg: format!("Illegal escape character '{c}'"),
                     });
                 }
             } else if c == '\\' {
@@ -199,7 +199,7 @@ impl Lexer<'_> {
                             start: pos,
                             end: pos,
                         },
-                        msg: format!("Illegal char '{}'", c),
+                        msg: format!("Illegal char '{c}'"),
                     });
                 }
             }
@@ -300,7 +300,7 @@ impl State {
                             start: self.conception_idx,
                             end: pos,
                         },
-                        msg: format!("Unexpected char '{}'", c),
+                        msg: format!("Unexpected char '{c}'"),
                     });
                 }
 
@@ -445,8 +445,7 @@ impl State {
                         Ordering::Greater => log.errors.push(Error {
                             location,
                             msg: format!(
-                                "Integer literal {} exceeds maximum size of {}",
-                                parsed_val, INTEGER_LIMIT
+                                "Integer literal {parsed_val} exceeds maximum size of {INTEGER_LIMIT}"
                             ),
                         }),
                         Ordering::Equal => {
@@ -469,7 +468,7 @@ impl State {
                 } else {
                     log.errors.push(Error {
                         location,
-                        msg: format!("Invalid integer literal '{}'", val),
+                        msg: format!("Invalid integer literal '{val}'"),
                     });
                 }
             }

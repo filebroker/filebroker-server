@@ -327,7 +327,7 @@ pub async fn get_presigned_hls_playlist_handler(
 
     if !object_key.ends_with(".m3u8") {
         return Err(warp::reject::custom(Error::InvalidRequestInputError(
-            format!("Invalid path: {}, expected m3u8 file", object_key),
+            format!("Invalid path: {object_key}, expected m3u8 file"),
         )));
     }
 
@@ -448,8 +448,7 @@ pub async fn create_broker_handler(
 ) -> Result<impl Reply, Rejection> {
     create_broker_request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for CreateBrokerRequest: {}",
-            e
+            "Validation failed for CreateBrokerRequest: {e}"
         )))
     })?;
 
@@ -584,8 +583,7 @@ pub async fn get_brokers_handler(user: User) -> Result<impl Reply, Rejection> {
             .map(|usage_bytes| {
                 usage_bytes.to_i64().ok_or_else(|| {
                     Error::InternalError(format!(
-                        "Could not convert broker usage bytes {} to i64",
-                        usage_bytes
+                        "Could not convert broker usage bytes {usage_bytes} to i64"
                     ))
                 })
             })

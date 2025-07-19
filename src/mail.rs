@@ -42,7 +42,7 @@ lazy_static! {
     pub static ref TEMPLATES: Tera = {
         match Tera::new("templates/*.html") {
             Ok(tera) => tera,
-            Err(e) => panic!("Could not load tera templates: '{}'", e),
+            Err(e) => panic!("Could not load tera templates: '{e}'"),
         }
     };
     pub static ref MAILS_PER_HOUR_LIMIT: u32 = std::env::var("FILEBROKER_MAILS_PER_HOUR_LIMIT")

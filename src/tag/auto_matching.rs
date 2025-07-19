@@ -639,7 +639,7 @@ pub async fn apply_tag_category_auto_tags(
         };
 
         if let Err(e) = update_post(post_pk, &get_system_user(), request, connection).await {
-            log::error!("Failed to apply auto tags for post {}: {e}", post_pk);
+            log::error!("Failed to apply auto tags for post {post_pk}: {e}");
             return Err(e);
         }
     }
@@ -680,10 +680,7 @@ pub async fn apply_tag_category_auto_tags(
             update_post_collection(post_collection_pk, &get_system_user(), request, connection)
                 .await
         {
-            log::error!(
-                "Failed to apply auto tags for collection {}: {e}",
-                post_collection_pk
-            );
+            log::error!("Failed to apply auto tags for collection {post_collection_pk}: {e}");
             return Err(e);
         }
     }

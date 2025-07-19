@@ -1056,7 +1056,7 @@ fn start_task_scheduler_runtime(scheduler: Scheduler<Utc>) -> JoinHandle<()> {
             {
                 Ok(runtime) => runtime,
                 Err(e) => {
-                    eprintln!("Failed to start task scheduler runtime: {}", e);
+                    eprintln!("Failed to start task scheduler runtime: {e}");
                     std::process::exit(1);
                 }
             };

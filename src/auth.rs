@@ -256,12 +256,9 @@ async fn create_refresh_token_cookie(
 fn format_refresh_token_cookie(uuid: &str, expiry: &str) -> String {
     if cfg!(debug_assertions) {
         // unlike firefox, chrome (and postman and other chromium / electron based apps) does not allow setting Secure cookies on localhost
-        format!("refresh_token={}; Expires={}; HttpOnly", uuid, expiry)
+        format!("refresh_token={uuid}; Expires={expiry}; HttpOnly")
     } else {
-        format!(
-            "refresh_token={}; Expires={}; HttpOnly; Secure; SameSite=None",
-            uuid, expiry
-        )
+        format!("refresh_token={uuid}; Expires={expiry}; HttpOnly; Secure; SameSite=None")
     }
 }
 
@@ -474,8 +471,7 @@ pub async fn register_handler(
     }
     user_registration.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for UserRegistration: {}",
-            e
+            "Validation failed for UserRegistration: {e}"
         )))
     })?;
 
@@ -801,8 +797,7 @@ pub async fn edit_user_handler(
     }
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for UpdateUserRequest: {}",
-            e
+            "Validation failed for UpdateUserRequest: {e}"
         )))
     })?;
     if cleared_mail {
@@ -1008,8 +1003,7 @@ pub async fn send_password_reset_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for ChangePasswordRequest: {}",
-            e
+            "Validation failed for ChangePasswordRequest: {e}"
         )))
     })?;
 
@@ -1098,8 +1092,7 @@ pub async fn reset_password_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for PasswordResetRequest: {}",
-            e
+            "Validation failed for PasswordResetRequest: {e}"
         )))
     })?;
 

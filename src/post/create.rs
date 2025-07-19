@@ -65,8 +65,7 @@ pub async fn create_post_handler(
 ) -> Result<impl Reply, Rejection> {
     create_post_request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for CreatePostRequest: {}",
-            e
+            "Validation failed for CreatePostRequest: {e}"
         )))
     })?;
 
@@ -264,8 +263,7 @@ pub async fn create_post_collection_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for CreatePostCollectionRequest: {}",
-            e
+            "Validation failed for CreatePostCollectionRequest: {e}"
         )))
     })?;
 

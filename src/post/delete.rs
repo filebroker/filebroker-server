@@ -56,8 +56,7 @@ pub async fn delete_posts_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for DeletePostsRequest: {}",
-            e
+            "Validation failed for DeletePostsRequest: {e}"
         )))
     })?;
 
@@ -272,8 +271,7 @@ pub async fn delete_posts_collections_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for DeletePostCollectionsRequest: {}",
-            e
+            "Validation failed for DeletePostCollectionsRequest: {e}"
         )))
     })?;
 

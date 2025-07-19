@@ -178,8 +178,7 @@ impl MultipartByteRange {
             start,
             end,
             fields: format!(
-                "\r\n--{}\r\nContent-Type: {}\r\nContent-Range: bytes {}-{}/{}\r\n\r\n",
-                boundary, content_type, start, end, size
+                "\r\n--{boundary}\r\nContent-Type: {content_type}\r\nContent-Range: bytes {start}-{end}/{size}\r\n\r\n"
             ),
         }
     }
@@ -197,7 +196,7 @@ impl ObjectWriter for MultipartObjectWriter {
                 .send_data(Bytes::copy_from_slice(part.fields.as_bytes()))
                 .await
             {
-                log::debug!("Error writing part fields: {}", e);
+                log::debug!("Error writing part fields: {e}");
                 sender.abort();
                 return;
             }
@@ -251,7 +250,7 @@ impl ObjectWriter for MultipartObjectWriter {
             .send_data(Bytes::copy_from_slice(self.end_delimiter.as_bytes()))
             .await
         {
-            log::debug!("Error writing end delimiter: {}", e);
+            log::debug!("Error writing end delimiter: {e}");
             sender.abort();
             return;
         }
