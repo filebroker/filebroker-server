@@ -151,7 +151,13 @@ impl Lexer<'_> {
             let is_escaped = self.is_escaped;
             if is_escaped {
                 self.is_escaped = false;
-                if !(c == '`' || c == '\\' || c == '=' || c == ' ' || Tag::try_from(c).is_ok()) {
+                if !(c == '`'
+                    || c == '"'
+                    || c == '\\'
+                    || c == '='
+                    || c == ' '
+                    || Tag::try_from(c).is_ok())
+                {
                     self.log.errors.push(Error {
                         location: Location {
                             start: pos,
