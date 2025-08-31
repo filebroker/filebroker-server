@@ -694,6 +694,12 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(warp::filters::path::peek())
         .and_then(data::get_presigned_hls_playlist_handler);
 
+    let create_user_avatar_route = warp::path("create-user-avatar")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(data::create_user_avatar_handler);
+
     let routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -754,7 +760,9 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .or(update_tag_category_route)
         .or(get_tag_edit_history_route)
         .or(rewind_tag_history_snapshot_handler)
-        .or(get_presigned_hls_playlist_route);
+        .or(get_presigned_hls_playlist_route)
+        .boxed()
+        .or(create_user_avatar_route);
 
     let filter = routes
         .recover(error::handle_rejection)

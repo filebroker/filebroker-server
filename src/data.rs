@@ -3,6 +3,7 @@ use diesel::{
     BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
     dsl::{exists, max, not, sum},
 };
+use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{Stream, TryStreamExt};
 use lazy_static::lazy_static;
@@ -21,6 +22,8 @@ use warp::{
     path::Peek,
 };
 
+use crate::data::encode::generate_user_avatar;
+use crate::schema::registered_user;
 use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension},
@@ -32,6 +35,7 @@ use crate::{
     },
     post,
     query::PostDetailed,
+    run_serializable_transaction,
     schema::{
         broker, broker_access, s3_object, s3_object_metadata, user_group, user_group_membership,
     },
@@ -440,6 +444,7 @@ pub struct CreateBrokerRequest {
     pub is_aws_region: bool,
     pub remove_duplicate_files: bool,
     pub enable_presigned_get: Option<bool>,
+    pub is_system_bucket: Option<bool>,
 }
 
 pub async fn create_broker_handler(
@@ -451,6 +456,11 @@ pub async fn create_broker_handler(
             "Validation failed for CreateBrokerRequest: {e}"
         )))
     })?;
+
+    let is_system_bucket = create_broker_request.is_system_bucket.unwrap_or(false);
+    if is_system_bucket && !user.is_admin {
+        return Err(warp::reject::custom(Error::UserNotAdmin));
+    }
 
     let bucket = create_bucket(
         &create_broker_request.bucket,
@@ -481,22 +491,39 @@ pub async fn create_broker_handler(
     }
 
     let mut connection = acquire_db_connection().await?;
-    let created_broker = diesel::insert_into(broker::table)
-        .values(&NewBroker {
-            name: create_broker_request.name,
-            bucket: create_broker_request.bucket,
-            endpoint: create_broker_request.endpoint,
-            access_key: create_broker_request.access_key,
-            secret_key: create_broker_request.secret_key,
-            is_aws_region: create_broker_request.is_aws_region,
-            remove_duplicate_files: create_broker_request.remove_duplicate_files,
-            fk_owner: user.pk,
-            hls_enabled: false,
-            enable_presigned_get: create_broker_request.enable_presigned_get.unwrap_or(true),
-        })
-        .get_result::<Broker>(&mut connection)
-        .await
-        .map_err(Error::from)?;
+    let created_broker = run_serializable_transaction(&mut connection, |connection| {
+        async {
+            if is_system_bucket {
+                diesel::update(broker::table)
+                    .filter(broker::is_system_bucket.eq(true))
+                    .set(broker::is_system_bucket.eq(false))
+                    .execute(connection)
+                    .await?;
+            }
+            let broker = diesel::insert_into(broker::table)
+                .values(&NewBroker {
+                    name: create_broker_request.name,
+                    bucket: create_broker_request.bucket,
+                    endpoint: create_broker_request.endpoint,
+                    access_key: create_broker_request.access_key,
+                    secret_key: create_broker_request.secret_key,
+                    is_aws_region: create_broker_request.is_aws_region,
+                    remove_duplicate_files: create_broker_request.remove_duplicate_files,
+                    fk_owner: user.pk,
+                    hls_enabled: false,
+                    enable_presigned_get: create_broker_request
+                        .enable_presigned_get
+                        .unwrap_or(true),
+                    is_system_bucket,
+                })
+                .get_result::<Broker>(connection)
+                .await?;
+
+            Ok(broker)
+        }
+        .scope_boxed()
+    })
+    .await?;
 
     Ok(warp::reply::json(&created_broker))
 }
@@ -604,6 +631,46 @@ pub async fn get_brokers_handler(user: User) -> Result<impl Reply, Rejection> {
     Ok(warp::reply::json(&broker_availabilities))
 }
 
+#[derive(Deserialize, Validate)]
+pub struct CreateUserAvatarRequest {
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
+    pub source_object_key: String,
+    pub width: u32,
+    pub height: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+pub async fn create_user_avatar_handler(
+    request: CreateUserAvatarRequest,
+    user: User,
+) -> Result<impl Reply, Rejection> {
+    request.validate().map_err(|e| {
+        warp::reject::custom(Error::InvalidRequestInputError(format!(
+            "Validation failed for CreateUserAvatarRequest: {e}"
+        )))
+    })?;
+
+    generate_user_avatar(
+        request.source_object_key,
+        user.pk,
+        request.width,
+        request.height,
+        request.x,
+        request.y,
+    )
+    .await?;
+
+    let mut connection = acquire_db_connection().await?;
+    let updated_user = registered_user::table
+        .filter(registered_user::pk.eq(user.pk))
+        .get_result::<User>(&mut connection)
+        .await
+        .map_err(Error::from)?;
+
+    Ok(warp::reply::json(&updated_user))
+}
+
 pub async fn load_object(
     object_key: &str,
     connection: &mut AsyncPgConnection,
@@ -664,4 +731,28 @@ pub fn create_bucket(
                 b.with_path_style()
             }
         })
+}
+
+pub async fn get_system_bucket(
+    connection: &mut AsyncPgConnection,
+) -> Result<Option<(Broker, Bucket)>, Error> {
+    let system_broker = broker::table
+        .filter(broker::is_system_bucket.eq(true))
+        .get_result::<Broker>(connection)
+        .await
+        .optional()?;
+
+    match system_broker {
+        Some(broker) => {
+            let bucket = create_bucket(
+                &broker.bucket,
+                &broker.endpoint,
+                &broker.access_key,
+                &broker.secret_key,
+                broker.is_aws_region,
+            )?;
+            Ok(Some((broker, bucket)))
+        }
+        None => Ok(None),
+    }
 }

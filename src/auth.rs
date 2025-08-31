@@ -71,8 +71,6 @@ pub struct UserRegistration {
     pub password: String,
     #[validate(email)]
     pub email: Option<String>,
-    #[validate(url)]
-    pub avatar_url: Option<String>,
     pub captcha_token: Option<String>,
 }
 
@@ -512,7 +510,6 @@ pub async fn register_handler(
         user_name: user_registration.user_name,
         password: hashed_password,
         email: user_registration.email,
-        avatar_url: user_registration.avatar_url,
         creation_timestamp: Utc::now(),
         email_confirmed: false,
         display_name: user_registration.display_name,
@@ -606,7 +603,6 @@ pub struct UserInfo {
     pub pk: i64,
     pub user_name: String,
     pub email: Option<String>,
-    pub avatar_url: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub email_confirmed: bool,
     pub display_name: Option<String>,
@@ -614,6 +610,7 @@ pub struct UserInfo {
     pub password_fail_count: i32,
     pub is_admin: bool,
     pub is_banned: bool,
+    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for UserInfo {
@@ -622,7 +619,6 @@ impl From<User> for UserInfo {
             pk: user.pk,
             user_name: user.user_name,
             email: user.email,
-            avatar_url: user.avatar_url,
             creation_timestamp: user.creation_timestamp,
             email_confirmed: user.email_confirmed,
             display_name: user.display_name,
@@ -630,6 +626,7 @@ impl From<User> for UserInfo {
             password_fail_count: user.password_fail_count,
             is_admin: user.is_admin,
             is_banned: user.is_banned,
+            avatar_object_key: user.avatar_object_key,
         }
     }
 }
@@ -772,13 +769,11 @@ pub struct UpdateUserRequest {
     pub display_name: Option<String>,
     #[validate(email)]
     pub email: Option<String>,
-    #[validate(url)]
-    pub avatar_url: Option<String>,
 }
 
 impl UpdateUserRequest {
     pub fn has_changes(&self) -> bool {
-        self.display_name.is_some() || self.email.is_some() || self.avatar_url.is_some()
+        self.display_name.is_some() || self.email.is_some()
     }
 }
 

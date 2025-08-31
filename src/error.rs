@@ -117,6 +117,8 @@ pub enum Error {
     ChildProcessError(String),
     #[error("Failed to parse m3u8 playlist: {0}")]
     M3U8ParseError(String),
+    #[error("No system bucket configured")]
+    NoSystemBucketError,
 
     #[error("Received error response code from S3: {0}")]
     S3ResponseError(u16),
@@ -171,7 +173,8 @@ impl Error {
             | Error::InvalidUrlError(_)
             | Error::ReqwestError(_)
             | Error::ChildProcessError(_)
-            | Error::M3U8ParseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | Error::M3U8ParseError(_)
+            | Error::NoSystemBucketError => StatusCode::INTERNAL_SERVER_ERROR,
             Error::IllegalRangeError(..) => StatusCode::RANGE_NOT_SATISFIABLE,
             Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => {
                 StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -232,6 +235,7 @@ impl Error {
             Self::ReqwestError(_) => 500_014,
             Self::ChildProcessError(_) => 500_015,
             Self::M3U8ParseError(_) => 500_016,
+            Self::NoSystemBucketError => 500_017,
 
             Self::S3ResponseError(_) => 500_998,
             Self::S3ResponseErrorMsg(..) => 500_999,

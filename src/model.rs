@@ -27,32 +27,20 @@ use validator::{Validate, ValidationError};
 #[diesel(table_name = registered_user)]
 #[diesel(primary_key(pk))]
 pub struct User {
-    #[diesel(sql_type = BigInt)]
     pub pk: i64,
-    #[diesel(sql_type = Varchar)]
     pub user_name: String,
-    #[diesel(sql_type = Varchar)]
     #[serde(skip_serializing)]
     pub password: String,
-    #[diesel(sql_type = Nullable<Varchar>)]
     pub email: Option<String>,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    pub avatar_url: Option<String>,
-    #[diesel(sql_type = Timestamptz)]
     pub creation_timestamp: DateTime<Utc>,
-    #[diesel(sql_type = Bool)]
     pub email_confirmed: bool,
-    #[diesel(sql_type = Nullable<Varchar>)]
     pub display_name: Option<String>,
-    #[diesel(sql_type = Int4)]
     #[serde(skip_serializing)]
     pub jwt_version: i32,
-    #[diesel(sql_type = Int4)]
     pub password_fail_count: i32,
-    #[diesel(sql_type = Bool)]
     pub is_admin: bool,
-    #[diesel(sql_type = Bool)]
     pub is_banned: bool,
+    pub avatar_object_key: Option<String>,
 }
 
 pub fn get_system_user() -> User {
@@ -61,7 +49,6 @@ pub fn get_system_user() -> User {
         user_name: "system".to_string(),
         password: "".to_string(),
         email: None,
-        avatar_url: None,
         creation_timestamp: Default::default(),
         email_confirmed: false,
         display_name: None,
@@ -69,6 +56,7 @@ pub fn get_system_user() -> User {
         password_fail_count: 0,
         is_admin: true,
         is_banned: false,
+        avatar_object_key: None,
     }
 }
 
@@ -92,8 +80,7 @@ pub struct UserPublic {
     #[diesel(sql_type = Nullable<Varchar>)]
     #[serde(skip_serializing)]
     pub email: Option<String>,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    pub avatar_url: Option<String>,
+
     #[diesel(sql_type = Timestamptz)]
     pub creation_timestamp: DateTime<Utc>,
     #[diesel(sql_type = Bool)]
@@ -111,6 +98,8 @@ pub struct UserPublic {
     pub is_admin: bool,
     #[diesel(sql_type = Bool)]
     pub is_banned: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for UserPublic {
@@ -120,7 +109,6 @@ impl From<User> for UserPublic {
             user_name: value.user_name,
             password: value.password,
             email: value.email,
-            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             email_confirmed: value.email_confirmed,
             display_name: value.display_name,
@@ -128,6 +116,7 @@ impl From<User> for UserPublic {
             password_fail_count: value.password_fail_count,
             is_admin: value.is_admin,
             is_banned: value.is_banned,
+            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -139,7 +128,6 @@ impl From<UserPublic> for User {
             user_name: value.user_name,
             password: value.password,
             email: value.email,
-            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             email_confirmed: value.email_confirmed,
             display_name: value.display_name,
@@ -147,6 +135,7 @@ impl From<UserPublic> for User {
             password_fail_count: value.password_fail_count,
             is_admin: value.is_admin,
             is_banned: value.is_banned,
+            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -157,7 +146,6 @@ pub struct NewUser {
     pub user_name: String,
     pub password: String,
     pub email: Option<String>,
-    pub avatar_url: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub email_confirmed: bool,
     pub display_name: Option<String>,
@@ -252,15 +240,15 @@ pub struct PostCreateUser {
     #[diesel(sql_type = Varchar)]
     #[diesel(column_name = "post_create_user_user_name")]
     pub user_name: String,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "post_create_user_avatar_url")]
-    pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     #[diesel(column_name = "post_create_user_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_create_user_display_name")]
     pub display_name: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_create_user_avatar_object_key")]
+    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for PostCreateUser {
@@ -268,9 +256,9 @@ impl From<User> for PostCreateUser {
         Self {
             pk: value.pk,
             user_name: value.user_name,
-            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             display_name: value.display_name,
+            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -620,15 +608,15 @@ pub struct PostCollectionCreateUser {
     #[diesel(sql_type = Varchar)]
     #[diesel(column_name = "post_collection_create_user_user_name")]
     pub user_name: String,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "post_collection_create_user_avatar_url")]
-    pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     #[diesel(column_name = "post_collection_create_user_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_create_user_display_name")]
     pub display_name: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_create_user_avatar_object_key")]
+    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for PostCollectionCreateUser {
@@ -636,9 +624,9 @@ impl From<User> for PostCollectionCreateUser {
         Self {
             pk: value.pk,
             user_name: value.user_name,
-            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             display_name: value.display_name,
+            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -835,15 +823,15 @@ pub struct PostCollectionItemAddedUser {
     #[diesel(sql_type = Varchar)]
     #[diesel(column_name = "post_collection_item_added_user_user_name")]
     pub user_name: String,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "post_collection_item_added_user_avatar_url")]
-    pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     #[diesel(column_name = "post_collection_item_added_user_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_item_added_user_display_name")]
     pub display_name: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_item_added_user_avatar_object_key")]
+    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for PostCollectionItemAddedUser {
@@ -851,9 +839,9 @@ impl From<User> for PostCollectionItemAddedUser {
         Self {
             pk: value.pk,
             user_name: value.user_name,
-            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             display_name: value.display_name,
+            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -1196,6 +1184,7 @@ pub struct Broker {
     pub creation_timestamp: DateTime<Utc>,
     pub hls_enabled: bool,
     pub enable_presigned_get: bool,
+    pub is_system_bucket: bool,
 }
 
 #[derive(Insertable)]
@@ -1211,6 +1200,7 @@ pub struct NewBroker {
     pub fk_owner: i64,
     pub hls_enabled: bool,
     pub enable_presigned_get: bool,
+    pub is_system_bucket: bool,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, QueryableByName, Serialize)]

@@ -796,11 +796,13 @@ pub fn prepare_query_parameters(
                     String::from("s3_object.thumbnail_object_key AS post_thumbnail_object_key"),
                     String::from("create_user.pk AS post_create_user_pk"),
                     String::from("create_user.user_name AS post_create_user_user_name"),
-                    String::from("create_user.avatar_url AS post_create_user_avatar_url"),
                     String::from(
                         "create_user.creation_timestamp AS post_create_user_creation_timestamp",
                     ),
                     String::from("create_user.display_name AS post_create_user_display_name"),
+                    String::from(
+                        "create_user.avatar_object_key AS post_create_user_avatar_object_key",
+                    ),
                     String::from("s3_object.object_key AS post_s3_object_object_key"),
                     String::from("s3_object.sha256_hash AS post_s3_object_sha256_hash"),
                     String::from("s3_object.size_bytes AS post_s3_object_size_bytes"),
@@ -1010,13 +1012,13 @@ pub fn prepare_query_parameters(
                     String::from("create_user.pk AS post_collection_create_user_pk"),
                     String::from("create_user.user_name AS post_collection_create_user_user_name"),
                     String::from(
-                        "create_user.avatar_url AS post_collection_create_user_avatar_url",
-                    ),
-                    String::from(
                         "create_user.creation_timestamp AS post_collection_create_user_creation_timestamp",
                     ),
                     String::from(
                         "create_user.display_name AS post_collection_create_user_display_name",
+                    ),
+                    String::from(
+                        "create_user.avatar_object_key AS post_collection_create_user_avatar_object_key",
                     ),
                 ]
             },
@@ -1063,13 +1065,13 @@ pub fn prepare_query_parameters(
                     "post_collection_item_added_user.user_name AS post_collection_item_added_user_user_name",
                 ),
                 String::from(
-                    "post_collection_item_added_user.avatar_url AS post_collection_item_added_user_avatar_url",
-                ),
-                String::from(
                     "post_collection_item_added_user.creation_timestamp AS post_collection_item_added_user_creation_timestamp",
                 ),
                 String::from(
                     "post_collection_item_added_user.display_name AS post_collection_item_added_user_display_name",
+                ),
+                String::from(
+                    "post_collection_item_added_user.avatar_object_key AS post_collection_item_added_user_avatar_object_key",
                 ),
                 // post data
                 String::from("post.pk AS post_pk"),
@@ -1086,11 +1088,13 @@ pub fn prepare_query_parameters(
                 String::from("post_s3_object.thumbnail_object_key AS post_thumbnail_object_key"),
                 String::from("post_create_user.pk AS post_create_user_pk"),
                 String::from("post_create_user.user_name AS post_create_user_user_name"),
-                String::from("post_create_user.avatar_url AS post_create_user_avatar_url"),
                 String::from(
                     "post_create_user.creation_timestamp AS post_create_user_creation_timestamp",
                 ),
                 String::from("post_create_user.display_name AS post_create_user_display_name"),
+                String::from(
+                    "post_create_user.avatar_object_key AS post_create_user_avatar_object_key",
+                ),
                 String::from("post_s3_object.object_key AS post_s3_object_object_key"),
                 String::from("post_s3_object.sha256_hash AS post_s3_object_sha256_hash"),
                 String::from("post_s3_object.size_bytes AS post_s3_object_size_bytes"),
@@ -1240,13 +1244,13 @@ pub fn prepare_query_parameters(
                     "post_collection_create_user.user_name AS post_collection_create_user_user_name",
                 ),
                 String::from(
-                    "post_collection_create_user.avatar_url AS post_collection_create_user_avatar_url",
-                ),
-                String::from(
                     "post_collection_create_user.creation_timestamp AS post_collection_create_user_creation_timestamp",
                 ),
                 String::from(
                     "post_collection_create_user.display_name AS post_collection_create_user_display_name",
+                ),
+                String::from(
+                    "post_collection_create_user.avatar_object_key AS post_collection_create_user_avatar_object_key",
                 ),
             ],
             join_statements: vec![

@@ -33,6 +33,7 @@ diesel::table! {
         creation_timestamp -> Timestamptz,
         hls_enabled -> Bool,
         enable_presigned_get -> Bool,
+        is_system_bucket -> Bool,
     }
 }
 
@@ -288,8 +289,6 @@ diesel::table! {
         password -> Varchar,
         #[max_length = 320]
         email -> Nullable<Varchar>,
-        #[max_length = 2048]
-        avatar_url -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
         email_confirmed -> Bool,
         #[max_length = 32]
@@ -298,6 +297,8 @@ diesel::table! {
         password_fail_count -> Int4,
         is_admin -> Bool,
         is_banned -> Bool,
+        #[max_length = 255]
+        avatar_object_key -> Nullable<Varchar>,
     }
 }
 
@@ -520,7 +521,6 @@ diesel::joinable!(post_tag -> post (fk_post));
 diesel::joinable!(post_tag -> tag (fk_tag));
 diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
-diesel::joinable!(s3_object -> registered_user (fk_uploader));
 diesel::joinable!(s3_object_metadata -> s3_object (object_key));
 diesel::joinable!(tag -> tag_category (tag_category));
 diesel::joinable!(tag_edit_history -> registered_user (fk_edit_user));

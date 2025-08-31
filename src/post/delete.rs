@@ -1,6 +1,7 @@
+use diesel::sql_types::Bool;
 use diesel::{
-    BoolExpressionMethods, ExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
-    Table,
+    BoolExpressionMethods, ExpressionMethods, IntoSql, JoinOnDsl, NullableExpressionMethods,
+    QueryDsl, Table,
     dsl::{exists, not},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
@@ -71,15 +72,17 @@ pub async fn delete_posts_handler(
                     .left_join(s3_object::table)
                     .left_join(broker::table.on(s3_object::fk_broker.eq(broker::pk)))
                     .select(post::pk)
-                    .filter(
-                        post::pk
-                            .eq_any(&post_pks)
-                            .and(not(post::fk_create_user.eq(user.pk).or(broker::fk_owner
-                                .eq(user.pk)
-                                .or(exists(broker_access::table.filter(
-                                    perms::get_broker_group_access_write_condition!(user.pk),
-                                )))))),
-                    )
+                    .filter(post::pk.eq_any(&post_pks).and(
+                        user.is_admin.into_sql::<Bool>().or(
+                            not(post::fk_create_user.eq(user.pk).or(
+                                broker::fk_owner.eq(user.pk).or(exists(
+                                    broker_access::table.filter(
+                                        perms::get_broker_group_access_write_condition!(user.pk),
+                                    ),
+                                )),
+                            )),
+                        ),
+                    ))
                     .get_results::<i64>(connection)
                     .await?;
 
@@ -179,11 +182,15 @@ pub async fn delete_s3_objects(
         .select(s3_object::table::all_columns())
         .filter(
             s3_object::object_key.eq_any(object_keys).and(
-                s3_object::fk_uploader.eq(user.pk).or(broker::fk_owner
-                    .eq(user.pk)
-                    .or(exists(broker_access::table.filter(
-                        perms::get_broker_group_access_write_condition!(user.pk),
-                    )))),
+                user.is_admin
+                    .into_sql::<Bool>()
+                    .or(s3_object::fk_uploader
+                        .eq(user.pk)
+                        .or(broker::fk_owner
+                            .eq(user.pk)
+                            .or(exists(broker_access::table.filter(
+                                perms::get_broker_group_access_write_condition!(user.pk),
+                            ))))),
             ),
         )
         .get_results::<S3Object>(connection)
