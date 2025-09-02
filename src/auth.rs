@@ -462,10 +462,10 @@ pub async fn register_handler(
     authority: Authority,
 ) -> Result<impl Reply, Rejection> {
     // set empty mail to None since an empty string would not validate
-    if let Some(ref email) = user_registration.email {
-        if email.trim().is_empty() {
-            user_registration.email = None;
-        }
+    if let Some(ref email) = user_registration.email
+        && email.trim().is_empty()
+    {
+        user_registration.email = None;
     }
     user_registration.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
@@ -784,11 +784,11 @@ pub async fn edit_user_handler(
 ) -> Result<impl Reply, Rejection> {
     // set empty mail to None since an empty string would not validate
     let mut cleared_mail = false;
-    if let Some(ref email) = request.email {
-        if email.trim().is_empty() {
-            request.email = None;
-            cleared_mail = true;
-        }
+    if let Some(ref email) = request.email
+        && email.trim().is_empty()
+    {
+        request.email = None;
+        cleared_mail = true;
     }
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(

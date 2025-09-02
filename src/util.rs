@@ -148,10 +148,10 @@ pub fn dedup_vec_optional<T: PartialEq + Ord>(vec: &mut Option<Vec<T>>) {
 }
 
 pub fn dedup_vecs_optional<T: PartialEq + Ord>(v1: &mut Option<Vec<T>>, v2: &Option<Vec<T>>) {
-    if let Some(v1) = v1 {
-        if let Some(v2) = v2 {
-            dedup_vecs(v1, v2);
-        }
+    if let Some(v1) = v1
+        && let Some(v2) = v2
+    {
+        dedup_vecs(v1, v2);
     }
 }
 

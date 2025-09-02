@@ -112,29 +112,25 @@ pub async fn upsert_tag_handler(
                         }
                     }
 
-                    if let Some(ref alias_pks) = upsert_tag_request.alias_pks {
-                        if !alias_pks.is_empty() {
-                            if alias_pks.contains(&tag.pk) {
-                                return Err(TransactionRuntimeError::Rollback(
-                                    Error::InvalidRequestInputError(format!(
-                                        "Cannot set tag {} as an alias of itself",
-                                        tag.pk
-                                    )),
-                                ));
-                            }
-
-                            if !alias_pks.is_empty() {
-                                if alias_pks.len() > 25 {
-                                    return Err(TransactionRuntimeError::Rollback(
-                                        Error::BadRequestError(String::from(
-                                            "Cannot set more than 25 aliases",
-                                        )),
-                                    ));
-                                }
-
-                                add_tag_aliases(&tag, alias_pks, connection).await?;
-                            }
+                    if let Some(ref alias_pks) = upsert_tag_request.alias_pks
+                        && !alias_pks.is_empty()
+                    {
+                        if alias_pks.contains(&tag.pk) {
+                            return Err(TransactionRuntimeError::Rollback(
+                                Error::InvalidRequestInputError(format!(
+                                    "Cannot set tag {} as an alias of itself",
+                                    tag.pk
+                                )),
+                            ));
                         }
+
+                        if alias_pks.len() > 25 {
+                            return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                                String::from("Cannot set more than 25 aliases"),
+                            )));
+                        }
+
+                        add_tag_aliases(&tag, alias_pks, connection).await?;
                     }
 
                     let tag_category = match upsert_tag_request.tag_category {
@@ -431,18 +427,18 @@ pub async fn update_tag(
         }
     }
 
-    if let Some(ref removed_parent_pks) = removed_parent_pks {
-        if !removed_parent_pks.is_empty() {
-            diesel::delete(tag_edge::table)
-                .filter(
-                    tag_edge::fk_child
-                        .eq(tag.pk)
-                        .and(tag_edge::fk_parent.eq_any(removed_parent_pks)),
-                )
-                .execute(connection)
-                .await?;
-            parents_changed = true;
-        }
+    if let Some(ref removed_parent_pks) = removed_parent_pks
+        && !removed_parent_pks.is_empty()
+    {
+        diesel::delete(tag_edge::table)
+            .filter(
+                tag_edge::fk_child
+                    .eq(tag.pk)
+                    .and(tag_edge::fk_parent.eq_any(removed_parent_pks)),
+            )
+            .execute(connection)
+            .await?;
+        parents_changed = true;
     }
 
     if added_parent_pks
@@ -522,20 +518,20 @@ pub async fn update_tag(
         }
     }
 
-    if let Some(ref removed_alias_pks) = removed_alias_pks {
-        if !removed_alias_pks.is_empty() {
-            // a tag cannot be the alias of another tag without also being an alias of all of that tag's other aliases
-            // thus, removing an alias means that tag loses all its aliases
-            diesel::delete(tag_alias::table)
-                .filter(
-                    tag_alias::fk_target
-                        .eq_any(removed_alias_pks)
-                        .or(tag_alias::fk_source.eq_any(removed_alias_pks)),
-                )
-                .execute(connection)
-                .await?;
-            aliases_changed = true;
-        }
+    if let Some(ref removed_alias_pks) = removed_alias_pks
+        && !removed_alias_pks.is_empty()
+    {
+        // a tag cannot be the alias of another tag without also being an alias of all of that tag's other aliases
+        // thus, removing an alias means that tag loses all its aliases
+        diesel::delete(tag_alias::table)
+            .filter(
+                tag_alias::fk_target
+                    .eq_any(removed_alias_pks)
+                    .or(tag_alias::fk_source.eq_any(removed_alias_pks)),
+            )
+            .execute(connection)
+            .await?;
+        aliases_changed = true;
     }
 
     if added_alias_pks

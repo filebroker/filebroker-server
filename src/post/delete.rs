@@ -86,12 +86,12 @@ pub async fn delete_posts_handler(
                     .get_results::<i64>(connection)
                     .await?;
 
-                if let Some(DeleteInaccessiblePostMode::Reject) = request.inaccessible_post_mode {
-                    if !inaccessible_posts.is_empty() {
-                        return Err(TransactionRuntimeError::Rollback(
-                            Error::InaccessibleObjectsError(inaccessible_posts),
-                        ));
-                    }
+                if let Some(DeleteInaccessiblePostMode::Reject) = request.inaccessible_post_mode
+                    && !inaccessible_posts.is_empty()
+                {
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InaccessibleObjectsError(inaccessible_posts),
+                    ));
                 }
 
                 post_pks.retain(|pk| !inaccessible_posts.contains(pk));
@@ -301,12 +301,11 @@ pub async fn delete_posts_collections_handler(
 
                 if let Some(DeleteInaccessiblePostMode::Reject) =
                     request.inaccessible_post_collection_mode
+                    && !inaccessible_post_collections.is_empty()
                 {
-                    if !inaccessible_post_collections.is_empty() {
-                        return Err(TransactionRuntimeError::Rollback(
-                            Error::InaccessibleObjectsError(inaccessible_post_collections),
-                        ));
-                    }
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InaccessibleObjectsError(inaccessible_post_collections),
+                    ));
                 }
 
                 post_collection_pks.retain(|pk| !inaccessible_post_collections.contains(pk));

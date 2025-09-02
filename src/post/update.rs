@@ -541,42 +541,42 @@ pub async fn update_post(
             .get_result::<PostEditHistory>(connection)
             .await?;
 
-        if let Some(previous_tags) = previous_tags {
-            if !previous_tags.is_empty() {
-                diesel::insert_into(post_edit_history_tag::table)
-                    .values(
-                        previous_tags
-                            .iter()
-                            .map(|tag_usage| PostEditHistoryTag {
-                                fk_post_edit_history: post_edit_history.pk,
-                                fk_tag: tag_usage.tag.pk,
-                                auto_matched: tag_usage.auto_matched,
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                    .execute(connection)
-                    .await?;
-            }
+        if let Some(previous_tags) = previous_tags
+            && !previous_tags.is_empty()
+        {
+            diesel::insert_into(post_edit_history_tag::table)
+                .values(
+                    previous_tags
+                        .iter()
+                        .map(|tag_usage| PostEditHistoryTag {
+                            fk_post_edit_history: post_edit_history.pk,
+                            fk_tag: tag_usage.tag.pk,
+                            auto_matched: tag_usage.auto_matched,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .execute(connection)
+                .await?;
         }
 
-        if let Some(previous_group_access) = previous_group_access {
-            if !previous_group_access.is_empty() {
-                diesel::insert_into(post_edit_history_group_access::table)
-                    .values(
-                        previous_group_access
-                            .iter()
-                            .map(|group_access| PostEditHistoryGroupAccess {
-                                fk_post_edit_history: post_edit_history.pk,
-                                fk_granted_group: group_access.fk_granted_group,
-                                write: group_access.write,
-                                fk_granted_by: group_access.fk_granted_by,
-                                creation_timestamp: group_access.creation_timestamp,
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                    .execute(connection)
-                    .await?;
-            }
+        if let Some(previous_group_access) = previous_group_access
+            && !previous_group_access.is_empty()
+        {
+            diesel::insert_into(post_edit_history_group_access::table)
+                .values(
+                    previous_group_access
+                        .iter()
+                        .map(|group_access| PostEditHistoryGroupAccess {
+                            fk_post_edit_history: post_edit_history.pk,
+                            fk_granted_group: group_access.fk_granted_group,
+                            write: group_access.write,
+                            fk_granted_by: group_access.fk_granted_by,
+                            creation_timestamp: group_access.creation_timestamp,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .execute(connection)
+                .await?;
         }
 
         let apply_auto_tags_task = if is_system_user(user) {
@@ -792,93 +792,92 @@ pub async fn update_post_collection(
         }
     }
 
-    if let Some(ref mut added_post_pks) = request.added_post_pks {
-        if !added_post_pks.is_empty() {
-            match request.duplicate_mode {
-                Some(PostCollectionDuplicateMode::Ignore) | None => {}
-                Some(PostCollectionDuplicateMode::Reject)
-                | Some(PostCollectionDuplicateMode::Skip) => {
-                    let duplicate_posts = post_collection_item::table
-                        .select(post_collection_item::fk_post)
-                        .filter(
-                            post_collection_item::fk_post_collection
-                                .eq(post_collection_pk)
-                                .and(post_collection_item::fk_post.eq_any(&*added_post_pks)),
-                        )
-                        .get_results::<i64>(connection)
-                        .await?;
+    if let Some(ref mut added_post_pks) = request.added_post_pks
+        && !added_post_pks.is_empty()
+    {
+        match request.duplicate_mode {
+            Some(PostCollectionDuplicateMode::Ignore) | None => {}
+            Some(PostCollectionDuplicateMode::Reject) | Some(PostCollectionDuplicateMode::Skip) => {
+                let duplicate_posts = post_collection_item::table
+                    .select(post_collection_item::fk_post)
+                    .filter(
+                        post_collection_item::fk_post_collection
+                            .eq(post_collection_pk)
+                            .and(post_collection_item::fk_post.eq_any(&*added_post_pks)),
+                    )
+                    .get_results::<i64>(connection)
+                    .await?;
 
-                    if request.duplicate_mode == Some(PostCollectionDuplicateMode::Reject)
-                        && !duplicate_posts.is_empty()
-                    {
-                        return Err(TransactionRuntimeError::Rollback(
-                            Error::DuplicatePostCollectionItemError(
-                                post_collection_pk,
-                                duplicate_posts,
-                            ),
-                        ));
-                    } else {
-                        added_post_pks.retain(|pk| !duplicate_posts.contains(pk));
-                    }
+                if request.duplicate_mode == Some(PostCollectionDuplicateMode::Reject)
+                    && !duplicate_posts.is_empty()
+                {
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::DuplicatePostCollectionItemError(
+                            post_collection_pk,
+                            duplicate_posts,
+                        ),
+                    ));
+                } else {
+                    added_post_pks.retain(|pk| !duplicate_posts.contains(pk));
                 }
             }
+        }
 
-            let found_ordinal = post_collection_item::table
-                .select(dsl::max(post_collection_item::ordinal))
-                .filter(post_collection_item::fk_post_collection.eq(post_collection_pk))
-                .first::<Option<i32>>(connection)
-                .await
-                .optional()?;
-            let current_ordinal = match found_ordinal {
-                Some(Some(ordinal)) => ordinal + 1,
-                _ => 0,
-            };
+        let found_ordinal = post_collection_item::table
+            .select(dsl::max(post_collection_item::ordinal))
+            .filter(post_collection_item::fk_post_collection.eq(post_collection_pk))
+            .first::<Option<i32>>(connection)
+            .await
+            .optional()?;
+        let current_ordinal = match found_ordinal {
+            Some(Some(ordinal)) => ordinal + 1,
+            _ => 0,
+        };
 
-            let post_collection_items = added_post_pks
-                .iter()
-                .enumerate()
-                .map(|(idx, post_pk)| NewPostCollectionItem {
-                    fk_post: *post_pk,
-                    fk_post_collection: post_collection_pk,
-                    fk_added_by: user.pk,
-                    ordinal: current_ordinal + (idx as i32),
-                })
-                .collect::<Vec<_>>();
+        let post_collection_items = added_post_pks
+            .iter()
+            .enumerate()
+            .map(|(idx, post_pk)| NewPostCollectionItem {
+                fk_post: *post_pk,
+                fk_post_collection: post_collection_pk,
+                fk_added_by: user.pk,
+                ordinal: current_ordinal + (idx as i32),
+            })
+            .collect::<Vec<_>>();
 
-            items_changed = true;
-            // split items into chunks to avoid hitting the parameter limit
-            for item_chunk in post_collection_items.chunks(4096) {
-                diesel::insert_into(post_collection_item::table)
-                    .values(item_chunk)
-                    .execute(connection)
-                    .await?;
-            }
+        items_changed = true;
+        // split items into chunks to avoid hitting the parameter limit
+        for item_chunk in post_collection_items.chunks(4096) {
+            diesel::insert_into(post_collection_item::table)
+                .values(item_chunk)
+                .execute(connection)
+                .await?;
         }
     }
 
-    if let Some(ref removed_item_pks) = request.removed_item_pks {
-        if !removed_item_pks.is_empty() {
-            items_changed = true;
-            diesel::delete(post_collection_item::table)
-                .filter(post_collection_item::pk.eq_any(removed_item_pks))
-                .execute(connection)
-                .await?;
+    if let Some(ref removed_item_pks) = request.removed_item_pks
+        && !removed_item_pks.is_empty()
+    {
+        items_changed = true;
+        diesel::delete(post_collection_item::table)
+            .filter(post_collection_item::pk.eq_any(removed_item_pks))
+            .execute(connection)
+            .await?;
 
-            // close resulting gaps in the ordinal sequence
-            diesel::sql_query(r#"
-                        UPDATE post_collection_item
-                        SET ordinal = post_collection_items_enumerated.row_idx - 1
-                        FROM (
-                            SELECT pk, row_number() OVER(ORDER BY ordinal) as row_idx
-                            FROM post_collection_item
-                            WHERE fk_post_collection = $1
-                        ) AS post_collection_items_enumerated
-                        WHERE fk_post_collection = $1 AND post_collection_item.pk = post_collection_items_enumerated.pk
-                    "#)
-                .bind::<BigInt, _>(post_collection_pk)
-                .execute(connection)
-                .await?;
-        }
+        // close resulting gaps in the ordinal sequence
+        diesel::sql_query(r#"
+                    UPDATE post_collection_item
+                    SET ordinal = post_collection_items_enumerated.row_idx - 1
+                    FROM (
+                        SELECT pk, row_number() OVER(ORDER BY ordinal) as row_idx
+                        FROM post_collection_item
+                        WHERE fk_post_collection = $1
+                    ) AS post_collection_items_enumerated
+                    WHERE fk_post_collection = $1 AND post_collection_item.pk = post_collection_items_enumerated.pk
+                "#)
+            .bind::<BigInt, _>(post_collection_pk)
+            .execute(connection)
+            .await?;
     }
 
     if request
@@ -961,42 +960,42 @@ pub async fn update_post_collection(
             .get_result::<PostCollectionEditHistory>(connection)
             .await?;
 
-        if let Some(previous_tags) = previous_tags {
-            if !previous_tags.is_empty() {
-                diesel::insert_into(post_collection_edit_history_tag::table)
-                    .values(
-                        previous_tags
-                            .iter()
-                            .map(|tag_usage| PostCollectionEditHistoryTag {
-                                fk_post_collection_edit_history: post_collection_edit_history.pk,
-                                fk_tag: tag_usage.tag.pk,
-                                auto_matched: tag_usage.auto_matched,
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                    .execute(connection)
-                    .await?;
-            }
+        if let Some(previous_tags) = previous_tags
+            && !previous_tags.is_empty()
+        {
+            diesel::insert_into(post_collection_edit_history_tag::table)
+                .values(
+                    previous_tags
+                        .iter()
+                        .map(|tag_usage| PostCollectionEditHistoryTag {
+                            fk_post_collection_edit_history: post_collection_edit_history.pk,
+                            fk_tag: tag_usage.tag.pk,
+                            auto_matched: tag_usage.auto_matched,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .execute(connection)
+                .await?;
         }
 
-        if let Some(previous_group_access) = previous_group_access {
-            if !previous_group_access.is_empty() {
-                diesel::insert_into(post_collection_edit_history_group_access::table)
-                    .values(
-                        previous_group_access
-                            .iter()
-                            .map(|group_access| PostCollectionEditHistoryGroupAccess {
-                                fk_post_collection_edit_history: post_collection_edit_history.pk,
-                                fk_granted_group: group_access.fk_granted_group,
-                                write: group_access.write,
-                                fk_granted_by: group_access.fk_granted_by,
-                                creation_timestamp: group_access.creation_timestamp,
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                    .execute(connection)
-                    .await?;
-            }
+        if let Some(previous_group_access) = previous_group_access
+            && !previous_group_access.is_empty()
+        {
+            diesel::insert_into(post_collection_edit_history_group_access::table)
+                .values(
+                    previous_group_access
+                        .iter()
+                        .map(|group_access| PostCollectionEditHistoryGroupAccess {
+                            fk_post_collection_edit_history: post_collection_edit_history.pk,
+                            fk_granted_group: group_access.fk_granted_group,
+                            write: group_access.write,
+                            fk_granted_by: group_access.fk_granted_by,
+                            creation_timestamp: group_access.creation_timestamp,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .execute(connection)
+                .await?;
         }
 
         let apply_auto_tags_task = if is_system_user(user) {

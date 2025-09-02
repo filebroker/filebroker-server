@@ -638,12 +638,7 @@ pub async fn generate_user_avatar(
         .next()
         .unwrap();
     let avatar_id = Uuid::new_v4();
-    let avatar_path = format!(
-        "{}/avatar_{}_{}.webp",
-        user_pk,
-        object_id,
-        avatar_id.to_string()
-    );
+    let avatar_path = format!("{}/avatar_{}_{}.webp", user_pk, object_id, avatar_id);
     log::info!(
         "Storing avatar {} for object {}",
         &avatar_path,

@@ -454,12 +454,12 @@ pub async fn get_post_handler(
 
         if let Some(result) = result {
             let limit = result.evaluated_limit;
-            if let Some(max_limit) = max_limit {
-                if limit > max_limit as i32 {
-                    return Err(warp::reject::custom(Error::IllegalQueryInputError(
-                        format!("Limit '{limit}' exceeds maximum limit of {MAX_LIMIT}."),
-                    )));
-                }
+            if let Some(max_limit) = max_limit
+                && limit > max_limit as i32
+            {
+                return Err(warp::reject::custom(Error::IllegalQueryInputError(
+                    format!("Limit '{limit}' exceeds maximum limit of {MAX_LIMIT}."),
+                )));
             }
 
             let page = page.unwrap_or(0);
@@ -691,12 +691,12 @@ pub trait SearchQueryResultObject {
             Some(0)
         } else {
             let limit = objects[0].get_evaluated_limit();
-            if let Some(max_limit) = max_limit {
-                if limit > max_limit as i32 {
-                    return Err(Error::IllegalQueryInputError(format!(
-                        "Limit '{limit}' exceeds maximum limit of {max_limit}."
-                    )));
-                }
+            if let Some(max_limit) = max_limit
+                && limit > max_limit as i32
+            {
+                return Err(Error::IllegalQueryInputError(format!(
+                    "Limit '{limit}' exceeds maximum limit of {max_limit}."
+                )));
             }
             full_count.map(|full_count| ((full_count as f64) / (limit as f64)).ceil() as i64)
         };

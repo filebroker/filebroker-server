@@ -248,12 +248,11 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                         log::warn!("Stopping task generate_missing_hls_streams because the task pool is shutting down");
                         return Ok(());
                     }
-                    if let Ok(mut connection) = acquire_db_connection().await {
-                        if let Err(e) = diesel::sql_query("UPDATE s3_object SET hls_fail_count = coalesce(hls_fail_count, 0) + 1 WHERE object_key = $1")
+                    if let Ok(mut connection) = acquire_db_connection().await
+                        && let Err(e) = diesel::sql_query("UPDATE s3_object SET hls_fail_count = coalesce(hls_fail_count, 0) + 1 WHERE object_key = $1")
                             .bind::<VarChar, _>(&object.object_key)
                             .execute(&mut connection).await {
                                 log::error!("Failed to increment hls_fail_count: {e}");
-                            }
                     }
                 } else {
                     log::info!(
@@ -377,12 +376,11 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                         log::warn!("Stopping task generate_missing_thumbnails because the task pool is shutting down");
                         return Ok(());
                     }
-                    if let Ok(mut connection) = acquire_db_connection().await {
-                        if let Err(e) = diesel::sql_query("UPDATE s3_object SET thumbnail_fail_count = coalesce(thumbnail_fail_count, 0) + 1 WHERE object_key = $1")
+                    if let Ok(mut connection) = acquire_db_connection().await
+                        && let Err(e) = diesel::sql_query("UPDATE s3_object SET thumbnail_fail_count = coalesce(thumbnail_fail_count, 0) + 1 WHERE object_key = $1")
                             .bind::<VarChar, _>(&object.object_key)
                             .execute(&mut connection).await {
                                 log::error!("Failed to increment thumbnail_fail_count: {e}");
-                            }
                     }
                 } else {
                     log::info!(
@@ -454,12 +452,11 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
                         log::warn!("Stopping task load_missing_object_metadata because the task pool is shutting down");
                         return Ok(());
                     }
-                    if let Ok(mut connection) = acquire_db_connection().await {
-                        if let Err(e) = diesel::sql_query("UPDATE s3_object SET metadata_fail_count = coalesce(metadata_fail_count, 0) + 1 WHERE object_key = $1")
+                    if let Ok(mut connection) = acquire_db_connection().await
+                        && let Err(e) = diesel::sql_query("UPDATE s3_object SET metadata_fail_count = coalesce(metadata_fail_count, 0) + 1 WHERE object_key = $1")
                             .bind::<VarChar, _>(&object.object_key)
                             .execute(&mut connection).await {
                                 log::error!("Failed to increment metadata_fail_count: {e}");
-                            }
                     }
                 } else {
                     log::info!("Loaded missing metadata for object {}", &object.object_key);

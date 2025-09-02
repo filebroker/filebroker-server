@@ -193,10 +193,10 @@ impl Post {
         if self.public_edit {
             return Ok(true);
         }
-        if let Some(user) = user {
-            if user.is_admin || user.pk == self.fk_create_user {
-                return Ok(true);
-            }
+        if let Some(user) = user
+            && (user.is_admin || user.pk == self.fk_create_user)
+        {
+            return Ok(true);
         }
 
         perms::is_post_editable(connection, user, self.pk).await
@@ -207,10 +207,10 @@ impl Post {
         user: Option<&User>,
         connection: &mut AsyncPgConnection,
     ) -> Result<bool, Error> {
-        if let Some(user) = user {
-            if user.is_admin || user.pk == self.fk_create_user {
-                return Ok(true);
-            }
+        if let Some(user) = user
+            && (user.is_admin || user.pk == self.fk_create_user)
+        {
+            return Ok(true);
         }
 
         perms::is_post_deletable(connection, user, self.pk).await
@@ -854,26 +854,6 @@ impl From<UserPublic> for PostCollectionItemAddedUser {
 
 #[derive(Queryable, QueryableByName, Serialize)]
 #[diesel(table_name = post_collection_item)]
-pub struct PostCollectionItemFull {
-    #[diesel(embed)]
-    pub post: PostFull,
-    #[diesel(embed)]
-    pub post_collection: PostCollectionFull,
-    #[diesel(embed)]
-    pub added_by: PostCollectionItemAddedUser,
-    #[diesel(sql_type = Timestamptz)]
-    #[diesel(column_name = "post_collection_item_creation_timestamp")]
-    pub creation_timestamp: DateTime<Utc>,
-    #[diesel(sql_type = BigInt)]
-    #[diesel(column_name = "post_collection_item_pk")]
-    pub pk: i64,
-    #[diesel(sql_type = Int4)]
-    #[diesel(column_name = "post_collection_item_ordinal")]
-    pub ordinal: i32,
-}
-
-#[derive(Queryable, QueryableByName, Serialize)]
-#[diesel(table_name = post_collection_item)]
 pub struct PostCollectionItemQueryObject {
     #[diesel(embed)]
     pub post: PostFull,
@@ -1309,10 +1289,10 @@ impl PostCollection {
         if self.public_edit {
             return Ok(true);
         }
-        if let Some(user) = user {
-            if user.is_admin || user.pk == self.fk_create_user {
-                return Ok(true);
-            }
+        if let Some(user) = user
+            && (user.is_admin || user.pk == self.fk_create_user)
+        {
+            return Ok(true);
         }
 
         perms::is_post_collection_editable(connection, user, self.pk).await
@@ -1323,10 +1303,10 @@ impl PostCollection {
         user: Option<&User>,
         connection: &mut AsyncPgConnection,
     ) -> Result<bool, Error> {
-        if let Some(user) = user {
-            if user.is_admin || user.pk == self.fk_create_user {
-                return Ok(true);
-            }
+        if let Some(user) = user
+            && (user.is_admin || user.pk == self.fk_create_user)
+        {
+            return Ok(true);
         }
 
         perms::is_post_collection_deletable(connection, user, self.pk).await

@@ -948,7 +948,7 @@ fn load_private_key(key_path: &str) -> io::Result<PrivateKeyDer<'static>> {
 
 // enable TLS for AsyncPgConnection, see https://github.com/weiznich/diesel_async/blob/main/examples/postgres/pooled-with-rustls
 
-fn establish_pg_ssl_connection(config: &str) -> BoxFuture<ConnectionResult<AsyncPgConnection>> {
+fn establish_pg_ssl_connection(config: &str) -> BoxFuture<'_, ConnectionResult<AsyncPgConnection>> {
     let fut = async {
         // We first set up the way we want rustls to work.
         let rustls_config = rustls::ClientConfig::builder()

@@ -384,10 +384,11 @@ impl Visitor for SemanticAnalysisVisitor {
 
         if op == Operator::FuzzyEqual {
             // if the patter does not contain any wildcards (% or _) explicitly, then wrap it in % to make it a fuzzy search
-            if let Some(string_literal) = right.node_type.downcast_mut::<StringLiteralNode>() {
-                if !string_literal.val.contains('%') && !string_literal.val.contains('_') {
-                    string_literal.val = format!("%{}%", string_literal.val);
-                }
+            if let Some(string_literal) = right.node_type.downcast_mut::<StringLiteralNode>()
+                && !string_literal.val.contains('%')
+                && !string_literal.val.contains('_')
+            {
+                string_literal.val = format!("%{}%", string_literal.val);
             }
         }
 

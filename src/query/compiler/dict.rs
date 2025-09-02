@@ -766,13 +766,13 @@ fn accept_sort_modifier_arguments(
     let attr_arg_location = attr_arg.location;
     match attr_arg.node_type.downcast_ref::<AttributeNode>() {
         Some(attribute_node) => {
-            if let Some(attribute) = POST_ATTRIBUTES.get(attribute_node.identifier.as_str()) {
-                if !attribute.allow_sorting {
-                    log.errors.push(Error {
-                        location: attr_arg_location,
-                        msg: format!("Attribute {} is not sortable", &attribute_node.identifier),
-                    });
-                }
+            if let Some(attribute) = POST_ATTRIBUTES.get(attribute_node.identifier.as_str())
+                && !attribute.allow_sorting
+            {
+                log.errors.push(Error {
+                    location: attr_arg_location,
+                    msg: format!("Attribute {} is not sortable", &attribute_node.identifier),
+                });
             }
         }
         None => {

@@ -267,14 +267,6 @@ pub async fn load_tag_detailed(
     })
 }
 
-#[derive(Serialize)]
-pub struct TagJoined {
-    pub tag: Tag,
-    pub category: Option<TagCategory>,
-    pub parents: Vec<Tag>,
-    pub aliases: Vec<Tag>,
-}
-
 pub async fn get_tag_handler(tag_pk: i64) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
 

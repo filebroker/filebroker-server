@@ -619,13 +619,13 @@ pub fn apply_pagination(
         // If the limit is not a valid u16 (e.g. if it's a binary expression '50 + 10'), the error is returned
         // after the query has been evaluated, the limit is supplied to the LEAST function to protect against large
         // limits and enforce max limit
-        if let Ok(parsed_limit) = limit.parse::<u32>() {
-            if parsed_limit > pagination.max_limit {
-                return Err(crate::Error::IllegalQueryInputError(format!(
-                    "Limit '{}' exceeds maximum limit of {}.",
-                    parsed_limit, pagination.max_limit
-                )));
-            }
+        if let Ok(parsed_limit) = limit.parse::<u32>()
+            && parsed_limit > pagination.max_limit
+        {
+            return Err(crate::Error::IllegalQueryInputError(format!(
+                "Limit '{}' exceeds maximum limit of {}.",
+                parsed_limit, pagination.max_limit
+            )));
         }
 
         // for window queries, increase the limit by 2 and subtract 1 from the offset

@@ -627,42 +627,42 @@ pub async fn rewind_post_history_snapshot_handler(
                     .get_result::<PostEditHistory>(connection)
                     .await?;
 
-                if let Some(previous_tags) = previous_tags {
-                    if !previous_tags.is_empty() {
-                        diesel::insert_into(post_edit_history_tag::table)
-                            .values(
-                                previous_tags
-                                    .iter()
-                                    .map(|tag_usage| PostEditHistoryTag {
-                                        fk_post_edit_history: post_edit_history.pk,
-                                        fk_tag: tag_usage.tag.pk,
-                                        auto_matched: tag_usage.auto_matched,
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
-                            .execute(connection)
-                            .await?;
-                    }
+                if let Some(previous_tags) = previous_tags
+                    && !previous_tags.is_empty()
+                {
+                    diesel::insert_into(post_edit_history_tag::table)
+                        .values(
+                            previous_tags
+                                .iter()
+                                .map(|tag_usage| PostEditHistoryTag {
+                                    fk_post_edit_history: post_edit_history.pk,
+                                    fk_tag: tag_usage.tag.pk,
+                                    auto_matched: tag_usage.auto_matched,
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .execute(connection)
+                        .await?;
                 }
 
-                if let Some(previous_group_access) = previous_group_access {
-                    if !previous_group_access.is_empty() {
-                        diesel::insert_into(post_edit_history_group_access::table)
-                            .values(
-                                previous_group_access
-                                    .iter()
-                                    .map(|group_access| PostEditHistoryGroupAccess {
-                                        fk_post_edit_history: post_edit_history.pk,
-                                        fk_granted_group: group_access.granted_group.pk,
-                                        write: group_access.write,
-                                        fk_granted_by: group_access.fk_granted_by,
-                                        creation_timestamp: group_access.creation_timestamp,
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
-                            .execute(connection)
-                            .await?;
-                    }
+                if let Some(previous_group_access) = previous_group_access
+                    && !previous_group_access.is_empty()
+                {
+                    diesel::insert_into(post_edit_history_group_access::table)
+                        .values(
+                            previous_group_access
+                                .iter()
+                                .map(|group_access| PostEditHistoryGroupAccess {
+                                    fk_post_edit_history: post_edit_history.pk,
+                                    fk_granted_group: group_access.granted_group.pk,
+                                    write: group_access.write,
+                                    fk_granted_by: group_access.fk_granted_by,
+                                    creation_timestamp: group_access.creation_timestamp,
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .execute(connection)
+                        .await?;
                 }
 
                 Ok(updated_post)
@@ -885,44 +885,44 @@ pub async fn rewind_post_collection_history_snapshot_handler(
                         .get_result::<PostCollectionEditHistory>(connection)
                         .await?;
 
-                if let Some(previous_tags) = previous_tags {
-                    if !previous_tags.is_empty() {
-                        diesel::insert_into(post_collection_edit_history_tag::table)
-                            .values(
-                                previous_tags
-                                    .iter()
-                                    .map(|tag_usage| PostCollectionEditHistoryTag {
-                                        fk_post_collection_edit_history:
-                                            post_collection_edit_history.pk,
-                                        fk_tag: tag_usage.tag.pk,
-                                        auto_matched: tag_usage.auto_matched,
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
-                            .execute(connection)
-                            .await?;
-                    }
+                if let Some(previous_tags) = previous_tags
+                    && !previous_tags.is_empty()
+                {
+                    diesel::insert_into(post_collection_edit_history_tag::table)
+                        .values(
+                            previous_tags
+                                .iter()
+                                .map(|tag_usage| PostCollectionEditHistoryTag {
+                                    fk_post_collection_edit_history: post_collection_edit_history
+                                        .pk,
+                                    fk_tag: tag_usage.tag.pk,
+                                    auto_matched: tag_usage.auto_matched,
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .execute(connection)
+                        .await?;
                 }
 
-                if let Some(previous_group_access) = previous_group_access {
-                    if !previous_group_access.is_empty() {
-                        diesel::insert_into(post_collection_edit_history_group_access::table)
-                            .values(
-                                previous_group_access
-                                    .iter()
-                                    .map(|group_access| PostCollectionEditHistoryGroupAccess {
-                                        fk_post_collection_edit_history:
-                                            post_collection_edit_history.pk,
-                                        fk_granted_group: group_access.granted_group.pk,
-                                        write: group_access.write,
-                                        fk_granted_by: group_access.fk_granted_by,
-                                        creation_timestamp: group_access.creation_timestamp,
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
-                            .execute(connection)
-                            .await?;
-                    }
+                if let Some(previous_group_access) = previous_group_access
+                    && !previous_group_access.is_empty()
+                {
+                    diesel::insert_into(post_collection_edit_history_group_access::table)
+                        .values(
+                            previous_group_access
+                                .iter()
+                                .map(|group_access| PostCollectionEditHistoryGroupAccess {
+                                    fk_post_collection_edit_history: post_collection_edit_history
+                                        .pk,
+                                    fk_granted_group: group_access.granted_group.pk,
+                                    write: group_access.write,
+                                    fk_granted_by: group_access.fk_granted_by,
+                                    creation_timestamp: group_access.creation_timestamp,
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .execute(connection)
+                        .await?;
                 }
 
                 Ok(updated_post_collection)
