@@ -1109,8 +1109,8 @@ pub fn prepare_query_parameters(
                     "post_create_user.creation_timestamp AS post_create_user_creation_timestamp",
                 ),
                 String::from("post_create_user.display_name AS post_create_user_display_name"),
-                String::from("create_user.is_admin AS post_create_user_is_admin"),
-                String::from("create_user.is_banned AS post_create_user_is_banned"),
+                String::from("post_create_user.is_admin AS post_create_user_is_admin"),
+                String::from("post_create_user.is_banned AS post_create_user_is_banned"),
                 String::from(
                     "post_create_user.avatar_object_key AS post_create_user_avatar_object_key",
                 ),
