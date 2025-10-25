@@ -1,4 +1,5 @@
 use bigdecimal::{BigDecimal, ToPrimitive};
+use chrono::Utc;
 use diesel::{
     BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
     dsl::{exists, max, not, sum},
@@ -22,8 +23,10 @@ use warp::{
     path::Peek,
 };
 
-use crate::data::encode::generate_user_avatar;
-use crate::schema::registered_user;
+use crate::model::{NewUserGroupAuditLog, UserGroup, UserGroupAuditAction, get_system_user};
+use crate::post::delete::delete_s3_objects;
+use crate::schema::{registered_user, user_group_audit_log};
+use crate::user_group::load_user_group_detailed;
 use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension},
@@ -219,7 +222,7 @@ pub async fn get_object_metadata_handler(requested_path: Peek) -> Result<impl Re
         .await
         .optional()
         .map_err(Error::from)?
-        .ok_or_else(|| Error::InaccessibleS3ObjectError(String::from(object_key)))?;
+        .ok_or_else(|| Error::InaccessibleObjectKeyError(String::from(object_key)))?;
 
     Ok(warp::reply::json(&metadata))
 }
@@ -645,13 +648,14 @@ pub async fn create_user_avatar_handler(
     request: CreateUserAvatarRequest,
     user: User,
 ) -> Result<impl Reply, Rejection> {
+    let user_pk = user.pk;
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
             "Validation failed for CreateUserAvatarRequest: {e}"
         )))
     })?;
 
-    generate_user_avatar(
+    let avatar_object = encode::generate_avatar(
         request.source_object_key,
         user.pk,
         request.width,
@@ -662,6 +666,33 @@ pub async fn create_user_avatar_handler(
     .await?;
 
     let mut connection = acquire_db_connection().await?;
+    run_serializable_transaction(&mut connection, |connection| {
+        async {
+            let user = registered_user::table
+                .filter(registered_user::pk.eq(user_pk))
+                .get_result::<User>(connection)
+                .await?;
+
+            let s3_object = diesel::insert_into(s3_object::table)
+                .values(&avatar_object)
+                .get_result::<S3Object>(connection)
+                .await?;
+
+            diesel::update(registered_user::table.filter(registered_user::pk.eq(user_pk)))
+                .set(registered_user::avatar_object_key.eq(&s3_object.object_key))
+                .execute(connection)
+                .await?;
+
+            if let Some(avatar_object_key) = user.avatar_object_key {
+                delete_s3_objects(&[avatar_object_key], &get_system_user(), connection).await?;
+            }
+
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await?;
+
     let updated_user = registered_user::table
         .filter(registered_user::pk.eq(user.pk))
         .get_result::<User>(&mut connection)
@@ -669,6 +700,83 @@ pub async fn create_user_avatar_handler(
         .map_err(Error::from)?;
 
     Ok(warp::reply::json(&updated_user))
+}
+
+pub async fn create_user_group_avatar_handler(
+    request: CreateUserAvatarRequest,
+    user_group_pk: i64,
+    user: User,
+) -> Result<impl Reply, Rejection> {
+    request.validate().map_err(|e| {
+        warp::reject::custom(Error::InvalidRequestInputError(format!(
+            "Validation failed for CreateUserAvatarRequest: {e}"
+        )))
+    })?;
+
+    let mut connection = acquire_db_connection().await?;
+    if !perms::is_user_group_editable(user_group_pk, Some(&user), &mut connection).await? {
+        return Err(warp::reject::custom(Error::InaccessibleObjectError(
+            user_group_pk,
+        )));
+    }
+    drop(connection);
+
+    let avatar_object = encode::generate_avatar(
+        request.source_object_key,
+        user.pk,
+        request.width,
+        request.height,
+        request.x,
+        request.y,
+    )
+    .await?;
+
+    let mut connection = acquire_db_connection().await?;
+    let updated_user_group = run_serializable_transaction(&mut connection, |connection| {
+        async {
+            let user_group = user_group::table
+                .filter(user_group::pk.eq(user_group_pk))
+                .get_result::<UserGroup>(connection)
+                .await?;
+
+            let s3_object = diesel::insert_into(s3_object::table)
+                .values(&avatar_object)
+                .get_result::<S3Object>(connection)
+                .await?;
+
+            let updated_user_group =
+                diesel::update(user_group::table.filter(user_group::pk.eq(user_group_pk)))
+                    .set(user_group::avatar_object_key.eq(&s3_object.object_key))
+                    .get_result::<UserGroup>(connection)
+                    .await?;
+
+            diesel::insert_into(user_group_audit_log::table)
+                .values(NewUserGroupAuditLog {
+                    fk_user_group: user_group.pk,
+                    fk_user: user.pk,
+                    action: UserGroupAuditAction::AvatarChange,
+                    fk_target_user: None,
+                    invite_code: None,
+                    reason: None,
+                    creation_timestamp: Utc::now(),
+                })
+                .execute(connection)
+                .await?;
+
+            if let Some(avatar_object_key) = user_group.avatar_object_key {
+                delete_s3_objects(&[avatar_object_key], &get_system_user(), connection).await?;
+            }
+
+            Ok(updated_user_group)
+        }
+        .scope_boxed()
+    })
+    .await?;
+
+    let user_group_detailed =
+        load_user_group_detailed(updated_user_group, Some(&user), &mut connection).await?;
+
+    Ok(warp::reply::json(&user_group_detailed))
 }
 
 pub async fn load_object(
@@ -682,7 +790,7 @@ pub async fn load_object(
         .await
         .optional()
         .map_err(Error::from)?
-        .ok_or_else(|| Error::InaccessibleS3ObjectError(String::from(object_key)))
+        .ok_or_else(|| Error::InaccessibleObjectKeyError(String::from(object_key)))
 }
 
 pub fn create_bucket(

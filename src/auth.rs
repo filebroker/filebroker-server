@@ -23,6 +23,7 @@ use warp::{
 };
 use zxcvbn::zxcvbn;
 
+use crate::model::UserPublic;
 use crate::{
     CERT_PATH, HOST_BASE_PATH, acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension, QueryDsl},
@@ -413,15 +414,13 @@ async fn refresh_user_login_data(
                 ))
                 .get_result::<RefreshToken>(connection)
                 .await
-                .optional()
-                .map_err(|e| Error::QueryError(e.to_string()))?
+                .optional()?
                 .ok_or(Error::InvalidRefreshTokenError)?;
 
             let user = registered_user::table
                 .filter(registered_user::pk.eq(updated_token.fk_user))
                 .get_result::<User>(connection)
-                .await
-                .map_err(|e| Error::QueryError(e.to_string()))?;
+                .await?;
 
             let uuid = updated_token.uuid.to_string();
             let expiry = updated_token.expiry.to_rfc2822();
@@ -1169,4 +1168,30 @@ pub async fn reset_password_handler(
     })
     .await
     .map_err(warp::reject::custom)
+}
+
+pub async fn get_user_public_handler(user_pk: i64) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection().await?;
+    let user_public = registered_user::table
+        .filter(registered_user::pk.eq(user_pk))
+        .get_result::<UserPublic>(&mut connection)
+        .await
+        .optional()
+        .map_err(Error::from)?
+        .ok_or(Error::NotFoundError)?;
+
+    Ok(warp::reply::json(&user_public))
+}
+
+pub async fn get_user_public_name_handler(user_name: String) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection().await?;
+    let user_public = registered_user::table
+        .filter(lower(registered_user::user_name).eq(user_name.to_lowercase()))
+        .get_result::<UserPublic>(&mut connection)
+        .await
+        .optional()
+        .map_err(Error::from)?
+        .ok_or(Error::NotFoundError)?;
+
+    Ok(warp::reply::json(&user_public))
 }

@@ -3,8 +3,7 @@ use std::{ffi::OsStr, io, path::Path};
 use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
 use diesel::{
-    NullableExpressionMethods, OptionalExtension, PgSortExpressionMethods, QueryDsl,
-    dsl::{exists, not, sum},
+    NullableExpressionMethods, OptionalExtension, PgSortExpressionMethods, QueryDsl, dsl::sum,
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use futures::{TryStream, stream::IntoAsyncRead};
@@ -160,8 +159,7 @@ where
                     metadata_fail_count: None,
                 })
                 .get_result::<S3Object>(connection)
-                .await
-                .map_err(|e| Error::QueryError(e.to_string()))?;
+                .await?;
 
             Ok(inserted_object)
         }

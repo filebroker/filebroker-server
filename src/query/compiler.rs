@@ -9,7 +9,7 @@ use self::{
     parser::Parser,
 };
 
-use super::QueryParameters;
+use super::{MAX_PAGE, QueryBuilderPagination, QueryParameters};
 
 use crate::query::compiler::ast::{
     ExpressionStatement, Operator, StatementNode, combine_expressions,
@@ -627,31 +627,49 @@ pub fn apply_pagination(
                 parsed_limit, pagination.max_limit
             )));
         }
+        if page > MAX_PAGE {
+            return Err(crate::Error::IllegalQueryInputError(format!(
+                "Page {} exceeds maximum page of {}.",
+                page, MAX_PAGE
+            )));
+        }
+
+        // wrap the evaluated limit in a LEAST function to protect against large limits and enforce max limit
+        fn append_safe_limit(
+            sql_query: &mut String,
+            limit: &str,
+            pagination: &QueryBuilderPagination,
+            include_window: bool,
+        ) {
+            sql_query.push_str("LEAST(");
+            if include_window {
+                sql_query.push('(');
+                sql_query.push_str(limit);
+                sql_query.push_str(" + 2)");
+            } else {
+                sql_query.push_str(limit);
+            }
+            sql_query.push_str(", ");
+            let max_limit_str = pagination.max_limit.to_string();
+            if include_window {
+                sql_query.push('(');
+                sql_query.push_str(&max_limit_str);
+                sql_query.push_str(" + 2)");
+            } else {
+                sql_query.push_str(&max_limit_str);
+            }
+            sql_query.push(')');
+        }
 
         // for window queries, increase the limit by 2 and subtract 1 from the offset
         // to include the last post from the previous page and the first post from the next page
-        sql_query.push_str(" LIMIT LEAST(");
-        if include_window {
-            sql_query.push('(');
-            sql_query.push_str(limit);
-            sql_query.push_str(" + 2)");
-        } else {
-            sql_query.push_str(limit);
-        }
-        sql_query.push_str(", ");
-        let max_limit_str = pagination.max_limit.to_string();
-        if include_window {
-            sql_query.push('(');
-            sql_query.push_str(&max_limit_str);
-            sql_query.push_str(" + 2)");
-        } else {
-            sql_query.push_str(&max_limit_str);
-        }
-        sql_query.push_str(") OFFSET (");
+        sql_query.push_str(" LIMIT ");
+        append_safe_limit(sql_query, limit, pagination, include_window);
+        sql_query.push_str(" OFFSET (");
         if include_window {
             sql_query.push_str("GREATEST(((");
         }
-        sql_query.push_str(limit);
+        append_safe_limit(sql_query, limit, pagination, include_window);
         sql_query.push_str(") * ");
         sql_query.push_str(&page.to_string());
         if include_window {

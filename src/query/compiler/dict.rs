@@ -70,6 +70,7 @@ pub enum Scope {
     Post,
     Collection,
     CollectionItem { collection_pk: i64 },
+    UserGroup,
     // Scopes for tag auto match conditions
     TagAutoMatchPost,
     TagAutoMatchCollection,
@@ -84,6 +85,7 @@ impl FromStr for Scope {
             "post" => Ok(Self::Post),
             "collection" => Ok(Self::Collection),
             "collection_item" => Ok(Self::CollectionItem { collection_pk: -1 }),
+            "user_group" => Ok(Self::UserGroup),
             "tag_auto_match_post" => Ok(Self::TagAutoMatchPost),
             "tag_auto_match_collection" => Ok(Self::TagAutoMatchCollection),
             _ => {
@@ -126,6 +128,7 @@ impl Scope {
                 );
                 post_attributes
             }
+            Self::UserGroup => USER_GROUP_ATTRIBUTES.clone(),
             Self::TagAutoMatchPost => POST_ATTRIBUTES.clone(),
             Self::TagAutoMatchCollection => COLLECTION_ATTRIBUTES.clone(),
         }
@@ -137,6 +140,7 @@ impl Scope {
             Self::Post => GLOBAL_FUNCTIONS.clone(),
             Self::Collection => GLOBAL_FUNCTIONS.clone(),
             Self::CollectionItem { .. } => GLOBAL_FUNCTIONS.clone(),
+            Self::UserGroup => GLOBAL_FUNCTIONS.clone(),
             Self::TagAutoMatchPost => GLOBAL_FUNCTIONS.clone(),
             Self::TagAutoMatchCollection => GLOBAL_FUNCTIONS.clone(),
         }
@@ -148,6 +152,7 @@ impl Scope {
             Self::Post => GLOBAL_MODIFIERS.clone(),
             Self::Collection => GLOBAL_MODIFIERS.clone(),
             Self::CollectionItem { .. } => GLOBAL_MODIFIERS.clone(),
+            Self::UserGroup => GLOBAL_MODIFIERS.clone(),
             Self::TagAutoMatchPost => HashMap::new(),
             Self::TagAutoMatchCollection => HashMap::new(),
         }
@@ -159,6 +164,7 @@ impl Scope {
             Self::Post => GLOBAL_VARIABLES.clone(),
             Self::Collection => GLOBAL_VARIABLES.clone(),
             Self::CollectionItem { .. } => GLOBAL_VARIABLES.clone(),
+            Self::UserGroup => GLOBAL_VARIABLES.clone(),
             Self::TagAutoMatchPost | Self::TagAutoMatchCollection => {
                 let mut global_variables = GLOBAL_VARIABLES.clone();
                 global_variables.remove("self");
@@ -601,6 +607,48 @@ lazy_static! {
             Arc::new(Attribute {
                 table: "post_collection",
                 selection_expression: String::from("post_collection.description"),
+                return_type: Type::String,
+                allow_sorting: false,
+                nullable: true
+            })
+        )
+    ]);
+    pub static ref USER_GROUP_ATTRIBUTES: HashMap<&'static str, Arc<Attribute>> = HashMap::from([
+        (
+            "date",
+            Arc::new(Attribute {
+                table: "user_group",
+                selection_expression: String::from("user_group.creation_timestamp"),
+                return_type: Type::DateTime,
+                allow_sorting: true,
+                nullable: false
+            })
+        ),
+        (
+            "name",
+            Arc::new(Attribute {
+                table: "user_group",
+                selection_expression: String::from("user_group.name"),
+                return_type: Type::String,
+                allow_sorting: true,
+                nullable: false,
+            })
+        ),
+        (
+            "owner",
+            Arc::new(Attribute {
+                table: "user_group",
+                selection_expression: String::from("user_group.fk_owner"),
+                return_type: Type::Number,
+                allow_sorting: false,
+                nullable: false
+            })
+        ),
+        (
+            "description",
+            Arc::new(Attribute {
+                table: "user_group",
+                selection_expression: String::from("user_group.description"),
                 return_type: Type::String,
                 allow_sorting: false,
                 nullable: true

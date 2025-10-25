@@ -1,6 +1,9 @@
 use std::{cmp, collections::HashMap, str::FromStr};
 
 use chrono::{DateTime, Utc};
+use diesel::query_builder::{BoxedSelectStatement, QueryId};
+use diesel::query_dsl::methods::{OrderDsl, ThenOrderDsl};
+use diesel::sql_types::SingleValue;
 use diesel::{OptionalExtension, QueryDsl, QueryableByName};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
@@ -9,7 +12,7 @@ use warp::{Rejection, Reply};
 
 use crate::model::{
     PostCollectionFull, PostCollectionItemQueryObject, PostCollectionQueryObject, S3ObjectMetadata,
-    UserPublic,
+    UserGroupQueryObject, UserPublic,
 };
 use crate::perms::{PostCollectionItemJoined, PostCollectionJoined};
 use crate::post::PostCollectionGroupAccessDetailed;
@@ -43,6 +46,7 @@ const DEFAULT_LIMIT_STR: &str = "50";
 const MAX_LIMIT: u32 = 100;
 const MAX_FULL_LIMIT: u32 = 10000;
 const MAX_FULL_LIMIT_STR: &str = "10000";
+const MAX_PAGE: u32 = 998; // client pages start at 1 so this corresponds to page 999
 
 macro_rules! report_missing_pks {
     ($tab:ident, $pks:expr, $connection:expr) => {
@@ -109,16 +113,10 @@ use crate::tag::TagUsage;
 pub(crate) use load_and_report_missing_pks;
 
 #[derive(Deserialize, Validate)]
-pub struct PaginationQueryParams {
-    #[validate(range(min = 1, max = 20))]
-    pub limit: Option<u32>,
-    #[validate(range(min = 1, max = 1000))]
-    pub page: Option<u32>,
-}
-
-#[derive(Deserialize, Validate)]
 pub struct QueryParametersFilter {
+    #[validate(range(min = 1, max = 100))]
     pub limit: Option<u32>,
+    #[validate(range(min = 0, max = 1000))]
     pub page: Option<u32>,
     #[validate(length(min = 0, max = 1024))]
     pub query: Option<String>,
@@ -141,6 +139,7 @@ pub struct QueryParameters {
     pub predefined_where_conditions: Option<Vec<String>>,
     pub include_full_count: bool,
     pub privileged: bool,
+    pub get_secure_query_condition: fn(Option<&User>, &QueryParameters) -> Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -174,6 +173,8 @@ pub struct SearchResult {
     pub collections: Option<Vec<PostCollectionQueryObject>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collection_items: Option<Vec<PostCollectionItemQueryObject>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_groups: Option<Vec<UserGroupQueryObject>>,
 }
 
 pub async fn search_handler(
@@ -243,6 +244,10 @@ pub async fn search_handler(
                 &mut connection,
             )
             .await?,
+        )),
+        Scope::UserGroup => Ok(warp::reply::json(
+            &get_search_result::<UserGroupQueryObject>(sql_query, max_limit, &mut connection)
+                .await?,
         )),
     }
 }
@@ -800,6 +805,8 @@ pub fn prepare_query_parameters(
                         "create_user.creation_timestamp AS post_create_user_creation_timestamp",
                     ),
                     String::from("create_user.display_name AS post_create_user_display_name"),
+                    String::from("create_user.is_admin AS post_create_user_is_admin"),
+                    String::from("create_user.is_banned AS post_create_user_is_banned"),
                     String::from(
                         "create_user.avatar_object_key AS post_create_user_avatar_object_key",
                     ),
@@ -941,6 +948,7 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: scope != &Scope::TagAutoMatchPost,
             privileged: scope == &Scope::TagAutoMatchPost,
+            get_secure_query_condition: perms::get_secure_query_condition_string,
         }),
         Scope::Collection | Scope::TagAutoMatchCollection => Ok(QueryParameters {
             pagination: if scope == &Scope::TagAutoMatchCollection {
@@ -1017,6 +1025,8 @@ pub fn prepare_query_parameters(
                     String::from(
                         "create_user.display_name AS post_collection_create_user_display_name",
                     ),
+                    String::from("create_user.is_admin AS post_collection_create_user_is_admin"),
+                    String::from("create_user.is_banned AS post_collection_create_user_is_banned"),
                     String::from(
                         "create_user.avatar_object_key AS post_collection_create_user_avatar_object_key",
                     ),
@@ -1040,6 +1050,7 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: scope != &Scope::TagAutoMatchCollection,
             privileged: scope == &Scope::TagAutoMatchCollection,
+            get_secure_query_condition: perms::get_secure_query_condition_string,
         }),
         Scope::CollectionItem { collection_pk } => Ok(QueryParameters {
             pagination: Some(QueryBuilderPagination {
@@ -1071,6 +1082,12 @@ pub fn prepare_query_parameters(
                     "post_collection_item_added_user.display_name AS post_collection_item_added_user_display_name",
                 ),
                 String::from(
+                    "post_collection_item_added_user.is_admin AS post_collection_item_added_user_is_admin",
+                ),
+                String::from(
+                    "post_collection_item_added_user.is_banned AS post_collection_item_added_user_is_banned",
+                ),
+                String::from(
                     "post_collection_item_added_user.avatar_object_key AS post_collection_item_added_user_avatar_object_key",
                 ),
                 // post data
@@ -1092,6 +1109,8 @@ pub fn prepare_query_parameters(
                     "post_create_user.creation_timestamp AS post_create_user_creation_timestamp",
                 ),
                 String::from("post_create_user.display_name AS post_create_user_display_name"),
+                String::from("create_user.is_admin AS post_create_user_is_admin"),
+                String::from("create_user.is_banned AS post_create_user_is_banned"),
                 String::from(
                     "post_create_user.avatar_object_key AS post_create_user_avatar_object_key",
                 ),
@@ -1250,6 +1269,12 @@ pub fn prepare_query_parameters(
                     "post_collection_create_user.display_name AS post_collection_create_user_display_name",
                 ),
                 String::from(
+                    "post_collection_create_user.is_admin AS post_collection_create_user_is_admin",
+                ),
+                String::from(
+                    "post_collection_create_user.is_banned AS post_collection_create_user_is_banned",
+                ),
+                String::from(
                     "post_collection_create_user.avatar_object_key AS post_collection_create_user_avatar_object_key",
                 ),
             ],
@@ -1289,6 +1314,89 @@ pub fn prepare_query_parameters(
             )]),
             include_full_count: true,
             privileged: false,
+            get_secure_query_condition: perms::get_secure_query_condition_string,
+        }),
+        Scope::UserGroup => Ok(QueryParameters {
+            pagination: Some(QueryBuilderPagination {
+                limit: query_parameters_filter.limit.map(|l| l.to_string()),
+                page: query_parameters_filter.page,
+                max_limit: MAX_LIMIT,
+            }),
+            ordering: Vec::new(),
+            variables,
+            shuffle: query_parameters_filter.shuffle.unwrap_or(false),
+            writable_only: query_parameters_filter.writable_only.unwrap_or(false),
+            base_table_name: "user_group",
+            select_statements: vec![
+                String::from("user_group.pk AS user_group_pk"),
+                String::from("user_group.name AS user_group_name"),
+                String::from("user_group.public AS user_group_public"),
+                String::from("user_group_owner_user.pk AS user_group_owner_user_pk"),
+                String::from("user_group_owner_user.user_name AS user_group_owner_user_user_name"),
+                String::from(
+                    "user_group_owner_user.creation_timestamp AS user_group_owner_user_creation_timestamp",
+                ),
+                String::from(
+                    "user_group_owner_user.display_name AS user_group_owner_user_display_name",
+                ),
+                String::from("user_group_owner_user.is_admin AS user_group_owner_user_is_admin"),
+                String::from("user_group_owner_user.is_banned AS user_group_owner_user_is_banned"),
+                String::from(
+                    "user_group_owner_user.avatar_object_key AS user_group_owner_user_avatar_object_key",
+                ),
+                String::from("user_group.creation_timestamp AS user_group_creation_timestamp"),
+                String::from("user_group.description AS user_group_description"),
+                String::from("user_group.allow_member_invite AS user_group_allow_member_invite"),
+                String::from("user_group.avatar_object_key AS user_group_avatar_object_key"),
+                String::from("user_group.edit_timestamp AS user_group_edit_timestamp"),
+            ],
+            join_statements: vec![String::from(
+                "INNER JOIN registered_user user_group_owner_user ON user_group.fk_owner = user_group_owner_user.pk",
+            )],
+            fallback_orderings: vec![Ordering {
+                expression: String::from("user_group.pk"),
+                direction: Direction::Descending,
+                nullable: false,
+                table: "user_group",
+            }],
+            from_table_override: None,
+            predefined_where_conditions: None,
+            include_full_count: true,
+            privileged: false,
+            get_secure_query_condition: |user, query_parameters| {
+                if query_parameters.privileged
+                    || (user.is_some() && user.as_ref().unwrap().is_admin)
+                {
+                    return None;
+                }
+                let user_key = user
+                    .as_ref()
+                    .map(|u| u.pk.to_string())
+                    .unwrap_or_else(|| String::from("NULL"));
+
+                let (group_access_write_cond, public_cond) = if query_parameters.writable_only {
+                    ("user_group_membership.administrator", "FALSE")
+                } else {
+                    ("TRUE", "user_group.public")
+                };
+
+                let membership_cond = if user.is_some() {
+                    format!(
+                        r#"
+                    EXISTS(
+                        SELECT * FROM user_group_membership
+                        WHERE NOT revoked AND fk_group = user_group.pk AND fk_user = {user_key} AND {group_access_write_cond}
+                    )
+                    "#
+                    )
+                } else {
+                    String::from("FALSE")
+                };
+
+                Some(format!(
+                    "({public_cond} OR user_group.fk_owner = {user_key} OR {membership_cond})"
+                ))
+            },
         }),
     }
 }
@@ -1553,6 +1661,92 @@ fn find_nested_expression(
     } else {
         expression
     }
+}
+
+pub type ApplyOrderFn<'a, ST, QS, DB> = dyn FnOnce(bool, BoxedSelectStatement<'a, ST, QS, DB>) -> BoxedSelectStatement<'a, ST, QS, DB>
+    + Send;
+
+/// Helper function to apply ordering to a query based on a map of ordering keys to a function applying the ordering, see `order_by_col`
+/// `ordering`: e.g. "group.name" or "-creation_timestamp"
+/// `default_ordering`: fallback when `ordering` is None/empty, tuple for (key, is_descending)
+pub fn apply_key_ordering<'a, ST, QS, DB>(
+    mut ordering_key: Option<String>,
+    default_ordering: (&'static str, bool),
+    query: BoxedSelectStatement<'a, ST, QS, DB>,
+    mut key_col_map: HashMap<&'static str, Box<ApplyOrderFn<'a, ST, QS, DB>>>,
+) -> Result<BoxedSelectStatement<'a, ST, QS, DB>, Error>
+where
+    DB: diesel::backend::Backend + 'a,
+{
+    let (key, desc) = if let Some(mut ord) = ordering_key.take().filter(|s| !s.is_empty()) {
+        let is_desc = if ord.starts_with('-') {
+            ord.remove(0);
+            true
+        } else {
+            false
+        };
+        (ord, is_desc)
+    } else {
+        (default_ordering.0.to_string(), default_ordering.1)
+    };
+
+    if let Some(apply) = key_col_map.remove(key.as_str()) {
+        Ok(apply(desc, query))
+    } else {
+        Err(Error::InvalidReferencePathError(key))
+    }
+}
+
+/// Helper function to apply an ordering to a query given the provided column expression
+pub fn order_by_col<'a, ST, QS, DB, C>(
+    q: BoxedSelectStatement<'a, ST, QS, DB>,
+    desc: bool,
+    col: C,
+) -> BoxedSelectStatement<'a, ST, QS, DB>
+where
+    DB: diesel::backend::Backend + 'a,
+    C: diesel::Expression + QueryId + 'static,
+    C::SqlType: SingleValue,
+    BoxedSelectStatement<'a, ST, QS, DB>: OrderDsl<C, Output = BoxedSelectStatement<'a, ST, QS, DB>>
+        + OrderDsl<diesel::dsl::Desc<C>, Output = BoxedSelectStatement<'a, ST, QS, DB>>,
+{
+    if desc {
+        QueryDsl::order(q, ExpressionMethods::desc(col))
+    } else {
+        QueryDsl::order(q, col)
+    }
+}
+
+pub fn order_by_col_fn<'a, ST, QS, DB, C>(col: C) -> Box<ApplyOrderFn<'a, ST, QS, DB>>
+where
+    DB: diesel::backend::Backend + 'a,
+    C: diesel::Expression + QueryId + Send + 'static,
+    C::SqlType: SingleValue,
+    BoxedSelectStatement<'a, ST, QS, DB>: OrderDsl<C, Output = BoxedSelectStatement<'a, ST, QS, DB>>
+        + OrderDsl<diesel::dsl::Desc<C>, Output = BoxedSelectStatement<'a, ST, QS, DB>>,
+{
+    Box::new(move |desc, q| order_by_col(q, desc, col))
+}
+
+/// Same as order_by_col_fn, but additionally applies a tie-breaker via `then_order_by`.
+/// `tie` can be any expression accepted by `ThenOrderDsl` (e.g. `table::pk.desc()`).
+pub fn order_by_col_with_tie_fn<'a, ST, QS, DB, C, T>(
+    col: C,
+    tie: T,
+) -> Box<ApplyOrderFn<'a, ST, QS, DB>>
+where
+    DB: diesel::backend::Backend + 'a,
+    C: diesel::Expression + QueryId + Send + 'static,
+    C::SqlType: SingleValue,
+    T: Send + 'static,
+    BoxedSelectStatement<'a, ST, QS, DB>: OrderDsl<C, Output = BoxedSelectStatement<'a, ST, QS, DB>>
+        + OrderDsl<diesel::dsl::Desc<C>, Output = BoxedSelectStatement<'a, ST, QS, DB>>
+        + ThenOrderDsl<T, Output = BoxedSelectStatement<'a, ST, QS, DB>>,
+{
+    Box::new(move |desc, q| {
+        let q = order_by_col(q, desc, col);
+        QueryDsl::then_order_by(q, tie)
+    })
 }
 
 pub mod functions {

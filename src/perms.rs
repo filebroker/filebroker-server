@@ -1,24 +1,22 @@
 use std::collections::HashSet;
 
-use chrono::Utc;
 use diesel::sql_types::Bool;
 use diesel::{
     IntoSql, JoinOnDsl, NullableExpressionMethods, QueryDsl,
     dsl::{exists, not},
 };
-use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
-use serde::Deserialize;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use warp::{Rejection, Reply};
 
 use crate::{
     acquire_db_connection,
     diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension},
-    error::{Error, TransactionRuntimeError},
+    error::Error,
     model::{
-        Broker, NewUserGroup, Post, PostCollection, PostCollectionItem, S3Object, S3ObjectMetadata,
-        User, UserGroup, UserPublic,
+        Broker, Post, PostCollection, PostCollectionItem, S3Object, S3ObjectMetadata, User,
+        UserGroup, UserPublic,
     },
-    run_retryable_transaction,
+    query::QueryParameters,
     schema::{
         self, broker, broker_access, post, post_collection, post_collection_group_access,
         post_collection_item, post_group_access, registered_user, s3_object, s3_object_metadata,
@@ -31,8 +29,18 @@ pub fn append_secure_query_condition(
     user: &Option<User>,
     query_parameters: &QueryParameters,
 ) {
+    let cond = (query_parameters.get_secure_query_condition)(user.as_ref(), query_parameters);
+    if let Some(cond) = cond {
+        where_expressions.push(cond);
+    }
+}
+
+pub fn get_secure_query_condition_string(
+    user: Option<&User>,
+    query_parameters: &QueryParameters,
+) -> Option<String> {
     if query_parameters.privileged || (user.is_some() && user.as_ref().unwrap().is_admin) {
-        return;
+        return None;
     }
     let user_key = user
         .as_ref()
@@ -52,7 +60,7 @@ pub fn append_secure_query_condition(
     };
 
     if user.is_some() {
-        where_expressions.push(format!(
+        Some(format!(
             r#"
             ({base_table_name}.fk_create_user = {user_key}
             OR ({base_table_name}.public AND {public_edit_cond})
@@ -69,30 +77,56 @@ pub fn append_secure_query_condition(
                     )
                 )
             ))"#
-        ));
+        ))
     } else {
-        where_expressions.push(format!(
+        Some(format!(
             r#"
             ({base_table_name}.fk_create_user = {user_key}
             OR ({base_table_name}.public AND {public_edit_cond}))"#
-        ));
+        ))
     }
 }
 
 macro_rules! get_group_membership_condition {
     ($user_pk:expr) => {
-        user_group::fk_owner.nullable().eq($user_pk).or(exists(
-            user_group_membership::table.filter(
-                user_group_membership::fk_group
-                    .eq(user_group::pk)
-                    .and(user_group_membership::fk_user.nullable().eq($user_pk))
-                    .and(not(user_group_membership::revoked)),
-            ),
-        ))
+        user_group::fk_owner
+            .nullable()
+            .eq($user_pk)
+            .or(diesel::dsl::exists(
+                user_group_membership::table.filter(
+                    user_group_membership::fk_group
+                        .eq(user_group::pk)
+                        .and(user_group_membership::fk_user.nullable().eq($user_pk))
+                        .and(diesel::dsl::not(user_group_membership::revoked)),
+                ),
+            ))
     };
 }
 
 pub(crate) use get_group_membership_condition;
+
+macro_rules! get_group_membership_administrator_condition {
+    ($user_pk:expr) => {
+        crate::schema::user_group::fk_owner
+            .nullable()
+            .eq($user_pk)
+            .or(diesel::dsl::exists(
+                crate::schema::user_group_membership::table.filter(
+                    crate::schema::user_group_membership::fk_group
+                        .eq(crate::schema::user_group::pk)
+                        .and(
+                            crate::schema::user_group_membership::fk_user
+                                .nullable()
+                                .eq($user_pk),
+                        )
+                        .and(not(crate::schema::user_group_membership::revoked))
+                        .and(crate::schema::user_group_membership::administrator),
+                ),
+            ))
+    };
+}
+
+pub(crate) use get_group_membership_administrator_condition;
 
 macro_rules! get_group_access_condition {
     ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
@@ -155,7 +189,6 @@ macro_rules! get_broker_group_access_write_condition {
 
 pub(crate) use get_broker_group_access_write_condition;
 
-use crate::query::QueryParameters;
 pub(crate) use get_group_access_write_condition;
 
 pub struct PostJoined {
@@ -545,7 +578,7 @@ pub async fn load_s3_object_posts(
         )
         .load::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
         .await
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .map_err(Error::from)
         .map(|tuples| {
             tuples
                 .into_iter()
@@ -608,23 +641,51 @@ pub async fn get_brokers_secured(
         )
         .load::<Broker>(connection)
         .await
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .map_err(Error::from)
 }
 
-pub async fn get_user_groups_secured(
-    connection: &mut AsyncPgConnection,
+pub async fn load_user_group_secured(
+    user_group_pk: i64,
     user: Option<&User>,
-) -> Result<Vec<UserGroup>, Error> {
+    connection: &mut AsyncPgConnection,
+) -> Result<UserGroup, Error> {
     let user_pk = user.map(|u| u.pk);
     user_group::table
         .filter(
-            not(user_group::hidden)
-                .or(user.map(|u| u.is_admin).unwrap_or(false).into_sql::<Bool>())
-                .or(get_group_membership_condition!(user_pk)),
+            user_group::pk.eq(user_group_pk).and(
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(user_group::public)
+                    .or(get_group_membership_condition!(user_pk)),
+            ),
         )
-        .load::<UserGroup>(connection)
+        .get_result::<UserGroup>(connection)
         .await
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .optional()?
+        .ok_or(Error::InaccessibleObjectError(user_group_pk))
+}
+
+pub async fn is_user_group_editable(
+    user_group_pk: i64,
+    user: Option<&User>,
+    connection: &mut AsyncPgConnection,
+) -> Result<bool, Error> {
+    if user.map(|u| u.is_admin).unwrap_or(false) {
+        return Ok(true);
+    }
+    let user_pk = user.map(|u| u.pk);
+    user_group::table
+        .filter(
+            user_group::pk
+                .eq(user_group_pk)
+                .and(get_group_membership_administrator_condition!(user_pk)),
+        )
+        .get_result::<UserGroup>(connection)
+        .await
+        .optional()
+        .map_err(Error::from)
+        .map(|result| result.is_some())
 }
 
 pub async fn get_current_user_groups(
@@ -635,7 +696,7 @@ pub async fn get_current_user_groups(
         .filter(get_group_membership_condition!(user.pk))
         .load::<UserGroup>(connection)
         .await
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .map_err(Error::from)
 }
 
 pub async fn is_post_editable(
@@ -665,7 +726,7 @@ pub async fn is_post_editable(
         .get_result::<Post>(connection)
         .await
         .optional()
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .map_err(Error::from)
         .map(|result| result.is_some())
 }
 
@@ -696,7 +757,7 @@ pub async fn filter_posts_editable(
         )
         .load::<i64>(connection)
         .await
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .map_err(Error::from)
 }
 
 pub async fn is_post_deletable(
@@ -728,7 +789,7 @@ pub async fn is_post_deletable(
         .get_result::<i64>(connection)
         .await
         .optional()
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .map_err(Error::from)
         .map(|result| result.is_some())
 }
 
@@ -758,7 +819,7 @@ pub async fn filter_posts_deletable(
         )
         .load::<i64>(connection)
         .await
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .map_err(Error::from)
 }
 
 pub async fn is_post_collection_editable(
@@ -788,7 +849,7 @@ pub async fn is_post_collection_editable(
         .get_result::<PostCollection>(connection)
         .await
         .optional()
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .map_err(Error::from)
         .map(|result| result.is_some())
 }
 
@@ -811,54 +872,8 @@ pub async fn is_post_collection_deletable(
         .get_result::<i64>(connection)
         .await
         .optional()
-        .map_err(|e| Error::QueryError(e.to_string()))
+        .map_err(Error::from)
         .map(|result| result.is_some())
-}
-
-#[derive(Deserialize)]
-pub struct CreateUserGroupRequest {
-    pub name: String,
-    pub public: bool,
-    pub hidden: bool,
-}
-
-pub async fn create_user_group_handler(
-    request: CreateUserGroupRequest,
-    user: User,
-) -> Result<impl Reply, Rejection> {
-    let mut connection = acquire_db_connection().await?;
-    let user_group = run_retryable_transaction(&mut connection, |connection| {
-        async move {
-            let current_groups = get_current_user_groups(connection, &user).await?;
-            if current_groups.len() >= 250 {
-                return Err(TransactionRuntimeError::from(Error::BadRequestError(
-                    String::from("Cannot be a member of more than 250 groups"),
-                )));
-            }
-
-            Ok(diesel::insert_into(user_group::table)
-                .values(&NewUserGroup {
-                    name: request.name,
-                    public: request.public,
-                    hidden: request.hidden,
-                    fk_owner: user.pk,
-                    creation_timestamp: Utc::now(),
-                })
-                .get_result::<UserGroup>(connection)
-                .await?)
-        }
-        .scope_boxed()
-    })
-    .await?;
-
-    Ok(warp::reply::json(&user_group))
-}
-
-pub async fn get_user_groups_handler(user: Option<User>) -> Result<impl Reply, Rejection> {
-    let mut connection = acquire_db_connection().await?;
-    Ok(warp::reply::json(
-        &get_user_groups_secured(&mut connection, user.as_ref()).await?,
-    ))
 }
 
 pub async fn get_current_user_groups_handler(user: User) -> Result<impl Reply, Rejection> {

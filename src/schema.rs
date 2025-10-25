@@ -1,5 +1,11 @@
 // @generated automatically by Diesel CLI.
 
+pub mod sql_types {
+    #[derive(diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "user_group_audit_action"))]
+    pub struct UserGroupAuditAction;
+}
+
 diesel::table! {
     apply_auto_tags_task (pk) {
         pk -> Int8,
@@ -462,9 +468,75 @@ diesel::table! {
         #[max_length = 255]
         name -> Varchar,
         public -> Bool,
-        hidden -> Bool,
         fk_owner -> Int8,
         creation_timestamp -> Timestamptz,
+        description -> Nullable<Text>,
+        allow_member_invite -> Bool,
+        #[max_length = 255]
+        avatar_object_key -> Nullable<Varchar>,
+        fk_create_user -> Int8,
+        edit_timestamp -> Timestamptz,
+        fk_edit_user -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::UserGroupAuditAction;
+
+    user_group_audit_log (pk) {
+        pk -> Int8,
+        fk_user_group -> Int8,
+        fk_user -> Int8,
+        action -> UserGroupAuditAction,
+        fk_target_user -> Nullable<Int8>,
+        #[max_length = 10]
+        invite_code -> Nullable<Varchar>,
+        reason -> Nullable<Text>,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    user_group_edit_history (pk) {
+        pk -> Int8,
+        fk_user_group -> Int8,
+        fk_edit_user -> Int8,
+        edit_timestamp -> Timestamptz,
+        #[max_length = 255]
+        name -> Varchar,
+        name_changed -> Bool,
+        public -> Bool,
+        public_changed -> Bool,
+        description -> Nullable<Text>,
+        description_changed -> Bool,
+        allow_member_invite -> Bool,
+        allow_member_invite_changed -> Bool,
+        tags_changed -> Bool,
+    }
+}
+
+diesel::table! {
+    user_group_edit_history_tag (fk_user_group_edit_history, fk_tag) {
+        fk_user_group_edit_history -> Int8,
+        fk_tag -> Int8,
+        auto_matched -> Bool,
+    }
+}
+
+diesel::table! {
+    user_group_invite (code) {
+        #[max_length = 10]
+        code -> Varchar,
+        fk_user_group -> Int8,
+        fk_create_user -> Int8,
+        fk_invited_user -> Nullable<Int8>,
+        creation_timestamp -> Timestamptz,
+        expiration_timestamp -> Nullable<Timestamptz>,
+        last_used_timestamp -> Nullable<Timestamptz>,
+        max_uses -> Nullable<Int4>,
+        uses_count -> Int4,
+        revoked -> Bool,
     }
 }
 
@@ -476,6 +548,14 @@ diesel::table! {
         revoked -> Bool,
         fk_granted_by -> Int8,
         creation_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    user_group_tag (fk_user_group, fk_tag) {
+        fk_user_group -> Int8,
+        fk_tag -> Int8,
+        auto_matched -> Bool,
     }
 }
 
@@ -530,8 +610,16 @@ diesel::joinable!(tag_edit_history_alias -> tag (fk_alias));
 diesel::joinable!(tag_edit_history_alias -> tag_edit_history (fk_tag_edit_history));
 diesel::joinable!(tag_edit_history_parent -> tag (fk_parent));
 diesel::joinable!(tag_edit_history_parent -> tag_edit_history (fk_tag_edit_history));
-diesel::joinable!(user_group -> registered_user (fk_owner));
+diesel::joinable!(user_group -> s3_object (avatar_object_key));
+diesel::joinable!(user_group_audit_log -> user_group (fk_user_group));
+diesel::joinable!(user_group_edit_history -> registered_user (fk_edit_user));
+diesel::joinable!(user_group_edit_history -> user_group (fk_user_group));
+diesel::joinable!(user_group_edit_history_tag -> tag (fk_tag));
+diesel::joinable!(user_group_edit_history_tag -> user_group_edit_history (fk_user_group_edit_history));
+diesel::joinable!(user_group_invite -> user_group (fk_user_group));
 diesel::joinable!(user_group_membership -> user_group (fk_group));
+diesel::joinable!(user_group_tag -> tag (fk_tag));
+diesel::joinable!(user_group_tag -> user_group (fk_user_group));
 
 diesel::allow_tables_to_appear_in_same_query!(
     apply_auto_tags_task,
@@ -567,5 +655,10 @@ diesel::allow_tables_to_appear_in_same_query!(
     tag_edit_history_alias,
     tag_edit_history_parent,
     user_group,
+    user_group_audit_log,
+    user_group_edit_history,
+    user_group_edit_history_tag,
+    user_group_invite,
     user_group_membership,
+    user_group_tag,
 );

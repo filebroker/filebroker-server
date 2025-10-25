@@ -1,8 +1,9 @@
 use chrono::Utc;
+use diesel::sql_types::Bool;
 use diesel::{
-    BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, OptionalExtension,
-    QueryDsl, Table,
-    dsl::{self, exists, not},
+    BoolExpressionMethods, ExpressionMethods, IntoSql, NullableExpressionMethods,
+    OptionalExtension, QueryDsl, Table,
+    dsl::{self, not},
     sql_types::BigInt,
     upsert::excluded,
 };
@@ -216,6 +217,8 @@ macro_rules! handle_object_tag_update {
     }};
 }
 
+pub(crate) use handle_object_tag_update;
+
 macro_rules! handle_object_group_access_update {
     ($source_object_pk:expr, $group_access_relation_entity:ident, $group_access_relation_table:ident, $fk_source_object:ident, $group_access_overwrite:expr, $added_group_access:expr, $removed_group_access:expr, $user:expr, $connection:expr) => {{
         let previous_group_access = $group_access_relation_table::table
@@ -233,7 +236,7 @@ macro_rules! handle_object_group_access_update {
                     .inner_join(user_group::table)
                     .select($group_access_relation_table::table::all_columns())
                     .filter($group_access_relation_table::$fk_source_object.eq($source_object_pk).and(
-                        not(user_group::hidden).or(perms::get_group_membership_condition!($user.pk)),
+                        $user.is_admin.into_sql::<Bool>().or(user_group::public).or(perms::get_group_membership_condition!($user.pk)),
                     ))
                     .load::<$group_access_relation_entity>($connection)
                     .await?;
@@ -434,12 +437,15 @@ pub async fn edit_post_handler(
 
     let mut connection = acquire_db_connection().await?;
 
-    let (post, apply_auto_tags_task) =
+    let (post_detailed, apply_auto_tags_task) =
         run_serializable_transaction(&mut connection, |connection| {
             async {
                 let (updated_post, apply_auto_tags_task) =
                     update_post(post_pk, &user, request.clone(), connection).await?;
-                Ok((updated_post, apply_auto_tags_task))
+                Ok((
+                    load_post_detailed(updated_post, Some(&user), connection).await?,
+                    apply_auto_tags_task,
+                ))
             }
             .scope_boxed()
         })
@@ -449,9 +455,7 @@ pub async fn edit_post_handler(
         spawn_apply_auto_tags_task(apply_auto_tags_task);
     }
 
-    Ok(warp::reply::json(
-        &load_post_detailed(post, Some(&user), &mut connection).await?,
-    ))
+    Ok(warp::reply::json(&post_detailed))
 }
 
 pub async fn update_post(
@@ -672,13 +676,17 @@ pub async fn edit_post_collection_handler(
 
     let mut connection = acquire_db_connection().await?;
 
-    let (post_collection, apply_auto_tags_task) =
+    let (post_collection_detailed, apply_auto_tags_task) =
         run_serializable_transaction(&mut connection, |connection| {
             async {
                 let (updated_post_collection, apply_auto_tags_task) =
                     update_post_collection(post_collection_pk, &user, request.clone(), connection)
                         .await?;
-                Ok((updated_post_collection, apply_auto_tags_task))
+                Ok((
+                    load_post_collection_detailed(updated_post_collection, Some(&user), connection)
+                        .await?,
+                    apply_auto_tags_task,
+                ))
             }
             .scope_boxed()
         })
@@ -688,9 +696,7 @@ pub async fn edit_post_collection_handler(
         spawn_apply_auto_tags_task(apply_auto_tags_task);
     }
 
-    Ok(warp::reply::json(
-        &load_post_collection_detailed(post_collection, Some(&user), &mut connection).await?,
-    ))
+    Ok(warp::reply::json(&post_collection_detailed))
 }
 
 pub async fn update_post_collection(

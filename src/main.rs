@@ -15,13 +15,19 @@ use diesel_async::{
 #[cfg(feature = "auto_migration")]
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
+use crate::post::history::HistoryPaginationQueryParams;
+use crate::user_group::history::AuditPaginationQueryParams;
+use crate::user_group::invite::{GetCurrentUserGroupInvitesParams, GetUserGroupInvitesParams};
+use crate::user_group::{
+    GetCurrentUserGroupMembershipsParams, GetUserGroupBrokersParams, GetUserGroupMembersParams,
+};
 use crate::util::OptFmt;
 use dotenvy::dotenv;
 use error::{Error, TransactionRuntimeError};
 use futures::{Future, FutureExt, StreamExt, TryFuture, future::BoxFuture};
 use lazy_static::lazy_static;
 use mime::Mime;
-use query::{PaginationQueryParams, QueryParametersFilter};
+use query::QueryParametersFilter;
 use rustls::{
     ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer},
@@ -69,6 +75,7 @@ mod query;
 mod schema;
 mod tag;
 mod task;
+mod user_group;
 mod util;
 
 pub type DbConnection = Object<AsyncPgConnection>;
@@ -224,6 +231,22 @@ where
         .await
 }
 
+pub async fn run_repeatable_read_transaction<'b, 'c, T: 'b, F>(
+    connection: &mut AsyncPgConnection,
+    function: F,
+) -> Result<T, Error>
+where
+    F: for<'r> FnOnce(
+            &'r mut AsyncPgConnection,
+        ) -> ScopedBoxFuture<'b, 'r, Result<T, TransactionRuntimeError>>
+        + Clone
+        + Send
+        + 'c,
+{
+    run_retryable_transaction_with_level(connection.build_transaction().repeatable_read(), function)
+        .await
+}
+
 async fn run_retryable_transaction_with_level<'b, 'c, T, F>(
     mut transaction_builder: TransactionBuilder<'c, AsyncPgConnection>,
     function: F,
@@ -251,7 +274,10 @@ where
                     "Retrying transaction after serialization failure, constraint violation or other Retry Error"
                 );
             }
-            Err(TransactionRuntimeError::Retry(e)) => break Err(e),
+            Err(TransactionRuntimeError::Retry(e)) => {
+                log::error!("Maximum transaction retry count reached, aborting transaction: {e}");
+                break Err(e);
+            }
             Err(TransactionRuntimeError::Rollback(e)) => break Err(e),
             Ok(res) => break Ok(res),
         }
@@ -264,7 +290,8 @@ pub fn retry_on_constraint_violation(e: diesel::result::Error) -> TransactionRun
     match e {
         diesel::result::Error::DatabaseError(
             diesel::result::DatabaseErrorKind::UniqueViolation
-            | diesel::result::DatabaseErrorKind::ForeignKeyViolation,
+            | diesel::result::DatabaseErrorKind::ForeignKeyViolation
+            | diesel::result::DatabaseErrorKind::SerializationFailure,
             _,
         ) => TransactionRuntimeError::Retry(e.into()),
         _ => TransactionRuntimeError::Rollback(e.into()),
@@ -515,12 +542,7 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(warp::post())
         .and(warp::body::json())
         .and(auth::with_user())
-        .and_then(perms::create_user_group_handler);
-
-    let get_user_groups_route = warp::path("get-user-groups")
-        .and(warp::get())
-        .and(auth::with_user_optional())
-        .and_then(perms::get_user_groups_handler);
+        .and_then(user_group::create::create_user_group_handler);
 
     let get_current_user_groups_route = warp::path("get-current-user-groups")
         .and(warp::get())
@@ -636,14 +658,14 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
 
     let get_post_edit_history_route = warp::path("get-post-edit-history")
         .and(warp::get())
-        .and(warp::query::<PaginationQueryParams>())
+        .and(warp::query::<HistoryPaginationQueryParams>())
         .and(warp::path::param())
         .and(auth::with_user())
         .and_then(post::history::get_post_edit_history_handler);
 
     let get_post_collection_edit_history_route = warp::path("get-post-collection-edit-history")
         .and(warp::get())
-        .and(warp::query::<PaginationQueryParams>())
+        .and(warp::query::<HistoryPaginationQueryParams>())
         .and(warp::path::param())
         .and(auth::with_user())
         .and_then(post::history::get_post_collection_edit_history_handler);
@@ -679,11 +701,11 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
 
     let get_tag_edit_history_route = warp::path("get-tag-edit-history")
         .and(warp::get())
-        .and(warp::query::<PaginationQueryParams>())
+        .and(warp::query::<HistoryPaginationQueryParams>())
         .and(warp::path::param())
         .and_then(tag::history::get_tag_edit_history_handler);
 
-    let rewind_tag_history_snapshot_handler = warp::path("rewind-tag-history-snapshot")
+    let rewind_tag_history_snapshot_route = warp::path("rewind-tag-history-snapshot")
         .and(warp::post())
         .and(warp::path::param())
         .and(auth::with_user())
@@ -700,69 +722,218 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(auth::with_user())
         .and_then(data::create_user_avatar_handler);
 
-    let routes = login_route
+    let get_current_user_group_memberships_route = warp::path("get-current-user-group-memberships")
+        .and(warp::get())
+        .and(warp::query::<GetCurrentUserGroupMembershipsParams>())
+        .and(auth::with_user())
+        .and_then(user_group::get_current_user_group_memberships_handler);
+
+    let edit_user_group_route = warp::path("edit-user-group")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(user_group::update::edit_user_group_handler);
+
+    let get_user_group_route = warp::path("get-user-group")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and(auth::with_user_optional())
+        .and_then(user_group::get_user_group_handler);
+
+    let create_user_group_avatar_route = warp::path("create-user-group-avatar")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(data::create_user_group_avatar_handler);
+
+    let get_user_group_edit_history_route = warp::path("get-user-group-edit-history")
+        .and(warp::get())
+        .and(warp::query::<HistoryPaginationQueryParams>())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(user_group::history::get_user_group_history_handler);
+
+    let rewind_user_group_history_snapshot_route = warp::path("rewind-user-group-history-snapshot")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(user_group::history::rewind_user_group_history_snapshot_handler);
+
+    let create_user_group_invite_route = warp::path("create-user-group-invite")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(user_group::invite::create_user_group_invite_handler);
+
+    let leave_user_group_route = warp::path("leave-user-group")
+        .and(warp::delete())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(user_group::leave_user_group_handler);
+
+    let get_user_public_route = warp::path("get-user-public")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and_then(auth::get_user_public_handler);
+
+    let get_user_public_name_route = warp::path("get-user-public-name")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and_then(auth::get_user_public_name_handler);
+
+    let redeem_user_group_invite_route = warp::path("redeem-user-group-invite")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(user_group::invite::redeem_user_group_invite_handler);
+
+    let get_user_group_audit_logs_route = warp::path("get-user-group-audit-logs")
+        .and(warp::get())
+        .and(warp::query::<AuditPaginationQueryParams>())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(user_group::history::get_user_group_audit_logs_handler);
+
+    let join_user_group_route = warp::path("join-user-group")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(user_group::invite::join_user_group_handler);
+
+    let get_user_group_members_route = warp::path("get-user-group-members")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and(warp::query::<GetUserGroupMembersParams>())
+        .and(auth::with_user())
+        .and_then(user_group::get_user_group_members_handler);
+
+    let get_user_group_invites_route = warp::path("get-user-group-invites")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and(warp::query::<GetUserGroupInvitesParams>())
+        .and(auth::with_user())
+        .and_then(user_group::invite::get_user_group_invites_handler);
+
+    let get_current_user_group_invites_route = warp::path("get-current-user-group-invites")
+        .and(warp::get())
+        .and(warp::query::<GetCurrentUserGroupInvitesParams>())
+        .and(auth::with_user())
+        .and_then(user_group::invite::get_current_user_group_invites_handler);
+
+    let get_user_group_brokers_route = warp::path("get-user-group-brokers")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and(warp::query::<GetUserGroupBrokersParams>())
+        .and(auth::with_user())
+        .and_then(user_group::get_user_group_brokers_handler);
+
+    let change_user_group_membership_route = warp::path("change-user-group-membership")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(warp::path::param())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(user_group::update::change_user_group_membership_handler);
+
+    let revoke_user_group_invite_route = warp::path("revoke-user-group-invite")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(user_group::invite::revoke_user_group_invite_handler);
+
+    let auth_routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
         .or(try_refresh_login_route)
         .or(try_refresh_token_route)
-        .boxed()
         .or(logout_route)
         .or(register_route)
-        .or(current_user_info_route)
-        .or(create_post_route)
-        .or(create_tags_route)
-        .boxed()
-        .or(upsert_tag_route)
-        .or(search_route)
-        .or(get_post_route)
-        .or(get_posts_route)
-        .or(upload_route)
-        .or(get_object_metadata_route)
-        .or(get_object_route)
-        .boxed()
-        .or(get_object_head_route)
-        .or(create_broker_route)
-        .or(get_brokers_route)
-        .or(find_tag_route)
-        .or(create_user_group_route)
-        .boxed()
-        .or(get_user_groups_route)
-        .or(get_current_user_groups_route)
-        .or(edit_post_route)
-        .or(analyze_query_route)
-        .or(check_username_route)
-        .boxed()
+        .or(check_username_route);
+
+    let user_routes = current_user_info_route
         .or(confirm_email_route)
         .or(edit_user_route)
         .or(send_email_confirmation_link_route)
         .or(change_password_route)
         .or(send_password_reset_route)
-        .boxed()
         .or(reset_password_route)
-        .or(create_post_collection_route)
+        .or(create_user_avatar_route)
+        .or(get_user_public_route)
+        .or(get_user_public_name_route);
+
+    let query_routes = search_route.or(analyze_query_route);
+
+    let post_routes = create_post_route
+        .or(get_post_route)
+        .or(get_posts_route)
+        .or(edit_post_route)
+        .or(delete_posts_route)
+        .or(get_post_edit_history_route)
+        .or(rewind_post_history_snapshot_route);
+
+    let post_collection_routes = create_post_collection_route
         .or(get_post_collection_route)
         .or(edit_post_collection_route)
-        .or(delete_posts_route)
-        .boxed()
         .or(delete_post_collections_route)
+        .or(get_post_collection_edit_history_route)
+        .or(rewind_post_collection_history_snapshot_route);
+
+    let tag_routes = create_tags_route
+        .or(upsert_tag_route)
+        .or(find_tag_route)
         .or(get_tag_route)
         .or(get_tags_route)
         .or(update_tag_route)
         .or(get_tag_hierarchy_route)
-        .boxed()
-        .or(get_post_edit_history_route)
-        .or(get_post_collection_edit_history_route)
-        .or(rewind_post_history_snapshot_route)
-        .or(rewind_post_collection_history_snapshot_route)
         .or(get_tag_categories_route)
-        .boxed()
         .or(create_tag_category_route)
         .or(update_tag_category_route)
         .or(get_tag_edit_history_route)
-        .or(rewind_tag_history_snapshot_handler)
-        .or(get_presigned_hls_playlist_route)
+        .or(rewind_tag_history_snapshot_route);
+
+    let object_routes = upload_route
+        .or(get_object_metadata_route)
+        .or(get_object_route)
+        .or(get_object_head_route)
+        .or(get_presigned_hls_playlist_route);
+
+    let broker_routes = create_broker_route
+        .or(get_brokers_route)
+        .or(get_user_group_brokers_route);
+
+    let user_group_routes = create_user_group_route
+        .or(get_current_user_groups_route)
+        .or(get_current_user_group_memberships_route)
+        .or(edit_user_group_route)
+        .or(get_user_group_route)
+        .or(create_user_group_avatar_route)
+        .or(get_user_group_edit_history_route)
+        .or(rewind_user_group_history_snapshot_route)
+        .or(create_user_group_invite_route)
+        .or(leave_user_group_route)
+        .or(redeem_user_group_invite_route)
+        .or(get_user_group_audit_logs_route)
+        .or(join_user_group_route)
+        .or(get_user_group_members_route)
+        .or(get_user_group_invites_route)
+        .or(get_current_user_group_invites_route)
+        .or(change_user_group_membership_route)
+        .or(revoke_user_group_invite_route);
+
+    let routes = auth_routes
         .boxed()
-        .or(create_user_avatar_route);
+        .or(user_routes.boxed())
+        .or(query_routes.boxed())
+        .or(post_routes.boxed())
+        .or(post_collection_routes.boxed())
+        .or(tag_routes.boxed())
+        .or(object_routes.boxed())
+        .or(broker_routes.boxed())
+        .or(user_group_routes.boxed())
+        .boxed();
 
     let filter = routes
         .recover(error::handle_rejection)

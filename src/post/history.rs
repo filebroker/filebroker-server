@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
+use diesel::sql_types::Bool;
 use diesel::{
-    BelongingToDsl, BoolExpressionMethods, OptionalExtension, Table,
-    dsl::{exists, not},
-    upsert::excluded,
+    BelongingToDsl, BoolExpressionMethods, IntoSql, OptionalExtension, Table, upsert::excluded,
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use validator::Validate;
 use warp::{Reply, reject::Rejection};
 
 use super::{
@@ -28,8 +28,7 @@ use crate::{
         PostCollectionGroupAccessDetailed, PostGroupAccess, PostGroupAccessDetailed,
         get_post_collection_group_access, get_post_group_access,
     },
-    query::PaginationQueryParams,
-    run_serializable_transaction,
+    run_repeatable_read_transaction, run_serializable_transaction,
     schema::{
         post, post_collection, post_collection_edit_history,
         post_collection_edit_history_group_access, post_collection_edit_history_tag,
@@ -65,6 +64,14 @@ pub struct PostEditHistorySnapshot {
     pub group_access: Vec<PostGroupAccessDetailed>,
 }
 
+#[derive(Deserialize, Validate)]
+pub struct HistoryPaginationQueryParams {
+    #[validate(range(min = 1, max = 20))]
+    pub limit: Option<u32>,
+    #[validate(range(min = 0, max = 1000))]
+    pub page: Option<u32>,
+}
+
 #[derive(Serialize)]
 pub struct PostEditHistoryResponse {
     pub edit_timestamp: DateTime<Utc>,
@@ -74,86 +81,97 @@ pub struct PostEditHistoryResponse {
 }
 
 pub async fn get_post_edit_history_handler(
-    pagination: PaginationQueryParams,
+    pagination: HistoryPaginationQueryParams,
     post_pk: i64,
     user: User,
 ) -> Result<impl Reply, Rejection> {
+    pagination.validate().map_err(|e| {
+        Error::InvalidRequestInputError(format!(
+            "Validation failed for HistoryPaginationQueryParams: {e}"
+        ))
+    })?;
+
     let mut connection = acquire_db_connection().await?;
+    let response = run_repeatable_read_transaction(&mut connection, |connection| {
+        async {
+            let PostJoined {
+                post,
+                create_user: _,
+                s3_object: _,
+                s3_object_metadata: _,
+                broker: _,
+                edit_user,
+            } = perms::load_post_secured(post_pk, connection, Some(&user)).await?;
+            if !post.is_editable(Some(&user), connection).await? {
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::InaccessibleObjectError(post_pk),
+                ));
+            }
 
-    let PostJoined {
-        post,
-        create_user: _,
-        s3_object: _,
-        s3_object_metadata: _,
-        broker: _,
-        edit_user,
-    } = perms::load_post_secured(post_pk, &mut connection, Some(&user)).await?;
-    if !post.is_editable(Some(&user), &mut connection).await? {
-        return Err(warp::reject::custom(Error::InaccessibleObjectError(
-            post_pk,
-        )));
-    }
+            let total_snapshot_count = post_edit_history::table
+                .filter(post_edit_history::fk_post.eq(post_pk))
+                .count()
+                .get_result::<i64>(connection)
+                .await?;
+            let limit = pagination.limit.unwrap_or(10);
+            let offset = limit * pagination.page.unwrap_or(0);
+            let post_edit_history_snapshots = post_edit_history::table
+                .inner_join(registered_user::table)
+                .filter(post_edit_history::fk_post.eq(post_pk))
+                .order(post_edit_history::pk.desc())
+                .limit(limit.into())
+                .offset(offset.into())
+                .load::<(PostEditHistory, UserPublic)>(connection)
+                .await?;
 
-    let total_snapshot_count = post_edit_history::table
-        .filter(post_edit_history::fk_post.eq(post_pk))
-        .count()
-        .get_result::<i64>(&mut connection)
-        .await
-        .map_err(Error::from)?;
-    let limit = pagination.limit.unwrap_or(10);
-    let offset = limit * pagination.page.unwrap_or(0);
-    let post_edit_history_snapshots = post_edit_history::table
-        .inner_join(registered_user::table)
-        .filter(post_edit_history::fk_post.eq(post_pk))
-        .order(post_edit_history::pk.desc())
-        .limit(limit.into())
-        .offset(offset.into())
-        .load::<(PostEditHistory, UserPublic)>(&mut connection)
-        .await
-        .map_err(Error::from)?;
+            let mut snapshots = Vec::new();
+            for (post_edit_history_snapshot, edit_user) in post_edit_history_snapshots {
+                let tags =
+                    get_post_snapshot_tags(&post_edit_history_snapshot, &post, connection).await?;
+                let group_access = get_post_snapshot_group_access(
+                    &post_edit_history_snapshot,
+                    &post,
+                    &user,
+                    connection,
+                )
+                .await?;
 
-    let mut snapshots = Vec::new();
-    for (post_edit_history_snapshot, edit_user) in post_edit_history_snapshots {
-        let tags =
-            get_post_snapshot_tags(&post_edit_history_snapshot, &post, &mut connection).await?;
-        let group_access = get_post_snapshot_group_access(
-            &post_edit_history_snapshot,
-            &post,
-            &user,
-            &mut connection,
-        )
-        .await?;
+                snapshots.push(PostEditHistorySnapshot {
+                    pk: post_edit_history_snapshot.pk,
+                    fk_post: post_edit_history_snapshot.fk_post,
+                    edit_user,
+                    edit_timestamp: post_edit_history_snapshot.edit_timestamp,
+                    data_url: post_edit_history_snapshot.data_url,
+                    data_url_changed: post_edit_history_snapshot.data_url_changed,
+                    source_url: post_edit_history_snapshot.source_url,
+                    source_url_changed: post_edit_history_snapshot.source_url_changed,
+                    title: post_edit_history_snapshot.title,
+                    title_changed: post_edit_history_snapshot.title_changed,
+                    public: post_edit_history_snapshot.public,
+                    public_changed: post_edit_history_snapshot.public_changed,
+                    public_edit: post_edit_history_snapshot.public_edit,
+                    public_edit_changed: post_edit_history_snapshot.public_edit_changed,
+                    description: post_edit_history_snapshot.description,
+                    description_changed: post_edit_history_snapshot.description_changed,
+                    tags_changed: post_edit_history_snapshot.tags_changed,
+                    group_access_changed: post_edit_history_snapshot.group_access_changed,
+                    tags,
+                    group_access,
+                });
+            }
 
-        snapshots.push(PostEditHistorySnapshot {
-            pk: post_edit_history_snapshot.pk,
-            fk_post: post_edit_history_snapshot.fk_post,
-            edit_user,
-            edit_timestamp: post_edit_history_snapshot.edit_timestamp,
-            data_url: post_edit_history_snapshot.data_url,
-            data_url_changed: post_edit_history_snapshot.data_url_changed,
-            source_url: post_edit_history_snapshot.source_url,
-            source_url_changed: post_edit_history_snapshot.source_url_changed,
-            title: post_edit_history_snapshot.title,
-            title_changed: post_edit_history_snapshot.title_changed,
-            public: post_edit_history_snapshot.public,
-            public_changed: post_edit_history_snapshot.public_changed,
-            public_edit: post_edit_history_snapshot.public_edit,
-            public_edit_changed: post_edit_history_snapshot.public_edit_changed,
-            description: post_edit_history_snapshot.description,
-            description_changed: post_edit_history_snapshot.description_changed,
-            tags_changed: post_edit_history_snapshot.tags_changed,
-            group_access_changed: post_edit_history_snapshot.group_access_changed,
-            tags,
-            group_access,
-        });
-    }
+            Ok(PostEditHistoryResponse {
+                edit_timestamp: post.edit_timestamp,
+                edit_user,
+                total_snapshot_count,
+                snapshots,
+            })
+        }
+        .scope_boxed()
+    })
+    .await?;
 
-    Ok(warp::reply::json(&PostEditHistoryResponse {
-        edit_timestamp: post.edit_timestamp,
-        edit_user,
-        total_snapshot_count,
-        snapshots,
-    }))
+    Ok(warp::reply::json(&response))
 }
 
 async fn get_post_snapshot_tags(
@@ -221,7 +239,11 @@ async fn get_post_snapshot_group_access(
     {
         PostEditHistoryGroupAccess::belonging_to(&relevant_group_access_snapshot)
             .inner_join(user_group::table)
-            .filter(not(user_group::hidden).or(perms::get_group_membership_condition!(user.pk)))
+            .filter(
+                user_group::public
+                    .or(user.is_admin.into_sql::<Bool>())
+                    .or(perms::get_group_membership_condition!(user.pk)),
+            )
             .load::<(PostEditHistoryGroupAccess, UserGroup)>(connection)
             .await
             .map_err(Error::from)?
@@ -275,92 +297,104 @@ pub struct PostCollectionEditHistoryResponse {
 }
 
 pub async fn get_post_collection_edit_history_handler(
-    pagination: PaginationQueryParams,
+    pagination: HistoryPaginationQueryParams,
     post_collection_pk: i64,
     user: User,
 ) -> Result<impl Reply, Rejection> {
+    pagination.validate().map_err(|e| {
+        Error::InvalidRequestInputError(format!(
+            "Validation failed for HistoryPaginationQueryParams: {e}"
+        ))
+    })?;
+
     let mut connection = acquire_db_connection().await?;
+    let response = run_repeatable_read_transaction(&mut connection, |connection| {
+        async {
+            let PostCollectionJoined {
+                post_collection,
+                create_user: _,
+                poster_object: _,
+                edit_user,
+            } = perms::load_post_collection_secured(post_collection_pk, connection, Some(&user))
+                .await?;
+            if !post_collection.is_editable(Some(&user), connection).await? {
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::InaccessibleObjectError(post_collection_pk),
+                ));
+            }
 
-    let PostCollectionJoined {
-        post_collection,
-        create_user: _,
-        poster_object: _,
-        edit_user,
-    } = perms::load_post_collection_secured(post_collection_pk, &mut connection, Some(&user))
-        .await?;
-    if !post_collection
-        .is_editable(Some(&user), &mut connection)
-        .await?
-    {
-        return Err(warp::reject::custom(Error::InaccessibleObjectError(
-            post_collection_pk,
-        )));
-    }
+            let total_snapshot_count = post_collection_edit_history::table
+                .filter(post_collection_edit_history::fk_post_collection.eq(post_collection_pk))
+                .count()
+                .get_result::<i64>(connection)
+                .await
+                .map_err(Error::from)?;
+            let limit = pagination.limit.unwrap_or(10);
+            let offset = limit * pagination.page.unwrap_or(0);
+            let post_collection_edit_history_snapshots = post_collection_edit_history::table
+                .inner_join(registered_user::table)
+                .filter(post_collection_edit_history::fk_post_collection.eq(post_collection_pk))
+                .order(post_collection_edit_history::pk.desc())
+                .limit(limit.into())
+                .offset(offset.into())
+                .load::<(PostCollectionEditHistory, UserPublic)>(connection)
+                .await
+                .map_err(Error::from)?;
 
-    let total_snapshot_count = post_collection_edit_history::table
-        .filter(post_collection_edit_history::fk_post_collection.eq(post_collection_pk))
-        .count()
-        .get_result::<i64>(&mut connection)
-        .await
-        .map_err(Error::from)?;
-    let limit = pagination.limit.unwrap_or(10);
-    let offset = limit * pagination.page.unwrap_or(0);
-    let post_collection_edit_history_snapshots = post_collection_edit_history::table
-        .inner_join(registered_user::table)
-        .filter(post_collection_edit_history::fk_post_collection.eq(post_collection_pk))
-        .order(post_collection_edit_history::pk.desc())
-        .limit(limit.into())
-        .offset(offset.into())
-        .load::<(PostCollectionEditHistory, UserPublic)>(&mut connection)
-        .await
-        .map_err(Error::from)?;
+            let mut snapshots = Vec::new();
+            for (post_collection_edit_history_snapshot, edit_user) in
+                post_collection_edit_history_snapshots
+            {
+                let tags = get_post_collection_snapshot_tags(
+                    &post_collection_edit_history_snapshot,
+                    &post_collection,
+                    connection,
+                )
+                .await?;
+                let group_access = get_post_collection_snapshot_group_access(
+                    &post_collection_edit_history_snapshot,
+                    &post_collection,
+                    &user,
+                    connection,
+                )
+                .await?;
 
-    let mut snapshots = Vec::new();
-    for (post_collection_edit_history_snapshot, edit_user) in post_collection_edit_history_snapshots
-    {
-        let tags = get_post_collection_snapshot_tags(
-            &post_collection_edit_history_snapshot,
-            &post_collection,
-            &mut connection,
-        )
-        .await?;
-        let group_access = get_post_collection_snapshot_group_access(
-            &post_collection_edit_history_snapshot,
-            &post_collection,
-            &user,
-            &mut connection,
-        )
-        .await?;
+                snapshots.push(PostCollectionEditHistorySnapshot {
+                    pk: post_collection_edit_history_snapshot.pk,
+                    fk_post_collection: post_collection_edit_history_snapshot.fk_post_collection,
+                    edit_user,
+                    edit_timestamp: post_collection_edit_history_snapshot.edit_timestamp,
+                    title: post_collection_edit_history_snapshot.title,
+                    title_changed: post_collection_edit_history_snapshot.title_changed,
+                    public: post_collection_edit_history_snapshot.public,
+                    public_changed: post_collection_edit_history_snapshot.public_changed,
+                    public_edit: post_collection_edit_history_snapshot.public_edit,
+                    public_edit_changed: post_collection_edit_history_snapshot.public_edit_changed,
+                    description: post_collection_edit_history_snapshot.description,
+                    description_changed: post_collection_edit_history_snapshot.description_changed,
+                    poster_object_key: post_collection_edit_history_snapshot.poster_object_key,
+                    poster_object_key_changed: post_collection_edit_history_snapshot
+                        .poster_object_key_changed,
+                    tags_changed: post_collection_edit_history_snapshot.tags_changed,
+                    group_access_changed: post_collection_edit_history_snapshot
+                        .group_access_changed,
+                    tags,
+                    group_access,
+                });
+            }
 
-        snapshots.push(PostCollectionEditHistorySnapshot {
-            pk: post_collection_edit_history_snapshot.pk,
-            fk_post_collection: post_collection_edit_history_snapshot.fk_post_collection,
-            edit_user,
-            edit_timestamp: post_collection_edit_history_snapshot.edit_timestamp,
-            title: post_collection_edit_history_snapshot.title,
-            title_changed: post_collection_edit_history_snapshot.title_changed,
-            public: post_collection_edit_history_snapshot.public,
-            public_changed: post_collection_edit_history_snapshot.public_changed,
-            public_edit: post_collection_edit_history_snapshot.public_edit,
-            public_edit_changed: post_collection_edit_history_snapshot.public_edit_changed,
-            description: post_collection_edit_history_snapshot.description,
-            description_changed: post_collection_edit_history_snapshot.description_changed,
-            poster_object_key: post_collection_edit_history_snapshot.poster_object_key,
-            poster_object_key_changed: post_collection_edit_history_snapshot
-                .poster_object_key_changed,
-            tags_changed: post_collection_edit_history_snapshot.tags_changed,
-            group_access_changed: post_collection_edit_history_snapshot.group_access_changed,
-            tags,
-            group_access,
-        });
-    }
+            Ok(PostCollectionEditHistoryResponse {
+                edit_timestamp: post_collection.edit_timestamp,
+                edit_user,
+                total_snapshot_count,
+                snapshots,
+            })
+        }
+        .scope_boxed()
+    })
+    .await?;
 
-    Ok(warp::reply::json(&PostCollectionEditHistoryResponse {
-        edit_timestamp: post_collection.edit_timestamp,
-        edit_user,
-        total_snapshot_count,
-        snapshots,
-    }))
+    Ok(warp::reply::json(&response))
 }
 
 async fn get_post_collection_snapshot_tags(
@@ -430,7 +464,11 @@ async fn get_post_collection_snapshot_group_access(
     {
         PostCollectionEditHistoryGroupAccess::belonging_to(&relevant_group_access_snapshot)
             .inner_join(user_group::table)
-            .filter(not(user_group::hidden).or(perms::get_group_membership_condition!(user.pk)))
+            .filter(
+                user_group::public
+                    .or(user.is_admin.into_sql::<Bool>())
+                    .or(perms::get_group_membership_condition!(user.pk)),
+            )
             .load::<(PostCollectionEditHistoryGroupAccess, UserGroup)>(connection)
             .await
             .map_err(Error::from)?

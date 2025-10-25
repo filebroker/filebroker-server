@@ -20,9 +20,6 @@ use uuid::Uuid;
 
 use crate::data::get_system_bucket;
 use crate::error::TransactionRuntimeError;
-use crate::model::get_system_user;
-use crate::post::delete::delete_s3_objects;
-use crate::schema::registered_user;
 use crate::tag::auto_matching::{create_apply_auto_tags_for_post_task, spawn_apply_auto_tags_task};
 use crate::task::LockedObjectsTaskSentinel;
 use crate::{
@@ -604,14 +601,14 @@ async fn media_is_animated(object_key: &str) -> Result<bool, Error> {
     }
 }
 
-pub async fn generate_user_avatar(
+pub async fn generate_avatar(
     source_object_key: String,
     user_pk: i64,
     width: u32,
     height: u32,
     x: u32,
     y: u32,
-) -> Result<(), Error> {
+) -> Result<S3Object, Error> {
     let mut connection = acquire_db_connection().await?;
     let system_bucket = get_system_bucket(&mut connection).await?;
     let (broker, bucket) = match system_bucket {
@@ -737,54 +734,26 @@ pub async fn generate_user_avatar(
         .put_object_with_content_type(&avatar_path, &avatar_bytes, "image/webp")
         .await?;
 
-    let mut connection = acquire_db_connection().await?;
-    run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let user = registered_user::table
-                .filter(registered_user::pk.eq(user_pk))
-                .get_result::<User>(connection)
-                .await?;
-
-            let s3_object = diesel::insert_into(s3_object::table)
-                .values(&S3Object {
-                    object_key: avatar_path.clone(),
-                    sha256_hash: None,
-                    size_bytes: avatar_bytes.len() as i64,
-                    mime_type: String::from("image/webp"),
-                    fk_broker: broker.pk,
-                    fk_uploader: user.pk,
-                    thumbnail_object_key: None,
-                    creation_timestamp: Utc::now(),
-                    filename: None,
-                    hls_master_playlist: None,
-                    hls_disabled: true,
-                    hls_locked_at: None,
-                    thumbnail_locked_at: None,
-                    hls_fail_count: None,
-                    thumbnail_fail_count: None,
-                    thumbnail_disabled: true,
-                    metadata_locked_at: None,
-                    metadata_fail_count: None,
-                })
-                .get_result::<S3Object>(connection)
-                .await?;
-
-            diesel::update(registered_user::table.filter(registered_user::pk.eq(user_pk)))
-                .set(registered_user::avatar_object_key.eq(&s3_object.object_key))
-                .execute(connection)
-                .await?;
-
-            if let Some(avatar_object_key) = user.avatar_object_key {
-                delete_s3_objects(&[avatar_object_key], &get_system_user(), connection).await?;
-            }
-
-            Ok(())
-        }
-        .scope_boxed()
+    Ok(S3Object {
+        object_key: avatar_path.clone(),
+        sha256_hash: None,
+        size_bytes: avatar_bytes.len() as i64,
+        mime_type: String::from("image/webp"),
+        fk_broker: broker.pk,
+        fk_uploader: user_pk,
+        thumbnail_object_key: None,
+        creation_timestamp: Utc::now(),
+        filename: None,
+        hls_master_playlist: None,
+        hls_disabled: true,
+        hls_locked_at: None,
+        thumbnail_locked_at: None,
+        hls_fail_count: None,
+        thumbnail_fail_count: None,
+        thumbnail_disabled: true,
+        metadata_locked_at: None,
+        metadata_fail_count: None,
     })
-    .await?;
-
-    Ok(())
 }
 
 pub async fn generate_thumbnail(

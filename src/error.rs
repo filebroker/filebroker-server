@@ -55,6 +55,12 @@ pub enum Error {
     QuotaExceededError(i64, i64),
     #[error("The Filebroker-Upload-Size header value does not match the actual upload size")]
     InvalidUploadSizeError,
+    #[error("The provided group invite code is invalid or expired: {0}")]
+    InvalidUserGroupInviteCodeError(String),
+    #[error("User already is member of group {0}")]
+    UserAlreadyMemberOfGroupError(i64),
+    #[error("The provided reference path is invalid: '{0}'")]
+    InvalidReferencePathError(String),
 
     // 401
     #[error("invalid credentials")]
@@ -70,11 +76,15 @@ pub enum Error {
     #[error("Cannot access object with provided pk {0}")]
     InaccessibleObjectError(i64),
     #[error("Cannot access object with provided key {0}")]
-    InaccessibleS3ObjectError(String),
+    InaccessibleObjectKeyError(String),
     #[error("Cannot access objects with provided pks {0:?}")]
     InaccessibleObjectsError(Vec<i64>),
     #[error("User must be admin to perform this action")]
     UserNotAdmin,
+    #[error("User has been banned")]
+    UserBannedError,
+    #[error("User has been banned from group {0}")]
+    UserBannedFromGroupError(i64),
 
     // 404
     #[error("The requested entity was not found")]
@@ -131,9 +141,11 @@ impl Error {
         match self {
             Error::NotFoundError => StatusCode::NOT_FOUND,
             Error::InaccessibleObjectError(_)
-            | Error::InaccessibleS3ObjectError(_)
+            | Error::InaccessibleObjectKeyError(_)
             | Error::InaccessibleObjectsError(_)
-            | Error::UserNotAdmin => StatusCode::FORBIDDEN,
+            | Error::UserNotAdmin
+            | Error::UserBannedError
+            | Error::UserBannedFromGroupError(_) => StatusCode::FORBIDDEN,
             Error::InvalidCredentialsError
             | Error::MissingAuthHeaderError
             | Error::InvalidJwtError
@@ -157,7 +169,10 @@ impl Error {
             | Error::TooManyResultsError(..)
             | Error::DuplicatePostCollectionItemError(..)
             | Error::QuotaExceededError(..)
-            | Error::InvalidUploadSizeError => StatusCode::BAD_REQUEST,
+            | Error::InvalidUploadSizeError
+            | Error::InvalidUserGroupInviteCodeError(_)
+            | Error::UserAlreadyMemberOfGroupError(_)
+            | Error::InvalidReferencePathError(_) => StatusCode::BAD_REQUEST,
             Error::DatabaseConnectionError(_)
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -204,6 +219,9 @@ impl Error {
             Self::DuplicatePostCollectionItemError(..) => 400_018,
             Self::QuotaExceededError(..) => 400_019,
             Self::InvalidUploadSizeError => 400_020,
+            Self::InvalidUserGroupInviteCodeError(_) => 400_021,
+            Self::UserAlreadyMemberOfGroupError(_) => 400_022,
+            Self::InvalidReferencePathError(_) => 400_023,
 
             Self::InvalidCredentialsError => 401_001,
             Self::MissingAuthHeaderError => 401_002,
@@ -211,9 +229,11 @@ impl Error {
             Self::InvalidRefreshTokenError => 401_004,
 
             Self::InaccessibleObjectError(_) => 403_001,
-            Self::InaccessibleS3ObjectError(_) => 403_002,
+            Self::InaccessibleObjectKeyError(_) => 403_002,
             Self::InaccessibleObjectsError(_) => 403_003,
             Self::UserNotAdmin => 403_004,
+            Self::UserBannedError => 403_005,
+            Self::UserBannedFromGroupError(_) => 403_006,
 
             Self::NotFoundError => 404_001,
 
@@ -304,7 +324,10 @@ impl fmt::Display for TransactionRuntimeError {
 
 impl From<Error> for TransactionRuntimeError {
     fn from(e: Error) -> Self {
-        TransactionRuntimeError::Rollback(e)
+        match e {
+            Error::TransactionError(diesel_err) => TransactionRuntimeError::from(diesel_err),
+            _ => TransactionRuntimeError::Rollback(e),
+        }
     }
 }
 
