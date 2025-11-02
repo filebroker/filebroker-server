@@ -137,9 +137,9 @@ impl Scope {
     pub fn get_functions(&self) -> HashMap<&'static str, Arc<Function>> {
         match self {
             Self::Global => GLOBAL_FUNCTIONS.clone(),
-            Self::Post => GLOBAL_FUNCTIONS.clone(),
-            Self::Collection => GLOBAL_FUNCTIONS.clone(),
-            Self::CollectionItem { .. } => GLOBAL_FUNCTIONS.clone(),
+            Self::Post => POST_FUNCTIONS.clone(),
+            Self::Collection => COLLECTION_FUNCTIONS.clone(),
+            Self::CollectionItem { .. } => POST_FUNCTIONS.clone(),
             Self::UserGroup => GLOBAL_FUNCTIONS.clone(),
             Self::TagAutoMatchPost => GLOBAL_FUNCTIONS.clone(),
             Self::TagAutoMatchCollection => GLOBAL_FUNCTIONS.clone(),
@@ -320,6 +320,52 @@ lazy_static! {
             })
         )
     ]);
+    pub static ref POST_FUNCTIONS: HashMap<&'static str, Arc<Function>> = {
+        let mut functions = GLOBAL_FUNCTIONS.clone();
+        functions.insert(
+            "shared_with_group",
+            Arc::new(Function {
+                params: vec![Parameter {
+                    parameter_type: ParameterType::Object(Type::Number),
+                }],
+                return_type: Type::Boolean,
+                accept_arguments,
+                write_expression_fn: |visitor, args, scope, _location, log| {
+                    visitor.write_buff("EXISTS(SELECT * FROM post_group_access WHERE fk_post = post.pk AND fk_granted_group = ");
+                    if !args.is_empty() {
+                        args[0].accept(visitor, scope, log);
+                    } else {
+                        visitor.write_buff("NULL");
+                    }
+                    visitor.write_buff(")");
+                },
+            })
+        );
+        functions
+    };
+    pub static ref COLLECTION_FUNCTIONS: HashMap<&'static str, Arc<Function>> = {
+        let mut functions = GLOBAL_FUNCTIONS.clone();
+        functions.insert(
+            "shared_with_group",
+            Arc::new(Function {
+                params: vec![Parameter {
+                    parameter_type: ParameterType::Object(Type::Number),
+                }],
+                return_type: Type::Boolean,
+                accept_arguments,
+                write_expression_fn: |visitor, args, scope, _location, log| {
+                    visitor.write_buff("EXISTS(SELECT * FROM post_collection_group_access WHERE fk_post_collection = post_collection.pk AND fk_granted_group = ");
+                    if !args.is_empty() {
+                        args[0].accept(visitor, scope, log);
+                    } else {
+                        visitor.write_buff("NULL");
+                    }
+                    visitor.write_buff(")");
+                },
+            })
+        );
+        functions
+    };
 }
 
 lazy_static! {
