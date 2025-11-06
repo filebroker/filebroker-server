@@ -669,7 +669,7 @@ pub fn apply_pagination(
         if include_window {
             sql_query.push_str("GREATEST(((");
         }
-        append_safe_limit(sql_query, limit, pagination, include_window);
+        append_safe_limit(sql_query, limit, pagination, false);
         sql_query.push_str(") * ");
         sql_query.push_str(&page.to_string());
         if include_window {
