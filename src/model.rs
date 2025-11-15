@@ -18,7 +18,7 @@ use diesel::serialize::{self, Output, ToSql};
 use diesel::sql_types::{
     BigInt, Bool, Float8, Int4, Int8, Integer, Interval, Jsonb, Nullable, Timestamptz, Varchar,
 };
-use diesel::{Associations, Identifiable, Insertable, Queryable};
+use diesel::{Associations, Identifiable, Insertable, Queryable, QueryableByName};
 use diesel_async::AsyncPgConnection;
 use serde::{Deserialize, Serialize, Serializer};
 use validator::{Validate, ValidationError};
