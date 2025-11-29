@@ -171,18 +171,16 @@ macro_rules! get_group_access_write_condition {
 
 macro_rules! get_broker_group_access_write_condition {
     ($user_pk:expr) => {
-        broker_access::fk_broker
-            .eq(broker::pk)
-            .and(broker_access::write)
+        crate::schema::broker_access::fk_broker
+            .eq(crate::schema::broker::pk)
+            .and(crate::schema::broker_access::write)
             .and(
-                broker_access::fk_granted_group
-                    .is_null()
-                    .or(broker_access::fk_granted_group.eq_any(
-                        user_group::table
-                            .select(user_group::pk)
-                            .filter(get_group_membership_condition!($user_pk))
-                            .nullable(),
-                    )),
+                crate::schema::broker_access::fk_granted_group.eq_any(
+                    crate::schema::user_group::table
+                        .select(crate::schema::user_group::pk)
+                        .filter(get_group_membership_administrator_condition!($user_pk))
+                        .nullable(),
+                ),
             )
     };
 }
@@ -190,6 +188,20 @@ macro_rules! get_broker_group_access_write_condition {
 pub(crate) use get_broker_group_access_write_condition;
 
 pub(crate) use get_group_access_write_condition;
+
+macro_rules! get_broker_access_write_condition {
+    ($user_pk:expr) => {
+        crate::schema::broker::fk_owner
+            .nullable()
+            .eq($user_pk)
+            .or(exists(
+                crate::schema::broker_access::table
+                    .filter(get_broker_group_access_write_condition!($user_pk)),
+            ))
+    };
+}
+
+pub(crate) use get_broker_access_write_condition;
 
 pub struct PostJoined {
     pub post: Post,

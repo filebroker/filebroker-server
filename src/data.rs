@@ -1,9 +1,5 @@
-use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
-use diesel::{
-    BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
-    dsl::{exists, max, not, sum},
-};
+use diesel::QueryDsl;
 use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{Stream, TryStreamExt};
@@ -13,9 +9,7 @@ use mpart_async::server::MultipartStream;
 use ring::digest;
 use s3::{Bucket, Region, creds::Credentials};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use url::Url;
-use uuid::Uuid;
+use std::collections::HashMap;
 use validator::Validate;
 use warp::{
     Buf, Rejection, Reply,
@@ -31,17 +25,12 @@ use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension},
     error::Error,
-    model::{Broker, NewBroker, S3Object, S3ObjectMetadata, User},
-    perms::{
-        self, PostJoinedS3Object, get_group_access_or_public_condition,
-        get_group_membership_condition,
-    },
+    model::{Broker, S3Object, S3ObjectMetadata, User},
+    perms::{self, PostJoinedS3Object},
     post,
     query::PostDetailed,
     run_serializable_transaction,
-    schema::{
-        broker, broker_access, s3_object, s3_object_metadata, user_group, user_group_membership,
-    },
+    schema::{broker, s3_object, s3_object_metadata, user_group},
     util::NOT_BLANK_REGEX,
 };
 
@@ -430,208 +419,6 @@ pub async fn get_presigned_hls_playlist_handler(
             Err(e) => Err(warp::reject::custom(Error::M3U8ParseError(e.to_string()))),
         }
     }
-}
-
-#[derive(Deserialize, Validate)]
-pub struct CreateBrokerRequest {
-    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
-    pub name: String,
-    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
-    pub bucket: String,
-    #[validate(length(min = 1, max = 2048), regex(path = *NOT_BLANK_REGEX))]
-    pub endpoint: String,
-    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
-    pub access_key: String,
-    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
-    pub secret_key: String,
-    pub is_aws_region: bool,
-    pub remove_duplicate_files: bool,
-    pub enable_presigned_get: Option<bool>,
-    pub is_system_bucket: Option<bool>,
-}
-
-pub async fn create_broker_handler(
-    create_broker_request: CreateBrokerRequest,
-    user: User,
-) -> Result<impl Reply, Rejection> {
-    create_broker_request.validate().map_err(|e| {
-        warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for CreateBrokerRequest: {e}"
-        )))
-    })?;
-
-    let is_system_bucket = create_broker_request.is_system_bucket.unwrap_or(false);
-    if is_system_bucket && !user.is_admin {
-        return Err(warp::reject::custom(Error::UserNotAdmin));
-    }
-
-    let bucket = create_bucket(
-        &create_broker_request.bucket,
-        &create_broker_request.endpoint,
-        &create_broker_request.access_key,
-        &create_broker_request.secret_key,
-        create_broker_request.is_aws_region,
-    )?;
-
-    if let Err(e) = Url::parse(&bucket.url()) {
-        return Err(warp::reject::custom(Error::InvalidBucketError(
-            e.to_string(),
-        )));
-    }
-
-    // test connection
-    let mut test_path = Uuid::new_v4().to_string();
-    test_path.insert_str(0, ".filebroker-test-");
-    if let Err(e) = bucket.put_object(&test_path, &[]).await {
-        return Err(warp::reject::custom(Error::InvalidBucketError(
-            e.to_string(),
-        )));
-    }
-    if let Err(e) = bucket.delete_object(&test_path).await {
-        return Err(warp::reject::custom(Error::InvalidBucketError(
-            e.to_string(),
-        )));
-    }
-
-    let mut connection = acquire_db_connection().await?;
-    let created_broker = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            if is_system_bucket {
-                diesel::update(broker::table)
-                    .filter(broker::is_system_bucket.eq(true))
-                    .set(broker::is_system_bucket.eq(false))
-                    .execute(connection)
-                    .await?;
-            }
-            let broker = diesel::insert_into(broker::table)
-                .values(&NewBroker {
-                    name: create_broker_request.name,
-                    bucket: create_broker_request.bucket,
-                    endpoint: create_broker_request.endpoint,
-                    access_key: create_broker_request.access_key,
-                    secret_key: create_broker_request.secret_key,
-                    is_aws_region: create_broker_request.is_aws_region,
-                    remove_duplicate_files: create_broker_request.remove_duplicate_files,
-                    fk_owner: user.pk,
-                    hls_enabled: false,
-                    enable_presigned_get: create_broker_request
-                        .enable_presigned_get
-                        .unwrap_or(true),
-                    is_system_bucket,
-                })
-                .get_result::<Broker>(connection)
-                .await?;
-
-            Ok(broker)
-        }
-        .scope_boxed()
-    })
-    .await?;
-
-    Ok(warp::reply::json(&created_broker))
-}
-
-#[derive(Serialize)]
-pub struct BrokerAvailability {
-    pub broker: Broker,
-    pub used_bytes: i64,
-    pub quota_bytes: Option<i64>,
-}
-
-pub async fn get_brokers_handler(user: User) -> Result<impl Reply, Rejection> {
-    let mut connection = acquire_db_connection().await?;
-    let brokers = perms::get_brokers_secured(&mut connection, Some(&user)).await?;
-    let broker_pks = brokers.iter().map(|b| b.pk).collect::<Vec<i64>>();
-
-    let broker_usages = s3_object::table
-        .group_by(s3_object::fk_broker)
-        .select((s3_object::fk_broker, sum(s3_object::size_bytes)))
-        .filter(
-            s3_object::fk_uploader
-                .eq(user.pk)
-                .and(s3_object::fk_broker.eq_any(&broker_pks)),
-        )
-        .load::<(i64, Option<BigDecimal>)>(&mut connection)
-        .await
-        .map_err(Error::from)?
-        .into_iter()
-        .map(|(broker_pk, size_used)| (broker_pk, size_used.unwrap_or(BigDecimal::from(0))))
-        .collect::<HashMap<i64, BigDecimal>>();
-
-    let unlimited_brokers = broker::table
-        .select(broker::pk)
-        .filter(
-            broker::pk.eq_any(&broker_pks).and(
-                broker::fk_owner.eq(user.pk).or(exists(
-                    broker_access::table.filter(
-                        get_group_access_or_public_condition!(
-                            broker_access::fk_broker,
-                            broker::pk,
-                            &Some(user.pk),
-                            broker_access::fk_granted_group.is_null(),
-                            broker_access::fk_granted_group
-                        )
-                        .and(broker_access::quota.is_null()),
-                    ),
-                )),
-            ),
-        )
-        .load::<i64>(&mut connection)
-        .await
-        .map_err(Error::from)?
-        .into_iter()
-        .collect::<HashSet<i64>>();
-
-    let broker_quotas = broker::table
-        .inner_join(
-            broker_access::table.on(get_group_access_or_public_condition!(
-                broker_access::fk_broker,
-                broker::pk,
-                &Some(user.pk),
-                broker_access::fk_granted_group.is_null(),
-                broker_access::fk_granted_group
-            )
-            .and(broker_access::quota.is_not_null())),
-        )
-        .group_by(broker::pk)
-        .select((broker::pk, max(broker_access::quota)))
-        .filter(
-            broker::pk
-                .eq_any(&broker_pks)
-                .and(not(broker::pk.eq_any(&unlimited_brokers))),
-        )
-        .load::<(i64, Option<i64>)>(&mut connection)
-        .await
-        .map_err(Error::from)?
-        .into_iter()
-        .collect::<HashMap<i64, Option<i64>>>();
-
-    let mut broker_availabilities = Vec::new();
-    for broker in brokers {
-        let used_bytes = broker_usages
-            .get(&broker.pk)
-            .map(|usage_bytes| {
-                usage_bytes.to_i64().ok_or_else(|| {
-                    Error::InternalError(format!(
-                        "Could not convert broker usage bytes {usage_bytes} to i64"
-                    ))
-                })
-            })
-            .unwrap_or(Ok(0))?;
-        let quota_bytes = if unlimited_brokers.contains(&broker.pk) {
-            None
-        } else {
-            broker_quotas.get(&broker.pk).cloned().flatten()
-        };
-
-        broker_availabilities.push(BrokerAvailability {
-            broker,
-            used_bytes,
-            quota_bytes,
-        });
-    }
-
-    Ok(warp::reply::json(&broker_availabilities))
 }
 
 #[derive(Deserialize, Validate)]

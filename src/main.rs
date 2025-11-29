@@ -15,6 +15,7 @@ use diesel_async::{
 #[cfg(feature = "auto_migration")]
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
+use crate::broker::GetBrokersParams;
 use crate::post::history::HistoryPaginationQueryParams;
 use crate::user_group::history::AuditPaginationQueryParams;
 use crate::user_group::invite::{GetCurrentUserGroupInvitesParams, GetUserGroupInvitesParams};
@@ -65,6 +66,7 @@ use warp::{
 };
 
 mod auth;
+mod broker;
 mod data;
 mod error;
 mod mail;
@@ -526,12 +528,12 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(warp::post())
         .and(warp::body::json())
         .and(auth::with_user())
-        .and_then(data::create_broker_handler);
+        .and_then(broker::create::create_broker_handler);
 
-    let get_brokers_route = warp::path("get-brokers")
+    let get_available_brokers_route = warp::path("get-available-brokers")
         .and(warp::get())
         .and(auth::with_user())
-        .and_then(data::get_brokers_handler);
+        .and_then(broker::get_available_brokers_handler);
 
     let find_tag_route = warp::path("find-tag")
         .and(warp::get())
@@ -844,6 +846,12 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(auth::with_user())
         .and_then(user_group::invite::revoke_user_group_invite_handler);
 
+    let get_brokers_route = warp::path("get-brokers")
+        .and(warp::get())
+        .and(warp::query::<GetBrokersParams>())
+        .and(auth::with_user())
+        .and_then(broker::get_brokers_handler);
+
     let auth_routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -901,8 +909,9 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .or(get_presigned_hls_playlist_route);
 
     let broker_routes = create_broker_route
-        .or(get_brokers_route)
-        .or(get_user_group_brokers_route);
+        .or(get_available_brokers_route)
+        .or(get_user_group_brokers_route)
+        .or(get_brokers_route);
 
     let user_group_routes = create_user_group_route
         .or(get_current_user_groups_route)

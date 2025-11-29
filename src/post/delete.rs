@@ -13,12 +13,12 @@ use crate::{
     acquire_db_connection,
     error::{Error, TransactionRuntimeError},
     model::{DeferredS3ObjectDeletion, HlsStream, Post, PostCollection, S3Object, User},
-    perms::{self, get_group_membership_condition},
+    perms::{self, get_group_membership_administrator_condition},
     run_serializable_transaction,
     schema::{
         broker, broker_access, deferred_s3_object_deletion, hls_stream, post, post_collection,
         post_collection_group_access, post_collection_item, post_collection_tag, post_group_access,
-        post_tag, s3_object, user_group, user_group_membership,
+        post_tag, s3_object,
     },
     util::dedup_vec,
 };
