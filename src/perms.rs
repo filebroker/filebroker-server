@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use diesel::sql_types::Bool;
 use diesel::{
-    IntoSql, JoinOnDsl, NullableExpressionMethods, QueryDsl,
+    IntoSql, JoinOnDsl, NullableExpressionMethods, QueryDsl, Table,
     dsl::{exists, not},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
@@ -60,10 +60,39 @@ pub fn get_secure_query_condition_string(
     };
 
     if user.is_some() {
+        let broker_admin_condition =
+            if let Some(broker_access_base_table) = query_parameters.broker_access_base_table {
+                format!(
+                    r#"
+                        {broker_access_base_table}.fk_broker IN(
+                            SELECT pk FROM broker
+                            WHERE broker.fk_owner = {user_key} OR EXISTS(
+                                SELECT * FROM broker_access
+                                WHERE broker_access.fk_broker = broker.pk
+                                AND broker_access.write
+                                AND broker_access.fk_granted_group IN(
+                                    SELECT pk FROM user_group
+                                    WHERE user_group.fk_owner = {user_key} OR EXISTS(
+                                        SELECT * FROM user_group_membership
+                                        WHERE user_group_membership.fk_group = user_group.pk
+                                        AND user_group_membership.fk_user = {user_key}
+                                        AND NOT user_group_membership.revoked
+                                        AND user_group_membership.administrator
+                                    )
+                                )
+                            )
+                        )
+                    "#
+                )
+            } else {
+                String::from("FALSE")
+            };
+
         Some(format!(
             r#"
             ({base_table_name}.fk_create_user = {user_key}
             OR ({base_table_name}.public AND {public_edit_cond})
+            OR {broker_admin_condition}
             OR EXISTS(
                 SELECT * FROM {base_table_name}_group_access
                 WHERE {base_table_name}_group_access.fk_{base_table_name} = {base_table_name}.pk
@@ -232,9 +261,10 @@ pub async fn load_post_secured(
     user: Option<&User>,
 ) -> Result<PostJoined, Error> {
     let user_pk = user.map(|u| u.pk);
-    let (create_user, edit_user) = diesel::alias!(
+    let (create_user, edit_user, post_object_broker) = diesel::alias!(
         schema::registered_user as create_user,
         schema::registered_user as edit_user,
+        schema::broker as post_object_broker,
     );
     post::table
         .inner_join(create_user.on(post::fk_create_user.eq(create_user.field(registered_user::pk))))
@@ -242,7 +272,11 @@ pub async fn load_post_secured(
         .inner_join(
             s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
         )
-        .inner_join(broker::table.on(broker::pk.eq(s3_object::fk_broker)))
+        .inner_join(
+            post_object_broker.on(post_object_broker
+                .field(broker::pk)
+                .eq(s3_object::fk_broker)),
+        )
         .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::pk.eq(post_pk).and(
@@ -260,7 +294,12 @@ pub async fn load_post_secured(
                                 &user_pk,
                                 post_group_access
                             ),
-                        )))),
+                        )))
+                        .or(s3_object::fk_broker.eq_any(
+                            broker::table
+                                .select(broker::pk)
+                                .filter(get_broker_access_write_condition!(&user_pk)),
+                        ))),
             ),
         )
         .get_result::<(
@@ -304,9 +343,10 @@ pub async fn load_post_collection_item_secured(
         schema::registered_user as post_collection_create_user,
         schema::registered_user as post_collection_edit_user,
     );
-    let (post_s3_object, post_collection_poster_object) = diesel::alias!(
+    let (post_s3_object, post_collection_poster_object, post_object_broker) = diesel::alias!(
         schema::s3_object as post_s3_object,
-        schema::s3_object as post_collection_poster_object
+        schema::s3_object as post_collection_poster_object,
+        schema::broker as post_object_broker,
     );
     post_collection_item::table
         .inner_join(
@@ -347,7 +387,11 @@ pub async fn load_post_collection_item_secured(
                 .field(s3_object::object_key)
                 .eq(s3_object_metadata::object_key)),
         )
-        .inner_join(broker::table.on(broker::pk.eq(post_s3_object.field(s3_object::fk_broker))))
+        .inner_join(
+            post_object_broker.on(post_object_broker
+                .field(broker::pk)
+                .eq(post_s3_object.field(s3_object::fk_broker))),
+        )
         .filter(
             post_collection_item::pk
                 .eq(post_collection_item_pk)
@@ -367,7 +411,12 @@ pub async fn load_post_collection_item_secured(
                                     &user_pk,
                                     post_group_access
                                 ),
-                            )))),
+                            )))
+                            .or(post_s3_object.field(s3_object::fk_broker).eq_any(
+                                broker::table
+                                    .select(broker::pk)
+                                    .filter(get_broker_access_write_condition!(&user_pk)),
+                            ))),
                 )
                 .and(
                     user.map(|u| u.is_admin)
@@ -430,9 +479,10 @@ pub async fn load_posts_secured(
     user: Option<&User>,
 ) -> Result<Vec<PostJoined>, Error> {
     let user_pk = user.map(|u| u.pk);
-    let (create_user, edit_user) = diesel::alias!(
+    let (create_user, edit_user, post_object_broker) = diesel::alias!(
         schema::registered_user as create_user,
         schema::registered_user as edit_user,
+        schema::broker as post_object_broker,
     );
     let results = post::table
         .inner_join(create_user.on(post::fk_create_user.eq(create_user.field(registered_user::pk))))
@@ -440,7 +490,11 @@ pub async fn load_posts_secured(
         .inner_join(
             s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
         )
-        .inner_join(broker::table.on(broker::pk.eq(s3_object::fk_broker)))
+        .inner_join(
+            post_object_broker.on(post_object_broker
+                .field(broker::pk)
+                .eq(s3_object::fk_broker)),
+        )
         .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::pk.eq_any(post_pks).and(
@@ -458,7 +512,12 @@ pub async fn load_posts_secured(
                                 &user_pk,
                                 post_group_access
                             ),
-                        )))),
+                        )))
+                        .or(s3_object::fk_broker.eq_any(
+                            broker::table
+                                .select(broker::pk)
+                                .filter(get_broker_access_write_condition!(&user_pk)),
+                        ))),
             ),
         )
         .load::<(
@@ -585,7 +644,12 @@ pub async fn load_s3_object_posts(
                                 user_pk,
                                 post_group_access
                             ),
-                        )))),
+                        )))
+                        .or(s3_object::fk_broker.eq_any(
+                            broker::table
+                                .select(broker::pk)
+                                .filter(get_broker_access_write_condition!(&user_pk)),
+                        ))),
             ),
         )
         .load::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
@@ -721,6 +785,8 @@ pub async fn is_post_editable(
     }
     let user_pk = user.map(|user| user.pk);
     post::table
+        .inner_join(s3_object::table)
+        .select(post::table::all_columns())
         .filter(
             post::pk.eq(post_pk).and(
                 post::public_edit
@@ -732,7 +798,12 @@ pub async fn is_post_editable(
                             &user_pk,
                             post_group_access
                         ),
-                    ))),
+                    )))
+                    .or(s3_object::fk_broker.eq_any(
+                        broker::table
+                            .select(broker::pk)
+                            .filter(get_broker_access_write_condition!(&user_pk)),
+                    )),
             ),
         )
         .get_result::<Post>(connection)
@@ -749,6 +820,7 @@ pub async fn filter_posts_editable(
 ) -> Result<Vec<i64>, Error> {
     let user_pk = user.map(|user| user.pk);
     post::table
+        .inner_join(s3_object::table)
         .select(post::pk)
         .filter(
             post::pk.eq_any(post_pks).and(
@@ -764,7 +836,12 @@ pub async fn filter_posts_editable(
                                 &user_pk,
                                 post_group_access
                             ),
-                        )))),
+                        )))
+                        .or(s3_object::fk_broker.eq_any(
+                            broker::table
+                                .select(broker::pk)
+                                .filter(get_broker_access_write_condition!(&user_pk)),
+                        ))),
             ),
         )
         .load::<i64>(connection)

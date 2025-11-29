@@ -140,6 +140,9 @@ pub struct QueryParameters {
     pub include_full_count: bool,
     pub privileged: bool,
     pub get_secure_query_condition: fn(Option<&User>, &QueryParameters) -> Option<String>,
+    /// Specify name of base table alias that has an fk_broker, will be used by get_secure_query_condition_string
+    /// to give users with admin privileges on the related broker access to the object
+    pub broker_access_base_table: Option<&'static str>,
 }
 
 #[derive(Clone, Default)]
@@ -949,6 +952,7 @@ pub fn prepare_query_parameters(
             include_full_count: scope != &Scope::TagAutoMatchPost,
             privileged: scope == &Scope::TagAutoMatchPost,
             get_secure_query_condition: perms::get_secure_query_condition_string,
+            broker_access_base_table: Some("s3_object"),
         }),
         Scope::Collection | Scope::TagAutoMatchCollection => Ok(QueryParameters {
             pagination: if scope == &Scope::TagAutoMatchCollection {
@@ -1051,6 +1055,7 @@ pub fn prepare_query_parameters(
             include_full_count: scope != &Scope::TagAutoMatchCollection,
             privileged: scope == &Scope::TagAutoMatchCollection,
             get_secure_query_condition: perms::get_secure_query_condition_string,
+            broker_access_base_table: None,
         }),
         Scope::CollectionItem { collection_pk } => Ok(QueryParameters {
             pagination: Some(QueryBuilderPagination {
@@ -1315,6 +1320,7 @@ pub fn prepare_query_parameters(
             include_full_count: true,
             privileged: false,
             get_secure_query_condition: perms::get_secure_query_condition_string,
+            broker_access_base_table: Some("post_s3_object"),
         }),
         Scope::UserGroup => Ok(QueryParameters {
             pagination: Some(QueryBuilderPagination {
@@ -1397,6 +1403,7 @@ pub fn prepare_query_parameters(
                     "({public_cond} OR user_group.fk_owner = {user_key} OR {membership_cond})"
                 ))
             },
+            broker_access_base_table: None,
         }),
     }
 }
