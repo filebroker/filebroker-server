@@ -839,6 +839,13 @@ impl Visitor for QueryBuilderVisitor<'_> {
                 && left_type == Type::String
                 && right_type == Type::String)
         {
+            // for fuzzy equals, explicitly add an IS NOT NULL condition on the left side
+            // this helps the query planner when used with column that are frequently NULL
+            if op == Operator::FuzzyEqual {
+                left.accept(self, scope, log);
+                self.write_buff(" IS NOT NULL AND ");
+            }
+
             // case insensitive matching for fuzzy equals and string equals
             self.write_buff("LOWER(");
             left.accept(self, scope, log);
