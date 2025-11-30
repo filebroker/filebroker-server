@@ -298,23 +298,35 @@ lazy_static! {
                         } else {
                             None
                         };
-
-                        let attribute_arg = &mut args[0];
-                        attribute_arg.accept(visitor, scope, log);
-                        visitor.write_buff(" ~* ");
                         let value = if let Some(value) = variable_value {
                             sanitize_string_literal(&value)
                         } else if let Some(string_literal) = args[1].node_type.downcast_ref::<StringLiteralNode>() {
                             sanitize_string_literal(&string_literal.val)
                         } else {
-                            visitor.write_buff("NULL");
+                            visitor.write_buff("FALSE");
                             return;
                         };
+
+                        let attribute_arg = &mut args[0];
+                        visitor.write_buff("(");
+                        // check that the target attribute is not NULL
+                        attribute_arg.accept(visitor, scope, log);
+                        visitor.write_buff(" IS NOT NULL AND ");
+                        // check that the value is contained in the target attribute at all,
+                        // this is much faster because it can use trigram indexes, and if the value is not contained, the pattern does not match anyway
+                        visitor.write_buff("LOWER(");
+                        attribute_arg.accept(visitor, scope, log);
+                        visitor.write_buff(") LIKE LOWER('%");
+                        visitor.write_buff(&value);
+                        visitor.write_buff("%') AND ");
+                        // perform the regex match to see if the value is part of a ,&; separated list of values
+                        attribute_arg.accept(visitor, scope, log);
+                        visitor.write_buff(" ~* ");
                         visitor.write_buff(r"'(^|[,&;]\s*)");
                         let escaped = regex::escape(&value);
                         visitor.write_buff(&escaped);
-                        visitor.write_buff(r"(\s*[,&;]|$)");
-                        visitor.write_buff("'");
+                        visitor.write_buff(r"(\s*[,&;]|$)'");
+                        visitor.write_buff(")");
                     }
                 },
             })
