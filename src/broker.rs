@@ -83,19 +83,20 @@ pub async fn get_brokers_handler(
             let filter = admin_only
                 .into_sql::<Bool>()
                 .and(get_broker_access_write_condition!(Some(user.pk)))
-                .or(
-                    not(admin_only.into_sql::<Bool>()).and(broker::fk_owner.eq(user.pk).or(
-                        exists(
-                            broker_access::table.filter(get_group_access_or_public_condition!(
+                .or(not(admin_only.into_sql::<Bool>()).and(
+                    user.is_admin
+                        .into_sql::<Bool>()
+                        .or(broker::fk_owner.eq(user.pk))
+                        .or(exists(broker_access::table.filter(
+                            get_group_access_or_public_condition!(
                                 broker_access::fk_broker,
                                 broker::pk,
                                 Some(user.pk),
                                 broker_access::fk_granted_group.is_null(),
                                 broker_access::fk_granted_group
-                            )),
-                        ),
-                    )),
-                );
+                            ),
+                        ))),
+                ));
 
             let total_count = broker::table
                 .filter(filter)
