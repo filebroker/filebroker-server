@@ -132,6 +132,9 @@ pub struct BrokerDetailed {
     pub is_admin: bool,
     pub used_bytes: i64,
     pub quota_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // only include for single broker, not broker lists
+    pub total_used_bytes: Option<i64>,
 }
 
 pub async fn get_broker_handler(broker_pk: i64, user: User) -> Result<impl Reply, Rejection> {
@@ -215,6 +218,27 @@ pub async fn get_broker_handler(broker_pk: i64, user: User) -> Result<impl Reply
                     .flatten()
             };
 
+            let total_used_bytes = if is_admin {
+                s3_object::table
+                    .select(sum(s3_object::size_bytes))
+                    .filter(s3_object::fk_broker.eq(broker.pk))
+                    .get_result::<Option<BigDecimal>>(connection)
+                    .await
+                    .optional()
+                    .map_err(Error::from)?
+                    .flatten()
+                    .map(|usage_bytes| {
+                        usage_bytes.to_i64().ok_or_else(|| {
+                            Error::InternalError(format!(
+                                "Could not convert broker usage bytes {usage_bytes} to i64"
+                            ))
+                        })
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
+
             Ok(BrokerDetailed {
                 pk: broker.pk,
                 name: broker.name,
@@ -242,6 +266,7 @@ pub async fn get_broker_handler(broker_pk: i64, user: User) -> Result<impl Reply
                 is_admin,
                 used_bytes,
                 quota_bytes,
+                total_used_bytes,
             })
         }
         .scope_boxed()
@@ -418,6 +443,7 @@ pub async fn get_brokers_handler(
                         is_admin,
                         used_bytes,
                         quota_bytes,
+                        total_used_bytes: None,
                     })
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
