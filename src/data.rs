@@ -68,7 +68,7 @@ pub async fn upload_handler(
         .ok_or_else(|| Error::InvalidFileError(String::from("No mime boundary")))?;
 
     let mut connection = acquire_db_connection().await?;
-    let broker = perms::load_broker_secured(broker_pk, &mut connection, Some(&user)).await?;
+    let broker = perms::load_broker_access_secured(broker_pk, &mut connection, Some(&user)).await?;
     if broker.fk_owner != user.pk {
         up::check_broker_quota_usage(&broker, &user, upload_size, &mut connection).await?;
     }

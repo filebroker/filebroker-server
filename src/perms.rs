@@ -669,7 +669,7 @@ pub async fn load_s3_object_posts(
         })
 }
 
-pub async fn load_broker_secured(
+pub async fn load_broker_access_secured(
     broker_pk: i64,
     connection: &mut AsyncPgConnection,
     user: Option<&User>,

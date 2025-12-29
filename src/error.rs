@@ -61,6 +61,8 @@ pub enum Error {
     UserAlreadyMemberOfGroupError(i64),
     #[error("The provided reference path is invalid: '{0}'")]
     InvalidReferencePathError(String),
+    #[error("Broker access for group {0:?} already exists")]
+    BrokerAccessAlreadyExistsError(Option<i64>),
 
     // 401
     #[error("invalid credentials")]
@@ -172,7 +174,8 @@ impl Error {
             | Error::InvalidUploadSizeError
             | Error::InvalidUserGroupInviteCodeError(_)
             | Error::UserAlreadyMemberOfGroupError(_)
-            | Error::InvalidReferencePathError(_) => StatusCode::BAD_REQUEST,
+            | Error::InvalidReferencePathError(_)
+            | Error::BrokerAccessAlreadyExistsError(_) => StatusCode::BAD_REQUEST,
             Error::DatabaseConnectionError(_)
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -222,6 +225,7 @@ impl Error {
             Self::InvalidUserGroupInviteCodeError(_) => 400_021,
             Self::UserAlreadyMemberOfGroupError(_) => 400_022,
             Self::InvalidReferencePathError(_) => 400_023,
+            Self::BrokerAccessAlreadyExistsError(_) => 400_024,
 
             Self::InvalidCredentialsError => 401_001,
             Self::MissingAuthHeaderError => 401_002,

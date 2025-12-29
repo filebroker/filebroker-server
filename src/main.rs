@@ -15,7 +15,8 @@ use diesel_async::{
 #[cfg(feature = "auto_migration")]
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
-use crate::broker::GetBrokersParams;
+use crate::broker::update::GetBrokerAuditLogsParams;
+use crate::broker::{GetBrokerAccessParams, GetBrokersParams};
 use crate::post::history::HistoryPaginationQueryParams;
 use crate::user_group::history::AuditPaginationQueryParams;
 use crate::user_group::invite::{GetCurrentUserGroupInvitesParams, GetUserGroupInvitesParams};
@@ -852,6 +853,76 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(auth::with_user())
         .and_then(broker::get_brokers_handler);
 
+    let get_broker_route = warp::path("get-broker")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(broker::get_broker_handler);
+
+    let edit_broker_route = warp::path("edit-broker")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(broker::update::edit_broker_handler);
+
+    let edit_broket_bucket_route = warp::path("edit-broket-bucket")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(broker::update::edit_broket_bucket_handler);
+
+    let verify_bucket_connection_route = warp::path("verify-bucket-connection")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(broker::verify_bucket_connection_handler);
+
+    let get_broker_access_route = warp::path("get-broker-access")
+        .and(warp::get())
+        .and(warp::path::param())
+        .and(warp::query::<GetBrokerAccessParams>())
+        .and(auth::with_user())
+        .and_then(broker::get_broker_access_handler);
+
+    let get_broker_audit_logs_route = warp::path("get-broker-audit-logs")
+        .and(warp::get())
+        .and(warp::query::<GetBrokerAuditLogsParams>())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(broker::update::get_broker_audit_logs_handler);
+
+    let create_broker_access_route = warp::path("create-broker-access")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(broker::create::create_broker_access_handler);
+
+    let change_broker_access_quota_route = warp::path("change-broker-access-quota")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(warp::path::param())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(broker::update::change_broker_access_quota_handler);
+
+    let delete_broker_access_route = warp::path("delete-broker-access")
+        .and(warp::delete())
+        .and(warp::path::param())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(broker::update::delete_broker_access_handler);
+
+    let change_broker_access_admin_route = warp::path("change-broker-access-admin")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(warp::path::param())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(broker::update::change_broker_access_admin_handler);
+
     let auth_routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -911,7 +982,17 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
     let broker_routes = create_broker_route
         .or(get_available_brokers_route)
         .or(get_user_group_brokers_route)
-        .or(get_brokers_route);
+        .or(get_brokers_route)
+        .or(get_broker_route)
+        .or(edit_broker_route)
+        .or(edit_broket_bucket_route)
+        .or(verify_bucket_connection_route)
+        .or(get_broker_access_route)
+        .or(get_broker_audit_logs_route)
+        .or(create_broker_access_route)
+        .or(change_broker_access_quota_route)
+        .or(delete_broker_access_route)
+        .or(change_broker_access_admin_route);
 
     let user_group_routes = create_user_group_route
         .or(get_current_user_groups_route)

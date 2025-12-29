@@ -1304,6 +1304,7 @@ pub struct Broker {
     pub hls_enabled: bool,
     pub enable_presigned_get: bool,
     pub is_system_bucket: bool,
+    pub description: Option<String>,
 }
 
 #[derive(Insertable)]
@@ -1320,6 +1321,44 @@ pub struct NewBroker {
     pub hls_enabled: bool,
     pub enable_presigned_get: bool,
     pub is_system_bucket: bool,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, diesel_derive_enum::DbEnum, Debug, Serialize)]
+#[ExistingTypePath = "crate::schema::sql_types::BrokerAuditAction"]
+pub enum BrokerAuditAction {
+    Edit,
+    BucketConnectionEdit,
+    AccessGranted,
+    AccessRevoked,
+    AccessQuotaEdit,
+    AccessAdminPromote,
+    AccessAdminDemote,
+}
+
+#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(Broker, foreign_key = fk_broker))]
+#[diesel(table_name = broker_audit_log)]
+#[diesel(primary_key(pk))]
+pub struct BrokerAuditLog {
+    pub pk: i64,
+    pub fk_broker: i64,
+    pub fk_user: i64,
+    pub action: BrokerAuditAction,
+    pub fk_target_group: Option<i64>,
+    pub new_quota: Option<i64>,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = broker_audit_log)]
+pub struct NewBrokerAuditLog {
+    pub fk_broker: i64,
+    pub fk_user: i64,
+    pub action: BrokerAuditAction,
+    pub fk_target_group: Option<i64>,
+    pub new_quota: Option<i64>,
+    pub creation_timestamp: DateTime<Utc>,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, QueryableByName, Serialize)]
@@ -1610,6 +1649,17 @@ pub struct PostCollectionTag {
 #[diesel(primary_key(pk))]
 pub struct BrokerAccess {
     pub pk: i64,
+    pub fk_broker: i64,
+    pub fk_granted_group: Option<i64>,
+    pub write: bool,
+    pub quota: Option<i64>,
+    pub fk_granted_by: i64,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Insertable)]
+#[diesel(table_name = broker_access)]
+pub struct NewBrokerAccess {
     pub fk_broker: i64,
     pub fk_granted_group: Option<i64>,
     pub write: bool,

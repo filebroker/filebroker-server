@@ -2,6 +2,10 @@
 
 pub mod sql_types {
     #[derive(diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "broker_audit_action"))]
+    pub struct BrokerAuditAction;
+
+    #[derive(diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "user_group_audit_action"))]
     pub struct UserGroupAuditAction;
 }
@@ -40,6 +44,7 @@ diesel::table! {
         hls_enabled -> Bool,
         enable_presigned_get -> Bool,
         is_system_bucket -> Bool,
+        description -> Nullable<Text>,
     }
 }
 
@@ -51,6 +56,21 @@ diesel::table! {
         write -> Bool,
         quota -> Nullable<Int8>,
         fk_granted_by -> Int8,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::BrokerAuditAction;
+
+    broker_audit_log (pk) {
+        pk -> Int8,
+        fk_broker -> Int8,
+        fk_user -> Int8,
+        action -> BrokerAuditAction,
+        fk_target_group -> Nullable<Int8>,
+        new_quota -> Nullable<Int8>,
         creation_timestamp -> Timestamptz,
     }
 }
@@ -567,6 +587,9 @@ diesel::joinable!(broker -> registered_user (fk_owner));
 diesel::joinable!(broker_access -> broker (fk_broker));
 diesel::joinable!(broker_access -> registered_user (fk_granted_by));
 diesel::joinable!(broker_access -> user_group (fk_granted_group));
+diesel::joinable!(broker_audit_log -> broker (fk_broker));
+diesel::joinable!(broker_audit_log -> registered_user (fk_user));
+diesel::joinable!(broker_audit_log -> user_group (fk_target_group));
 diesel::joinable!(deferred_s3_object_deletion -> broker (fk_broker));
 diesel::joinable!(email_confirmation_token -> registered_user (fk_user));
 diesel::joinable!(one_time_password -> registered_user (fk_user));
@@ -625,6 +648,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     apply_auto_tags_task,
     broker,
     broker_access,
+    broker_audit_log,
     deferred_s3_object_deletion,
     email_confirmation_token,
     hls_stream,
