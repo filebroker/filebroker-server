@@ -11,8 +11,8 @@ use crate::model::{
 use crate::perms::{get_group_membership_condition, load_user_group_secured};
 use crate::query::{ApplyOrderFn, apply_key_ordering, order_by_col_fn, order_by_col_with_tie_fn};
 use crate::schema::{
-    broker, broker_access, post, post_group_access, registered_user, s3_object, tag, user_group,
-    user_group_audit_log, user_group_membership, user_group_tag,
+    broker, broker_access, registered_user, s3_object, tag, user_group, user_group_audit_log,
+    user_group_membership, user_group_tag,
 };
 use crate::tag::TagUsage;
 use crate::{
@@ -867,16 +867,23 @@ pub async fn get_user_group_brokers_handler(
                 .iter()
                 .map(|(_, broker, _)| broker.pk)
                 .collect::<Vec<_>>();
-            let broker_usages = post_group_access::table
-                .inner_join(post::table)
-                .inner_join(s3_object::table.on(s3_object::object_key.eq(post::s3_object)))
-                .group_by(s3_object::fk_broker)
-                .select((s3_object::fk_broker, sum(s3_object::size_bytes)))
-                .filter(
-                    post_group_access::fk_granted_group
-                        .eq(user_group.pk)
-                        .and(s3_object::fk_broker.eq_any(&broker_pks)),
+            let broker_usages = broker_access::table
+                .inner_join(
+                    user_group_membership::table.on(user_group_membership::fk_group
+                        .nullable()
+                        .eq(broker_access::fk_granted_group)),
                 )
+                .inner_join(
+                    s3_object::table.on(s3_object::fk_uploader
+                        .eq(user_group_membership::fk_user)
+                        .and(s3_object::fk_broker.eq(broker_access::fk_broker))),
+                )
+                .inner_join(broker::table.on(broker::pk.eq(broker_access::fk_broker)))
+                .filter(broker_access::fk_granted_group.eq(user_group.pk))
+                .filter(broker_access::fk_broker.eq_any(broker_pks))
+                .filter(s3_object::fk_uploader.ne(broker::fk_owner))
+                .group_by(broker_access::pk)
+                .select((broker_access::pk, sum(s3_object::size_bytes)))
                 .load::<(i64, Option<BigDecimal>)>(connection)
                 .await?
                 .into_iter()
@@ -887,7 +894,7 @@ pub async fn get_user_group_brokers_handler(
                 .into_iter()
                 .map(|(broker_access, broker, granted_by)| {
                     let used_bytes = broker_usages
-                        .get(&broker.pk)
+                        .get(&broker_access.pk)
                         .map(|bytes_decimal| {
                             bytes_decimal.to_i64().ok_or_else(|| {
                                 Error::InternalError(format!(
