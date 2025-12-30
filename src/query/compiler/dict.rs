@@ -628,6 +628,16 @@ lazy_static! {
                 nullable: true
             })
         ),
+        (
+            "broker",
+            Arc::new(Attribute {
+                table: "s3_object",
+                selection_expression: String::from("post_s3_object.fk_broker"),
+                return_type: Type::Number,
+                allow_sorting: false,
+                nullable: false
+            })
+        ),
     ]);
     pub static ref COLLECTION_ATTRIBUTES: HashMap<&'static str, Arc<Attribute>> = HashMap::from([
         (
