@@ -8,6 +8,7 @@ use crate::model::{
 };
 use crate::schema::{broker, broker_access, broker_audit_log, registered_user, user_group};
 use crate::util::NOT_BLANK_REGEX;
+use crate::util::deserialize_double_option;
 use crate::util::string_value_updated;
 use crate::{
     acquire_db_connection, run_repeatable_read_transaction, run_retryable_transaction,
@@ -29,6 +30,7 @@ pub struct BrokerUpdateOptional {
     pub remove_duplicate_files: Option<bool>,
     pub enable_presigned_get: Option<bool>,
     pub is_system_bucket: Option<bool>,
+    pub total_quota: Option<Option<i64>>,
 }
 
 pub struct BrokerUpdateFieldChanges {
@@ -37,6 +39,7 @@ pub struct BrokerUpdateFieldChanges {
     pub remove_duplicate_files_changed: bool,
     pub enable_presigned_get_changed: bool,
     pub is_system_bucket_changed: bool,
+    pub total_quota_changed: bool,
 }
 
 impl BrokerUpdateFieldChanges {
@@ -46,6 +49,7 @@ impl BrokerUpdateFieldChanges {
             || self.remove_duplicate_files_changed
             || self.enable_presigned_get_changed
             || self.is_system_bucket_changed
+            || self.total_quota_changed
     }
 }
 
@@ -69,6 +73,10 @@ impl BrokerUpdateOptional {
                 .is_system_bucket
                 .map(|v| v != curr_value.is_system_bucket)
                 .unwrap_or(false),
+            total_quota_changed: self
+                .total_quota
+                .map(|v| v != curr_value.total_quota)
+                .unwrap_or(false),
         }
     }
 
@@ -86,6 +94,10 @@ pub struct EditBrokerRequest {
     pub remove_duplicate_files: Option<bool>,
     pub enable_presigned_get: Option<bool>,
     pub is_system_bucket: Option<bool>,
+    #[validate(range(min = 1024))] // 1 KB minimum quota, smaller values are unreasonable and are likely accidental
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub total_quota: Option<Option<i64>>,
+    pub disable_uploads: Option<bool>,
 }
 
 pub async fn edit_broker_handler(
@@ -129,32 +141,69 @@ pub async fn edit_broker_handler(
                 remove_duplicate_files: request.remove_duplicate_files,
                 enable_presigned_get: request.enable_presigned_get,
                 is_system_bucket: request.is_system_bucket,
+                total_quota: request.total_quota,
             };
 
             let update_field_changes = update.get_field_changes(&broker);
 
-            if update_field_changes.has_changes() {
+            let now = Utc::now();
+
+            let updated_broker = if update_field_changes.has_changes() {
                 diesel::insert_into(broker_audit_log::table)
                     .values(NewBrokerAuditLog {
                         fk_broker: broker.pk,
                         fk_user: user.pk,
                         action: BrokerAuditAction::Edit,
                         fk_target_group: None,
+                        new_quota: if update_field_changes.total_quota_changed {
+                            update.total_quota.flatten()
+                        } else {
+                            broker.total_quota
+                        },
+                        creation_timestamp: now,
+                        fk_target_user: None,
+                    })
+                    .execute(connection)
+                    .await?;
+
+                diesel::update(broker::table)
+                    .filter(broker::pk.eq(broker.pk))
+                    .set(update)
+                    .get_result::<Broker>(connection)
+                    .await?
+            } else {
+                broker
+            };
+
+            if let Some(disable_uploads) = request.disable_uploads
+                && disable_uploads != updated_broker.disable_uploads
+            {
+                diesel::insert_into(broker_audit_log::table)
+                    .values(NewBrokerAuditLog {
+                        fk_broker: updated_broker.pk,
+                        fk_user: user.pk,
+                        action: if disable_uploads {
+                            BrokerAuditAction::DisableUploads
+                        } else {
+                            BrokerAuditAction::EnableUploads
+                        },
+                        fk_target_group: None,
                         new_quota: None,
-                        creation_timestamp: Utc::now(),
+                        creation_timestamp: now,
+                        fk_target_user: None,
                     })
                     .execute(connection)
                     .await?;
 
                 let updated_broker = diesel::update(broker::table)
-                    .filter(broker::pk.eq(broker.pk))
-                    .set(update)
+                    .filter(broker::pk.eq(updated_broker.pk))
+                    .set(broker::disable_uploads.eq(disable_uploads))
                     .get_result::<Broker>(connection)
                     .await?;
 
                 Ok(updated_broker)
             } else {
-                Ok(broker)
+                Ok(updated_broker)
             }
         }
         .scope_boxed()
@@ -287,6 +336,7 @@ pub async fn edit_broket_bucket_handler(
                     fk_target_group: None,
                     new_quota: None,
                     creation_timestamp: Utc::now(),
+                    fk_target_user: None,
                 })
                 .execute(connection)
                 .await?;
@@ -376,6 +426,7 @@ pub async fn change_broker_access_quota_handler(
                     fk_target_group: broker_access.fk_granted_group,
                     new_quota: request.quota,
                     creation_timestamp: Utc::now(),
+                    fk_target_user: broker_access.fk_granted_user,
                 })
                 .execute(connection)
                 .await?;
@@ -449,6 +500,7 @@ pub async fn change_broker_access_admin_handler(
                     fk_target_group: broker_access.fk_granted_group,
                     new_quota: None,
                     creation_timestamp: Utc::now(),
+                    fk_target_user: broker_access.fk_granted_user,
                 })
                 .execute(connection)
                 .await?;
@@ -501,6 +553,7 @@ pub async fn delete_broker_access_handler(
                     fk_target_group: broker_access.fk_granted_group,
                     new_quota: None,
                     creation_timestamp: Utc::now(),
+                    fk_target_user: broker_access.fk_granted_user,
                 })
                 .execute(connection)
                 .await?;

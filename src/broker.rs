@@ -3,10 +3,10 @@ use crate::diesel::ExpressionMethods;
 use crate::diesel::NullableExpressionMethods;
 use crate::error::{Error, TransactionRuntimeError};
 use crate::model::{Broker, BrokerAccess, User, UserGroup, UserPublic};
-use crate::perms::get_broker_group_access_write_condition;
+use crate::perms::{get_broker_access_condition, get_broker_access_write_condition};
 use crate::perms::{
-    get_broker_access_write_condition, get_group_access_or_public_condition,
-    get_group_membership_administrator_condition, get_group_membership_condition,
+    get_broker_write_condition, get_group_membership_administrator_condition,
+    get_group_membership_condition,
 };
 use crate::query::{ApplyOrderFn, apply_key_ordering, order_by_col_fn, order_by_col_with_tie_fn};
 use crate::schema::{
@@ -50,15 +50,9 @@ pub async fn get_broker_joined(
                 user.is_admin
                     .into_sql::<Bool>()
                     .or(broker::fk_owner.eq(user.pk))
-                    .or(exists(broker_access::table.filter(
-                        get_group_access_or_public_condition!(
-                            broker_access::fk_broker,
-                            broker::pk,
-                            Some(user.pk),
-                            broker_access::fk_granted_group.is_null(),
-                            broker_access::fk_granted_group
-                        ),
-                    ))),
+                    .or(exists(
+                        broker_access::table.filter(get_broker_access_condition!(user.pk)),
+                    )),
             ),
         )
         .get_result::<(Broker, UserPublic)>(connection)
@@ -101,7 +95,7 @@ pub async fn is_broker_admin(
         .filter(
             broker::pk
                 .eq(broker_pk)
-                .and(get_broker_access_write_condition!(Some(user.pk))),
+                .and(get_broker_write_condition!(Some(user.pk))),
         )
         .get_result::<i64>(connection)
         .await
@@ -128,6 +122,8 @@ pub struct BrokerDetailed {
     pub hls_enabled: bool,
     pub enable_presigned_get: bool,
     pub is_system_bucket: bool,
+    pub total_quota: Option<i64>,
+    pub disable_uploads: bool,
     pub is_public: bool,
     pub is_admin: bool,
     pub used_bytes: i64,
@@ -176,14 +172,8 @@ pub async fn get_broker_handler(broker_pk: i64, user: User) -> Result<impl Reply
                     broker::pk.eq(broker.pk).and(
                         broker::fk_owner.eq(user.pk).or(exists(
                             broker_access::table.filter(
-                                get_group_access_or_public_condition!(
-                                    broker_access::fk_broker,
-                                    broker::pk,
-                                    &Some(user.pk),
-                                    broker_access::fk_granted_group.is_null(),
-                                    broker_access::fk_granted_group
-                                )
-                                .and(broker_access::quota.is_null()),
+                                get_broker_access_condition!(user.pk)
+                                    .and(broker_access::quota.is_null()),
                             ),
                         )),
                     ),
@@ -199,14 +189,8 @@ pub async fn get_broker_handler(broker_pk: i64, user: User) -> Result<impl Reply
             } else {
                 broker::table
                     .inner_join(
-                        broker_access::table.on(get_group_access_or_public_condition!(
-                            broker_access::fk_broker,
-                            broker::pk,
-                            &Some(user.pk),
-                            broker_access::fk_granted_group.is_null(),
-                            broker_access::fk_granted_group
-                        )
-                        .and(broker_access::quota.is_not_null())),
+                        broker_access::table.on(get_broker_access_condition!(user.pk)
+                            .and(broker_access::quota.is_not_null())),
                     )
                     .group_by(broker::pk)
                     .select(max(broker_access::quota))
@@ -262,6 +246,8 @@ pub async fn get_broker_handler(broker_pk: i64, user: User) -> Result<impl Reply
                 hls_enabled: broker.hls_enabled,
                 enable_presigned_get: broker.enable_presigned_get,
                 is_system_bucket: broker.is_system_bucket,
+                total_quota: broker.total_quota,
+                disable_uploads: broker.disable_uploads,
                 is_public,
                 is_admin,
                 used_bytes,
@@ -308,20 +294,14 @@ pub async fn get_brokers_handler(
         async {
             let filter = admin_only
                 .into_sql::<Bool>()
-                .and(get_broker_access_write_condition!(Some(user.pk)))
+                .and(get_broker_write_condition!(Some(user.pk)))
                 .or(not(admin_only.into_sql::<Bool>()).and(
                     user.is_admin
                         .into_sql::<Bool>()
                         .or(broker::fk_owner.eq(user.pk))
-                        .or(exists(broker_access::table.filter(
-                            get_group_access_or_public_condition!(
-                                broker_access::fk_broker,
-                                broker::pk,
-                                Some(user.pk),
-                                broker_access::fk_granted_group.is_null(),
-                                broker_access::fk_granted_group
-                            ),
-                        ))),
+                        .or(exists(
+                            broker_access::table.filter(get_broker_access_condition!(user.pk)),
+                        )),
                 ));
 
             let total_count = broker::table
@@ -387,7 +367,7 @@ pub async fn get_brokers_handler(
                 .filter(
                     broker::pk
                         .eq_any(&broker_pks)
-                        .and(get_broker_access_write_condition!(Some(user.pk))),
+                        .and(get_broker_write_condition!(Some(user.pk))),
                 )
                 .load::<i64>(connection)
                 .await?;
@@ -439,6 +419,8 @@ pub async fn get_brokers_handler(
                         hls_enabled: broker.hls_enabled,
                         enable_presigned_get: broker.enable_presigned_get,
                         is_system_bucket: broker.is_system_bucket,
+                        total_quota: broker.total_quota,
+                        disable_uploads: broker.disable_uploads,
                         is_public,
                         is_admin,
                         used_bytes,
@@ -469,7 +451,7 @@ pub struct BrokerAvailability {
 
 pub async fn get_available_brokers_handler(user: User) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
-    let brokers = perms::get_brokers_secured(&mut connection, Some(&user)).await?;
+    let brokers = perms::get_available_brokers_secured(&mut connection, Some(&user)).await?;
     let broker_pks = brokers.iter().map(|b| b.pk).collect::<Vec<i64>>();
 
     let (broker_usages, unlimited_brokers, broker_quotas) =
@@ -530,40 +512,31 @@ async fn load_broker_quota_usages(
         .map(|(broker_pk, size_used)| (broker_pk, size_used.unwrap_or(BigDecimal::from(0))))
         .collect::<HashMap<i64, BigDecimal>>();
 
-    let unlimited_brokers = broker::table
-        .select(broker::pk)
-        .filter(
-            broker::pk.eq_any(broker_pks).and(
-                broker::fk_owner.eq(user.pk).or(exists(
-                    broker_access::table.filter(
-                        get_group_access_or_public_condition!(
-                            broker_access::fk_broker,
-                            broker::pk,
-                            &Some(user.pk),
-                            broker_access::fk_granted_group.is_null(),
-                            broker_access::fk_granted_group
-                        )
-                        .and(broker_access::quota.is_null()),
+    let unlimited_brokers =
+        broker::table
+            .select(broker::pk)
+            .filter(
+                broker::pk
+                    .eq_any(broker_pks)
+                    .and(
+                        broker::fk_owner.eq(user.pk).or(exists(
+                            broker_access::table.filter(
+                                get_broker_access_condition!(user.pk)
+                                    .and(broker_access::quota.is_null()),
+                            ),
+                        )),
                     ),
-                )),
-            ),
-        )
-        .load::<i64>(connection)
-        .await
-        .map_err(Error::from)?
-        .into_iter()
-        .collect::<HashSet<i64>>();
+            )
+            .load::<i64>(connection)
+            .await
+            .map_err(Error::from)?
+            .into_iter()
+            .collect::<HashSet<i64>>();
 
     let broker_quotas = broker::table
         .inner_join(
-            broker_access::table.on(get_group_access_or_public_condition!(
-                broker_access::fk_broker,
-                broker::pk,
-                &Some(user.pk),
-                broker_access::fk_granted_group.is_null(),
-                broker_access::fk_granted_group
-            )
-            .and(broker_access::quota.is_not_null())),
+            broker_access::table
+                .on(get_broker_access_condition!(user.pk).and(broker_access::quota.is_not_null())),
         )
         .group_by(broker::pk)
         .select((broker::pk, max(broker_access::quota)))

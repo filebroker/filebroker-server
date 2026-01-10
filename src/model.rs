@@ -1305,6 +1305,8 @@ pub struct Broker {
     pub enable_presigned_get: bool,
     pub is_system_bucket: bool,
     pub description: Option<String>,
+    pub total_quota: Option<i64>,
+    pub disable_uploads: bool,
 }
 
 #[derive(Insertable)]
@@ -1322,6 +1324,7 @@ pub struct NewBroker {
     pub enable_presigned_get: bool,
     pub is_system_bucket: bool,
     pub description: Option<String>,
+    pub total_quota: Option<i64>,
 }
 
 #[derive(Clone, diesel_derive_enum::DbEnum, Debug, Serialize)]
@@ -1334,6 +1337,8 @@ pub enum BrokerAuditAction {
     AccessQuotaEdit,
     AccessAdminPromote,
     AccessAdminDemote,
+    DisableUploads,
+    EnableUploads,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -1348,6 +1353,7 @@ pub struct BrokerAuditLog {
     pub fk_target_group: Option<i64>,
     pub new_quota: Option<i64>,
     pub creation_timestamp: DateTime<Utc>,
+    pub fk_target_user: Option<i64>,
 }
 
 #[derive(Insertable)]
@@ -1359,6 +1365,7 @@ pub struct NewBrokerAuditLog {
     pub fk_target_group: Option<i64>,
     pub new_quota: Option<i64>,
     pub creation_timestamp: DateTime<Utc>,
+    pub fk_target_user: Option<i64>,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, QueryableByName, Serialize)]
@@ -1655,6 +1662,9 @@ pub struct BrokerAccess {
     pub quota: Option<i64>,
     pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
+    pub fk_granted_user: Option<i64>,
+    #[serde(rename = "is_public")]
+    pub public: bool,
 }
 
 #[derive(Clone, Insertable)]
@@ -1666,6 +1676,8 @@ pub struct NewBrokerAccess {
     pub quota: Option<i64>,
     pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
+    pub fk_granted_user: Option<i64>,
+    pub public: bool,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]

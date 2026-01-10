@@ -172,21 +172,6 @@ macro_rules! get_group_access_condition {
 #[allow(unused_imports)]
 pub(crate) use get_group_access_condition;
 
-macro_rules! get_group_access_or_public_condition {
-    ($fk:expr, $target:expr, $user_pk:expr, $public_cond:expr, $group_fk:expr) => {
-        $fk.eq($target).and(
-            $public_cond.or($group_fk.eq_any(
-                user_group::table
-                    .select(user_group::pk)
-                    .nullable()
-                    .filter(get_group_membership_condition!($user_pk)),
-            )),
-        )
-    };
-}
-
-pub(crate) use get_group_access_or_public_condition;
-
 macro_rules! get_group_access_write_condition {
     ($fk:expr, $target:expr, $user_pk:expr, $table:ident) => {
         $fk.eq($target).and($table::write).and(
@@ -199,39 +184,60 @@ macro_rules! get_group_access_write_condition {
     };
 }
 
-macro_rules! get_broker_group_access_write_condition {
+macro_rules! get_broker_access_write_condition {
     ($user_pk:expr) => {
         crate::schema::broker_access::fk_broker
             .eq(crate::schema::broker::pk)
             .and(crate::schema::broker_access::write)
             .and(
-                crate::schema::broker_access::fk_granted_group.eq_any(
-                    crate::schema::user_group::table
-                        .select(crate::schema::user_group::pk)
-                        .filter(get_group_membership_administrator_condition!($user_pk))
-                        .nullable(),
-                ),
+                crate::schema::broker_access::fk_granted_user
+                    .eq($user_pk)
+                    .or(crate::schema::broker_access::fk_granted_group.eq_any(
+                        crate::schema::user_group::table
+                            .select(crate::schema::user_group::pk)
+                            .filter(get_group_membership_administrator_condition!($user_pk))
+                            .nullable(),
+                    )),
             )
     };
 }
 
-pub(crate) use get_broker_group_access_write_condition;
+pub(crate) use get_broker_access_write_condition;
 #[allow(unused_imports)]
 pub(crate) use get_group_access_write_condition;
 
-macro_rules! get_broker_access_write_condition {
+macro_rules! get_broker_write_condition {
     ($user_pk:expr) => {
         crate::schema::broker::fk_owner
             .nullable()
             .eq($user_pk)
             .or(exists(
                 crate::schema::broker_access::table
-                    .filter(get_broker_group_access_write_condition!($user_pk)),
+                    .filter(get_broker_access_write_condition!($user_pk)),
             ))
     };
 }
 
-pub(crate) use get_broker_access_write_condition;
+pub(crate) use get_broker_write_condition;
+
+macro_rules! get_broker_access_condition {
+    ($user_pk:expr) => {
+        crate::schema::broker_access::fk_broker
+            .eq(crate::schema::broker::pk)
+            .and(
+                crate::schema::broker_access::public
+                    .or(crate::schema::broker_access::fk_granted_user.eq($user_pk))
+                    .or(crate::schema::broker_access::fk_granted_group.eq_any(
+                        crate::schema::user_group::table
+                            .select(crate::schema::user_group::pk)
+                            .nullable()
+                            .filter(get_group_membership_condition!($user_pk)),
+                    )),
+            )
+    };
+}
+
+pub(crate) use get_broker_access_condition;
 
 pub struct PostJoined {
     pub post: Post,
@@ -299,7 +305,7 @@ pub async fn load_post_secured(
                         .or(s3_object::fk_broker.eq_any(
                             broker::table
                                 .select(broker::pk)
-                                .filter(get_broker_access_write_condition!(&user_pk)),
+                                .filter(get_broker_write_condition!(&user_pk)),
                         ))),
             ),
         )
@@ -416,7 +422,7 @@ pub async fn load_post_collection_item_secured(
                             .or(post_s3_object.field(s3_object::fk_broker).eq_any(
                                 broker::table
                                     .select(broker::pk)
-                                    .filter(get_broker_access_write_condition!(&user_pk)),
+                                    .filter(get_broker_write_condition!(&user_pk)),
                             ))),
                 )
                 .and(
@@ -517,7 +523,7 @@ pub async fn load_posts_secured(
                         .or(s3_object::fk_broker.eq_any(
                             broker::table
                                 .select(broker::pk)
-                                .filter(get_broker_access_write_condition!(&user_pk)),
+                                .filter(get_broker_write_condition!(&user_pk)),
                         ))),
             ),
         )
@@ -649,7 +655,7 @@ pub async fn load_s3_object_posts(
                         .or(s3_object::fk_broker.eq_any(
                             broker::table
                                 .select(broker::pk)
-                                .filter(get_broker_access_write_condition!(&user_pk)),
+                                .filter(get_broker_write_condition!(&user_pk)),
                         ))),
             ),
         )
@@ -681,13 +687,7 @@ pub async fn load_broker_access_secured(
             broker::pk
                 .eq(broker_pk)
                 .and(broker::fk_owner.nullable().eq(&user_pk).or(exists(
-                    broker_access::table.filter(get_group_access_or_public_condition!(
-                        broker_access::fk_broker,
-                        broker::pk,
-                        &user_pk,
-                        broker_access::fk_granted_group.is_null(),
-                        broker_access::fk_granted_group
-                    )),
+                    broker_access::table.filter(get_broker_access_condition!(&user_pk)),
                 ))),
         )
         .get_result::<Broker>(connection)
@@ -696,26 +696,15 @@ pub async fn load_broker_access_secured(
         .ok_or(Error::InaccessibleObjectError(broker_pk))
 }
 
-pub async fn get_brokers_secured(
+pub async fn get_available_brokers_secured(
     connection: &mut AsyncPgConnection,
     user: Option<&User>,
 ) -> Result<Vec<Broker>, Error> {
     let user_pk = user.map(|u| u.pk);
     broker::table
-        .filter(
-            broker::fk_owner
-                .nullable()
-                .eq(&user_pk)
-                .or(exists(broker_access::table.filter(
-                    get_group_access_or_public_condition!(
-                        broker_access::fk_broker,
-                        broker::pk,
-                        &user_pk,
-                        broker_access::fk_granted_group.is_null(),
-                        broker_access::fk_granted_group
-                    ),
-                ))),
-        )
+        .filter(broker::fk_owner.nullable().eq(&user_pk).or(exists(
+            broker_access::table.filter(get_broker_access_condition!(&user_pk)),
+        )))
         .load::<Broker>(connection)
         .await
         .map_err(Error::from)
@@ -803,7 +792,7 @@ pub async fn is_post_editable(
                     .or(s3_object::fk_broker.eq_any(
                         broker::table
                             .select(broker::pk)
-                            .filter(get_broker_access_write_condition!(&user_pk)),
+                            .filter(get_broker_write_condition!(&user_pk)),
                     )),
             ),
         )
@@ -841,7 +830,7 @@ pub async fn filter_posts_editable(
                         .or(s3_object::fk_broker.eq_any(
                             broker::table
                                 .select(broker::pk)
-                                .filter(get_broker_access_write_condition!(&user_pk)),
+                                .filter(get_broker_write_condition!(&user_pk)),
                         ))),
             ),
         )
@@ -866,15 +855,11 @@ pub async fn is_post_deletable(
         .filter(
             post::pk
                 .eq(post_pk)
-                .and(
-                    post::fk_create_user
-                        .nullable()
-                        .eq(user_pk)
-                        .or(broker::fk_owner.nullable().eq(user_pk).or(exists(
-                            broker_access::table
-                                .filter(get_broker_group_access_write_condition!(user_pk)),
-                        ))),
-                ),
+                .and(post::fk_create_user.nullable().eq(user_pk).or(
+                    broker::fk_owner.nullable().eq(user_pk).or(exists(
+                        broker_access::table.filter(get_broker_access_write_condition!(user_pk)),
+                    )),
+                )),
         )
         .get_result::<i64>(connection)
         .await
@@ -903,7 +888,7 @@ pub async fn filter_posts_deletable(
                         .eq(user_pk)
                         .or(broker::fk_owner.nullable().eq(user_pk).or(exists(
                             broker_access::table
-                                .filter(get_broker_group_access_write_condition!(user_pk)),
+                                .filter(get_broker_access_write_condition!(user_pk)),
                         )))),
             ),
         )

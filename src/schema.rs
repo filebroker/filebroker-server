@@ -45,6 +45,8 @@ diesel::table! {
         enable_presigned_get -> Bool,
         is_system_bucket -> Bool,
         description -> Nullable<Text>,
+        total_quota -> Nullable<Int8>,
+        disable_uploads -> Bool,
     }
 }
 
@@ -57,6 +59,8 @@ diesel::table! {
         quota -> Nullable<Int8>,
         fk_granted_by -> Int8,
         creation_timestamp -> Timestamptz,
+        fk_granted_user -> Nullable<Int8>,
+        public -> Bool,
     }
 }
 
@@ -72,6 +76,7 @@ diesel::table! {
         fk_target_group -> Nullable<Int8>,
         new_quota -> Nullable<Int8>,
         creation_timestamp -> Timestamptz,
+        fk_target_user -> Nullable<Int8>,
     }
 }
 
@@ -585,10 +590,8 @@ diesel::joinable!(apply_auto_tags_task -> tag (tag_to_apply));
 diesel::joinable!(apply_auto_tags_task -> tag_category (tag_category_to_apply));
 diesel::joinable!(broker -> registered_user (fk_owner));
 diesel::joinable!(broker_access -> broker (fk_broker));
-diesel::joinable!(broker_access -> registered_user (fk_granted_by));
 diesel::joinable!(broker_access -> user_group (fk_granted_group));
 diesel::joinable!(broker_audit_log -> broker (fk_broker));
-diesel::joinable!(broker_audit_log -> registered_user (fk_user));
 diesel::joinable!(broker_audit_log -> user_group (fk_target_group));
 diesel::joinable!(deferred_s3_object_deletion -> broker (fk_broker));
 diesel::joinable!(email_confirmation_token -> registered_user (fk_user));

@@ -306,3 +306,13 @@ pub fn vec_eq_sorted<T: Ord>(v1: &mut Vec<T>, v2: &mut Vec<T>) -> bool {
     v2.sort_unstable();
     v1 == v2
 }
+
+/// Deserialize a value that can be None or Some(None). This is useful for API endpoints where `None`
+/// means to not update the value, and `Some(None)` means to clear the value.
+pub fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}

@@ -5,7 +5,7 @@ use crate::error::{Error, TransactionRuntimeError};
 use crate::model::{
     Broker, BrokerAccess, BrokerAuditAction, NewBroker, NewBrokerAccess, NewBrokerAuditLog, User,
 };
-use crate::schema::{broker, broker_access, broker_audit_log};
+use crate::schema::{broker, broker_access, broker_audit_log, registered_user};
 use crate::user_group::get_user_group_joined;
 use crate::util::NOT_BLANK_REGEX;
 use crate::{acquire_db_connection, run_serializable_transaction};
@@ -35,6 +35,9 @@ pub struct CreateBrokerRequest {
     pub is_system_bucket: Option<bool>,
     #[validate(length(max = 30000))]
     pub description: Option<String>,
+    #[validate(range(min = 1024))]
+    // 1 KB minimum quota, smaller values are unreasonable and are likely accidental
+    pub total_quota: Option<i64>,
 }
 
 pub async fn create_broker_handler(
@@ -88,6 +91,7 @@ pub async fn create_broker_handler(
                         .unwrap_or(true),
                     is_system_bucket,
                     description: create_broker_request.description,
+                    total_quota: create_broker_request.total_quota,
                 })
                 .get_result::<Broker>(connection)
                 .await?;
@@ -103,6 +107,7 @@ pub async fn create_broker_handler(
 
 #[derive(Deserialize, Validate)]
 pub struct CreateBrokerAccessRequest {
+    pub user_pk: Option<i64>,
     pub user_group_pk: Option<i64>,
     #[validate(range(min = 1024))]
     // 1 KB minimum quota, smaller values are unreasonable and are likely accidental
@@ -121,9 +126,16 @@ pub async fn create_broker_access_handler(
         )))
     })?;
 
+    let granted_user_pk = request.user_pk;
     let user_group_pk = request.user_group_pk;
     let quota = request.quota;
     let is_admin = request.is_admin.unwrap_or(false);
+
+    if granted_user_pk.is_some() && user_group_pk.is_some() {
+        return Err(warp::reject::custom(Error::InvalidRequestInputError(
+            String::from("Cannot grant access to both user and user group"),
+        )));
+    }
 
     let mut connection = acquire_db_connection().await?;
     let created_broker_access = run_serializable_transaction(&mut connection, |connection| {
@@ -134,6 +146,20 @@ pub async fn create_broker_access_handler(
                 return Err(TransactionRuntimeError::Rollback(
                     Error::InaccessibleObjectError(broker_pk),
                 ));
+            }
+
+            // check that referenced user exists
+            if let Some(granted_user_pk) = granted_user_pk {
+                registered_user::table
+                    .filter(registered_user::pk.eq(granted_user_pk))
+                    .get_result::<User>(connection)
+                    .await
+                    .optional()?
+                    .ok_or_else(|| {
+                        TransactionRuntimeError::Rollback(Error::InaccessibleObjectError(
+                            granted_user_pk,
+                        ))
+                    })?;
             }
 
             // only allow granting access to groups of which the user is a member
@@ -193,8 +219,9 @@ pub async fn create_broker_access_handler(
                     fk_user: user.pk,
                     action: BrokerAuditAction::AccessGranted,
                     fk_target_group: user_group_pk,
-                    new_quota: None,
+                    new_quota: quota,
                     creation_timestamp: now,
+                    fk_target_user: granted_user_pk,
                 })
                 .execute(connection)
                 .await?;
@@ -207,6 +234,8 @@ pub async fn create_broker_access_handler(
                     quota,
                     fk_granted_by: user.pk,
                     creation_timestamp: now,
+                    fk_granted_user: granted_user_pk,
+                    public: user_group_pk.is_none() && granted_user_pk.is_none(),
                 })
                 .get_result::<BrokerAccess>(connection)
                 .await?;

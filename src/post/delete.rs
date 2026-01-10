@@ -68,26 +68,23 @@ pub async fn delete_posts_handler(
         run_serializable_transaction(&mut connection, |connection| {
             async {
                 let mut post_pks = request.post_pks.clone();
-                let inaccessible_posts =
-                    post::table
-                        .left_join(s3_object::table)
-                        .left_join(broker::table.on(s3_object::fk_broker.eq(broker::pk)))
-                        .select(post::pk)
-                        .filter(post::pk.eq_any(&post_pks).and(not(
-                            user.is_admin.into_sql::<Bool>().or(
-                                post::fk_create_user.eq(user.pk).or(
-                                    broker::fk_owner.eq(user.pk).or(exists(
-                                        broker_access::table.filter(
-                                            perms::get_broker_group_access_write_condition!(
-                                                user.pk
-                                            ),
-                                        ),
+                let inaccessible_posts = post::table
+                    .left_join(s3_object::table)
+                    .left_join(broker::table.on(s3_object::fk_broker.eq(broker::pk)))
+                    .select(post::pk)
+                    .filter(post::pk.eq_any(&post_pks).and(not(
+                        user.is_admin.into_sql::<Bool>().or(
+                            post::fk_create_user.eq(user.pk).or(
+                                broker::fk_owner.eq(user.pk).or(
+                                    exists(broker_access::table.filter(
+                                        perms::get_broker_access_write_condition!(user.pk),
                                     )),
                                 ),
                             ),
-                        )))
-                        .get_results::<i64>(connection)
-                        .await?;
+                        ),
+                    )))
+                    .get_results::<i64>(connection)
+                    .await?;
 
                 if let Some(DeleteInaccessiblePostMode::Reject) = request.inaccessible_post_mode
                     && !inaccessible_posts.is_empty()
@@ -189,11 +186,10 @@ pub async fn delete_s3_objects(
                     .into_sql::<Bool>()
                     .or(s3_object::fk_uploader
                         .eq(user.pk)
-                        .or(broker::fk_owner
-                            .eq(user.pk)
-                            .or(exists(broker_access::table.filter(
-                                perms::get_broker_group_access_write_condition!(user.pk),
-                            ))))),
+                        .or(broker::fk_owner.eq(user.pk).or(exists(
+                            broker_access::table
+                                .filter(perms::get_broker_access_write_condition!(user.pk)),
+                        )))),
             ),
         )
         .get_results::<S3Object>(connection)
