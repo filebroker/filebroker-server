@@ -192,22 +192,24 @@ pub async fn create_broker_access_handler(
                 ));
             }
 
+            let public = user_group_pk.is_none() && granted_user_pk.is_none();
+
             // don't allow giving admin privileges to public access
-            if is_admin && user_group_pk.is_none() {
+            if is_admin && public {
                 return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
                     String::from("Cannot grant admin privileges to public access"),
                 )));
             }
 
             // don't allow public access to have unlimited quota
-            if quota.is_none() && user_group_pk.is_none() {
+            if quota.is_none() && public {
                 return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
                     String::from("Cannot grant unlimited quota to public access"),
                 )));
             }
 
             // only admins can create public broker access
-            if user_group_pk.is_none() && !user.is_admin {
+            if public && !user.is_admin {
                 return Err(TransactionRuntimeError::Rollback(Error::UserNotAdmin));
             }
 
@@ -235,7 +237,7 @@ pub async fn create_broker_access_handler(
                     fk_granted_by: user.pk,
                     creation_timestamp: now,
                     fk_granted_user: granted_user_pk,
-                    public: user_group_pk.is_none() && granted_user_pk.is_none(),
+                    public,
                 })
                 .get_result::<BrokerAccess>(connection)
                 .await?;

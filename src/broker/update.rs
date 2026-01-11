@@ -400,7 +400,7 @@ pub async fn change_broker_access_quota_handler(
             }
 
             // don't allow public access to have unlimited quota
-            if request.quota.is_none() && curr_broker_access.fk_granted_group.is_none() {
+            if request.quota.is_none() && curr_broker_access.public {
                 return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
                     String::from("Cannot grant unlimited quota to public access"),
                 )));
@@ -476,7 +476,7 @@ pub async fn change_broker_access_admin_handler(
             }
 
             // don't allow giving admin privileges to public access
-            if request.is_admin && curr_broker_access.fk_granted_group.is_none() {
+            if request.is_admin && curr_broker_access.public {
                 return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
                     String::from("Cannot grant admin privileges to public access"),
                 )));
