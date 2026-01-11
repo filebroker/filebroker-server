@@ -634,6 +634,9 @@ pub struct BrokerAccessInnerJoined {
     pub used_bytes: i64,
     pub granted_by: UserPublic,
     pub creation_timestamp: DateTime<Utc>,
+    pub granted_user: Option<UserPublic>,
+    #[serde(rename = "is_public")]
+    pub public: bool,
 }
 
 #[derive(Serialize)]
@@ -671,17 +674,32 @@ pub async fn get_broker_access_handler(
                 .get_result::<i64>(connection)
                 .await?;
 
+            let (granted_user, granted_by_user) = diesel::alias!(
+                registered_user as granted_user,
+                registered_user as granted_by_user
+            );
             let broker_query = broker_access::table
                 .left_join(user_group::table)
-                .inner_join(
-                    registered_user::table.on(broker_access::fk_granted_by.eq(registered_user::pk)),
+                .left_join(
+                    granted_user.on(broker_access::fk_granted_user
+                        .eq(granted_user.field(registered_user::pk).nullable())),
                 )
+                .inner_join(granted_by_user.on(
+                    broker_access::fk_granted_by.eq(granted_by_user.field(registered_user::pk)),
+                ))
                 .filter(broker_access::fk_broker.eq(broker.pk));
 
             let mut order_map: HashMap<&'static str, Box<ApplyOrderFn<_, _, _>>> = HashMap::new();
             order_map.insert(
                 "user_group.name",
                 order_by_col_with_tie_fn(user_group::name, user_group::pk.desc()),
+            );
+            order_map.insert(
+                "granted_user",
+                order_by_col_with_tie_fn(
+                    granted_user.field(registered_user::pk),
+                    broker_access::pk.desc(),
+                ),
             );
             order_map.insert(
                 "creation_timestamp",
@@ -692,7 +710,10 @@ pub async fn get_broker_access_handler(
             );
             order_map.insert(
                 "granted_by",
-                order_by_col_with_tie_fn(registered_user::pk, broker_access::pk.desc()),
+                order_by_col_with_tie_fn(
+                    granted_by_user.field(registered_user::pk),
+                    broker_access::pk.desc(),
+                ),
             );
             order_map.insert("user_group.pk", order_by_col_fn(user_group::pk));
             order_map.insert("pk", order_by_col_fn(broker_access::pk));
@@ -708,12 +729,17 @@ pub async fn get_broker_access_handler(
             let records = broker_query_ordered
                 .limit(limit as i64)
                 .offset((params.page.unwrap_or(0) * limit) as i64)
-                .load::<(BrokerAccess, Option<UserGroup>, UserPublic)>(connection)
+                .load::<(
+                    BrokerAccess,
+                    Option<UserGroup>,
+                    Option<UserPublic>,
+                    UserPublic,
+                )>(connection)
                 .await?;
 
             let broker_access_pks = records
                 .iter()
-                .map(|(broker_access, _, _)| broker_access.pk)
+                .map(|(broker_access, ..)| broker_access.pk)
                 .collect::<Vec<_>>();
             let broker_access_usages = diesel::sql_query(
                 r#"
@@ -781,7 +807,7 @@ pub async fn get_broker_access_handler(
 
             let broker_access = records
                 .into_iter()
-                .map(|(broker_access, granted_group, granted_by)| {
+                .map(|(broker_access, granted_group, granted_user, granted_by)| {
                     let used_bytes = broker_access_usages
                         .get(&broker_access.pk)
                         .map(|bytes_decimal| {
@@ -802,6 +828,8 @@ pub async fn get_broker_access_handler(
                         used_bytes,
                         granted_by,
                         creation_timestamp: broker_access.creation_timestamp,
+                        granted_user,
+                        public: broker_access.public,
                     })
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
