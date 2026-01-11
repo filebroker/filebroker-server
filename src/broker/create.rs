@@ -181,14 +181,15 @@ pub async fn create_broker_access_handler(
                 .filter(
                     broker_access::fk_broker
                         .eq(broker.pk)
-                        .and(broker_access::fk_granted_group.is_not_distinct_from(user_group_pk)),
+                        .and(broker_access::fk_granted_group.is_not_distinct_from(user_group_pk))
+                        .and(broker_access::fk_granted_user.is_not_distinct_from(granted_user_pk)),
                 )
                 .get_result::<BrokerAccess>(connection)
                 .await
                 .optional()?;
             if existing_broker_access.is_some() {
                 return Err(TransactionRuntimeError::Rollback(
-                    Error::BrokerAccessAlreadyExistsError(user_group_pk),
+                    Error::BrokerAccessAlreadyExistsError(user_group_pk.or(granted_user_pk)),
                 ));
             }
 

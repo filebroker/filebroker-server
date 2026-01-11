@@ -61,7 +61,7 @@ pub enum Error {
     UserAlreadyMemberOfGroupError(i64),
     #[error("The provided reference path is invalid: '{0}'")]
     InvalidReferencePathError(String),
-    #[error("Broker access for group {0:?} already exists")]
+    #[error("Broker access for user or group {0:?} already exists")]
     BrokerAccessAlreadyExistsError(Option<i64>),
     #[error("Broker {0} currently does not accept further uploads")]
     BrokerDisabledError(i64),
