@@ -15,7 +15,9 @@ use crate::{
     run_serializable_transaction,
 };
 use chrono::{DateTime, Utc};
-use diesel::{BoolExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl};
+use diesel::{
+    BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, OptionalExtension, QueryDsl,
+};
 use diesel_async::RunQueryDsl;
 use diesel_async::scoped_futures::ScopedFutureExt;
 use serde::{Deserialize, Serialize};
@@ -583,6 +585,7 @@ pub struct BrokerAuditLogInnerJoined {
     pub target_group: Option<UserGroup>,
     pub new_quota: Option<i64>,
     pub creation_timestamp: DateTime<Utc>,
+    pub target_user: Option<UserPublic>,
 }
 
 #[derive(Serialize)]
@@ -623,28 +626,43 @@ pub async fn get_broker_audit_logs_handler(
             let limit = params.limit.unwrap_or(50);
             let offset = limit * params.page.unwrap_or(0);
 
+            let (source_user, target_user) = diesel::alias!(
+                registered_user as source_user,
+                registered_user as target_user
+            );
             let logs = broker_audit_log::table
                 .inner_join(
-                    registered_user::table.on(broker_audit_log::fk_user.eq(registered_user::pk)),
+                    source_user
+                        .on(broker_audit_log::fk_user.eq(source_user.field(registered_user::pk))),
                 )
                 .left_join(user_group::table)
+                .left_join(
+                    target_user.on(broker_audit_log::fk_target_user
+                        .eq(target_user.field(registered_user::pk).nullable())),
+                )
                 .filter(broker_audit_log::fk_broker.eq(broker.pk))
                 .order(broker_audit_log::pk.desc())
                 .limit(limit.into())
                 .offset(offset.into())
-                .load::<(BrokerAuditLog, UserPublic, Option<UserGroup>)>(connection)
+                .load::<(
+                    BrokerAuditLog,
+                    UserPublic,
+                    Option<UserGroup>,
+                    Option<UserPublic>,
+                )>(connection)
                 .await?;
 
             let audit_logs = logs
                 .into_iter()
                 .map(
-                    |(audit_log, user, target_group)| BrokerAuditLogInnerJoined {
+                    |(audit_log, user, target_group, target_user)| BrokerAuditLogInnerJoined {
                         pk: audit_log.pk,
                         user,
                         action: audit_log.action,
                         target_group,
                         new_quota: audit_log.new_quota,
                         creation_timestamp: audit_log.creation_timestamp,
+                        target_user,
                     },
                 )
                 .collect::<Vec<_>>();
