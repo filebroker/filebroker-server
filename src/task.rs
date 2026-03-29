@@ -378,6 +378,11 @@ pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
                 .await
                 .map_err(retry_on_serialization_failure)?;
 
+            diesel::sql_query("UPDATE deferred_s3_object_deletion SET locked_at = NULL WHERE locked_at < NOW() - interval '1 day'")
+                .execute(connection)
+                .await
+                .map_err(retry_on_serialization_failure)?;
+
             Ok(())
         }.scope_boxed()).await
     })
