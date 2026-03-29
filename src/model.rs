@@ -1307,6 +1307,8 @@ pub struct Broker {
     pub description: Option<String>,
     pub total_quota: Option<i64>,
     pub disable_uploads: bool,
+    pub quota_audit_locked_at: Option<DateTime<Utc>>,
+    pub last_quota_audit: Option<DateTime<Utc>>,
 }
 
 #[derive(Insertable)]
@@ -2055,4 +2057,25 @@ pub struct NewApplyAutoTagsTask {
     pub tag_category_to_apply: Option<String>,
     pub post_to_apply: Option<i64>,
     pub post_collection_to_apply: Option<i64>,
+}
+
+#[derive(Associations, Clone, Debug, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(User, foreign_key = fk_user))]
+#[diesel(belongs_to(Broker, foreign_key = fk_broker))]
+#[diesel(table_name = reconcile_broker_quota_usage_task)]
+#[diesel(primary_key(pk))]
+pub struct ReconcileBrokerQuotaUsageTask {
+    pub pk: i64,
+    pub fk_user: i64,
+    pub fk_broker: i64,
+    pub creation_timestamp: DateTime<Utc>,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub fail_count: i32,
+}
+
+#[derive(Clone, Debug, Insertable)]
+#[diesel(table_name = reconcile_broker_quota_usage_task)]
+pub struct NewReconcileBrokerQuotaUsageTask {
+    pub fk_user: i64,
+    pub fk_broker: i64,
 }
