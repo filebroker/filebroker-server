@@ -160,14 +160,13 @@ impl Parser<'_> {
 
         while let Some(op) = self.read_operator(Operator::for_math_term_operator_tag) {
             // a modulo operator followed by an identifier (e.g. %sort) is a modifier, not part of a binary expression
-            if op == Operator::Modulo {
-                if let Some(Token {
+            if op == Operator::Modulo
+                && let Some(Token {
                     parsed_token: ParsedToken::IdentifierToken(_),
                     ..
                 }) = self.token_stream.peek()
-                {
-                    return Ok(left);
-                }
+            {
+                return Ok(left);
             }
             self.next()?;
             let right = self.parse_factor()?;
@@ -378,20 +377,19 @@ impl Parser<'_> {
             parsed_token: ParsedToken::IntegerToken(val),
             ..
         }) = self.curr_tok
+            && operator == Operator::Minus
         {
-            if operator == Operator::Minus {
-                self.validate_int_bounds(val, true);
-                self.advance();
-                return Ok(Box::new(Node {
-                    location: Location {
-                        start,
-                        end: self.prev_end,
-                    },
-                    node_type: IntegerLiteralNode {
-                        val: if val == i32::MIN { i32::MIN } else { -val },
-                    },
-                }));
-            }
+            self.validate_int_bounds(val, true);
+            self.advance();
+            return Ok(Box::new(Node {
+                location: Location {
+                    start,
+                    end: self.prev_end,
+                },
+                node_type: IntegerLiteralNode {
+                    val: if val == i32::MIN { i32::MIN } else { -val },
+                },
+            }));
         }
 
         let operand = self.parse_factor()?;

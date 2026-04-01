@@ -70,6 +70,7 @@ pub enum Scope {
     Post,
     Collection,
     CollectionItem { collection_pk: i64 },
+    UserGroup,
     // Scopes for tag auto match conditions
     TagAutoMatchPost,
     TagAutoMatchCollection,
@@ -84,6 +85,7 @@ impl FromStr for Scope {
             "post" => Ok(Self::Post),
             "collection" => Ok(Self::Collection),
             "collection_item" => Ok(Self::CollectionItem { collection_pk: -1 }),
+            "user_group" => Ok(Self::UserGroup),
             "tag_auto_match_post" => Ok(Self::TagAutoMatchPost),
             "tag_auto_match_collection" => Ok(Self::TagAutoMatchCollection),
             _ => {
@@ -126,6 +128,7 @@ impl Scope {
                 );
                 post_attributes
             }
+            Self::UserGroup => USER_GROUP_ATTRIBUTES.clone(),
             Self::TagAutoMatchPost => POST_ATTRIBUTES.clone(),
             Self::TagAutoMatchCollection => COLLECTION_ATTRIBUTES.clone(),
         }
@@ -134,9 +137,10 @@ impl Scope {
     pub fn get_functions(&self) -> HashMap<&'static str, Arc<Function>> {
         match self {
             Self::Global => GLOBAL_FUNCTIONS.clone(),
-            Self::Post => GLOBAL_FUNCTIONS.clone(),
-            Self::Collection => GLOBAL_FUNCTIONS.clone(),
-            Self::CollectionItem { .. } => GLOBAL_FUNCTIONS.clone(),
+            Self::Post => POST_FUNCTIONS.clone(),
+            Self::Collection => COLLECTION_FUNCTIONS.clone(),
+            Self::CollectionItem { .. } => POST_FUNCTIONS.clone(),
+            Self::UserGroup => GLOBAL_FUNCTIONS.clone(),
             Self::TagAutoMatchPost => GLOBAL_FUNCTIONS.clone(),
             Self::TagAutoMatchCollection => GLOBAL_FUNCTIONS.clone(),
         }
@@ -148,6 +152,7 @@ impl Scope {
             Self::Post => GLOBAL_MODIFIERS.clone(),
             Self::Collection => GLOBAL_MODIFIERS.clone(),
             Self::CollectionItem { .. } => GLOBAL_MODIFIERS.clone(),
+            Self::UserGroup => GLOBAL_MODIFIERS.clone(),
             Self::TagAutoMatchPost => HashMap::new(),
             Self::TagAutoMatchCollection => HashMap::new(),
         }
@@ -159,6 +164,7 @@ impl Scope {
             Self::Post => GLOBAL_VARIABLES.clone(),
             Self::Collection => GLOBAL_VARIABLES.clone(),
             Self::CollectionItem { .. } => GLOBAL_VARIABLES.clone(),
+            Self::UserGroup => GLOBAL_VARIABLES.clone(),
             Self::TagAutoMatchPost | Self::TagAutoMatchCollection => {
                 let mut global_variables = GLOBAL_VARIABLES.clone();
                 global_variables.remove("self");
@@ -292,28 +298,86 @@ lazy_static! {
                         } else {
                             None
                         };
-
-                        let attribute_arg = &mut args[0];
-                        attribute_arg.accept(visitor, scope, log);
-                        visitor.write_buff(" ~* ");
                         let value = if let Some(value) = variable_value {
                             sanitize_string_literal(&value)
                         } else if let Some(string_literal) = args[1].node_type.downcast_ref::<StringLiteralNode>() {
                             sanitize_string_literal(&string_literal.val)
                         } else {
-                            visitor.write_buff("NULL");
+                            visitor.write_buff("FALSE");
                             return;
                         };
+
+                        let attribute_arg = &mut args[0];
+                        visitor.write_buff("(");
+                        // check that the target attribute is not NULL
+                        attribute_arg.accept(visitor, scope, log);
+                        visitor.write_buff(" IS NOT NULL AND ");
+                        // check that the value is contained in the target attribute at all,
+                        // this is much faster because it can use trigram indexes, and if the value is not contained, the pattern does not match anyway
+                        visitor.write_buff("LOWER(");
+                        attribute_arg.accept(visitor, scope, log);
+                        visitor.write_buff(") LIKE LOWER('%");
+                        visitor.write_buff(&value);
+                        visitor.write_buff("%') AND ");
+                        // perform the regex match to see if the value is part of a ,&; separated list of values
+                        attribute_arg.accept(visitor, scope, log);
+                        visitor.write_buff(" ~* ");
                         visitor.write_buff(r"'(^|[,&;]\s*)");
                         let escaped = regex::escape(&value);
                         visitor.write_buff(&escaped);
-                        visitor.write_buff(r"(\s*[,&;]|$)");
-                        visitor.write_buff("'");
+                        visitor.write_buff(r"(\s*[,&;]|$)'");
+                        visitor.write_buff(")");
                     }
                 },
             })
         )
     ]);
+    pub static ref POST_FUNCTIONS: HashMap<&'static str, Arc<Function>> = {
+        let mut functions = GLOBAL_FUNCTIONS.clone();
+        functions.insert(
+            "shared_with_group",
+            Arc::new(Function {
+                params: vec![Parameter {
+                    parameter_type: ParameterType::Object(Type::Number),
+                }],
+                return_type: Type::Boolean,
+                accept_arguments,
+                write_expression_fn: |visitor, args, scope, _location, log| {
+                    visitor.write_buff("EXISTS(SELECT * FROM post_group_access WHERE fk_post = post.pk AND fk_granted_group = ");
+                    if !args.is_empty() {
+                        args[0].accept(visitor, scope, log);
+                    } else {
+                        visitor.write_buff("NULL");
+                    }
+                    visitor.write_buff(")");
+                },
+            })
+        );
+        functions
+    };
+    pub static ref COLLECTION_FUNCTIONS: HashMap<&'static str, Arc<Function>> = {
+        let mut functions = GLOBAL_FUNCTIONS.clone();
+        functions.insert(
+            "shared_with_group",
+            Arc::new(Function {
+                params: vec![Parameter {
+                    parameter_type: ParameterType::Object(Type::Number),
+                }],
+                return_type: Type::Boolean,
+                accept_arguments,
+                write_expression_fn: |visitor, args, scope, _location, log| {
+                    visitor.write_buff("EXISTS(SELECT * FROM post_collection_group_access WHERE fk_post_collection = post_collection.pk AND fk_granted_group = ");
+                    if !args.is_empty() {
+                        args[0].accept(visitor, scope, log);
+                    } else {
+                        visitor.write_buff("NULL");
+                    }
+                    visitor.write_buff(")");
+                },
+            })
+        );
+        functions
+    };
 }
 
 lazy_static! {
@@ -564,6 +628,16 @@ lazy_static! {
                 nullable: true
             })
         ),
+        (
+            "broker",
+            Arc::new(Attribute {
+                table: "s3_object",
+                selection_expression: String::from("post_s3_object.fk_broker"),
+                return_type: Type::Number,
+                allow_sorting: false,
+                nullable: false
+            })
+        ),
     ]);
     pub static ref COLLECTION_ATTRIBUTES: HashMap<&'static str, Arc<Attribute>> = HashMap::from([
         (
@@ -601,6 +675,48 @@ lazy_static! {
             Arc::new(Attribute {
                 table: "post_collection",
                 selection_expression: String::from("post_collection.description"),
+                return_type: Type::String,
+                allow_sorting: false,
+                nullable: true
+            })
+        )
+    ]);
+    pub static ref USER_GROUP_ATTRIBUTES: HashMap<&'static str, Arc<Attribute>> = HashMap::from([
+        (
+            "date",
+            Arc::new(Attribute {
+                table: "user_group",
+                selection_expression: String::from("user_group.creation_timestamp"),
+                return_type: Type::DateTime,
+                allow_sorting: true,
+                nullable: false
+            })
+        ),
+        (
+            "name",
+            Arc::new(Attribute {
+                table: "user_group",
+                selection_expression: String::from("user_group.name"),
+                return_type: Type::String,
+                allow_sorting: true,
+                nullable: false,
+            })
+        ),
+        (
+            "owner",
+            Arc::new(Attribute {
+                table: "user_group",
+                selection_expression: String::from("user_group.fk_owner"),
+                return_type: Type::Number,
+                allow_sorting: false,
+                nullable: false
+            })
+        ),
+        (
+            "description",
+            Arc::new(Attribute {
+                table: "user_group",
+                selection_expression: String::from("user_group.description"),
                 return_type: Type::String,
                 allow_sorting: false,
                 nullable: true
@@ -766,13 +882,13 @@ fn accept_sort_modifier_arguments(
     let attr_arg_location = attr_arg.location;
     match attr_arg.node_type.downcast_ref::<AttributeNode>() {
         Some(attribute_node) => {
-            if let Some(attribute) = POST_ATTRIBUTES.get(attribute_node.identifier.as_str()) {
-                if !attribute.allow_sorting {
-                    log.errors.push(Error {
-                        location: attr_arg_location,
-                        msg: format!("Attribute {} is not sortable", &attribute_node.identifier),
-                    });
-                }
+            if let Some(attribute) = POST_ATTRIBUTES.get(attribute_node.identifier.as_str())
+                && !attribute.allow_sorting
+            {
+                log.errors.push(Error {
+                    location: attr_arg_location,
+                    msg: format!("Attribute {} is not sortable", &attribute_node.identifier),
+                });
             }
         }
         None => {

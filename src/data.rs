@@ -1,8 +1,6 @@
-use bigdecimal::{BigDecimal, ToPrimitive};
-use diesel::{
-    BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
-    dsl::{exists, max, not, sum},
-};
+use chrono::Utc;
+use diesel::QueryDsl;
+use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{Stream, TryStreamExt};
 use lazy_static::lazy_static;
@@ -11,9 +9,7 @@ use mpart_async::server::MultipartStream;
 use ring::digest;
 use s3::{Bucket, Region, creds::Credentials};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use url::Url;
-use uuid::Uuid;
+use std::collections::HashMap;
 use validator::Validate;
 use warp::{
     Buf, Rejection, Reply,
@@ -21,20 +17,20 @@ use warp::{
     path::Peek,
 };
 
+use crate::model::{NewUserGroupAuditLog, UserGroup, UserGroupAuditAction, get_system_user};
+use crate::post::delete::delete_s3_objects;
+use crate::schema::{registered_user, user_group_audit_log};
+use crate::user_group::load_user_group_detailed;
 use crate::{
     acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension},
     error::Error,
-    model::{Broker, NewBroker, S3Object, S3ObjectMetadata, User},
-    perms::{
-        self, PostJoinedS3Object, get_group_access_or_public_condition,
-        get_group_membership_condition,
-    },
+    model::{Broker, S3Object, S3ObjectMetadata, User},
+    perms::{self, PostJoinedS3Object},
     post,
     query::PostDetailed,
-    schema::{
-        broker, broker_access, s3_object, s3_object_metadata, user_group, user_group_membership,
-    },
+    run_serializable_transaction,
+    schema::{broker, s3_object, s3_object_metadata, user_group},
     util::NOT_BLANK_REGEX,
 };
 
@@ -72,7 +68,7 @@ pub async fn upload_handler(
         .ok_or_else(|| Error::InvalidFileError(String::from("No mime boundary")))?;
 
     let mut connection = acquire_db_connection().await?;
-    let broker = perms::load_broker_secured(broker_pk, &mut connection, Some(&user)).await?;
+    let broker = perms::load_broker_access_secured(broker_pk, &mut connection, Some(&user)).await?;
     if broker.fk_owner != user.pk {
         up::check_broker_quota_usage(&broker, &user, upload_size, &mut connection).await?;
     }
@@ -215,7 +211,7 @@ pub async fn get_object_metadata_handler(requested_path: Peek) -> Result<impl Re
         .await
         .optional()
         .map_err(Error::from)?
-        .ok_or_else(|| Error::InaccessibleS3ObjectError(String::from(object_key)))?;
+        .ok_or_else(|| Error::InaccessibleObjectKeyError(String::from(object_key)))?;
 
     Ok(warp::reply::json(&metadata))
 }
@@ -426,182 +422,148 @@ pub async fn get_presigned_hls_playlist_handler(
 }
 
 #[derive(Deserialize, Validate)]
-pub struct CreateBrokerRequest {
+pub struct CreateUserAvatarRequest {
     #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
-    pub name: String,
-    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
-    pub bucket: String,
-    #[validate(length(min = 1, max = 2048), regex(path = *NOT_BLANK_REGEX))]
-    pub endpoint: String,
-    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
-    pub access_key: String,
-    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
-    pub secret_key: String,
-    pub is_aws_region: bool,
-    pub remove_duplicate_files: bool,
-    pub enable_presigned_get: Option<bool>,
+    pub source_object_key: String,
+    pub width: u32,
+    pub height: u32,
+    pub x: u32,
+    pub y: u32,
 }
 
-pub async fn create_broker_handler(
-    create_broker_request: CreateBrokerRequest,
+pub async fn create_user_avatar_handler(
+    request: CreateUserAvatarRequest,
     user: User,
 ) -> Result<impl Reply, Rejection> {
-    create_broker_request.validate().map_err(|e| {
+    let user_pk = user.pk;
+    request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for CreateBrokerRequest: {e}"
+            "Validation failed for CreateUserAvatarRequest: {e}"
         )))
     })?;
 
-    let bucket = create_bucket(
-        &create_broker_request.bucket,
-        &create_broker_request.endpoint,
-        &create_broker_request.access_key,
-        &create_broker_request.secret_key,
-        create_broker_request.is_aws_region,
-    )?;
-
-    if let Err(e) = Url::parse(&bucket.url()) {
-        return Err(warp::reject::custom(Error::InvalidBucketError(
-            e.to_string(),
-        )));
-    }
-
-    // test connection
-    let mut test_path = Uuid::new_v4().to_string();
-    test_path.insert_str(0, ".filebroker-test-");
-    if let Err(e) = bucket.put_object(&test_path, &[]).await {
-        return Err(warp::reject::custom(Error::InvalidBucketError(
-            e.to_string(),
-        )));
-    }
-    if let Err(e) = bucket.delete_object(&test_path).await {
-        return Err(warp::reject::custom(Error::InvalidBucketError(
-            e.to_string(),
-        )));
-    }
+    let avatar_object = encode::generate_avatar(
+        request.source_object_key,
+        user.pk,
+        request.width,
+        request.height,
+        request.x,
+        request.y,
+    )
+    .await?;
 
     let mut connection = acquire_db_connection().await?;
-    let created_broker = diesel::insert_into(broker::table)
-        .values(&NewBroker {
-            name: create_broker_request.name,
-            bucket: create_broker_request.bucket,
-            endpoint: create_broker_request.endpoint,
-            access_key: create_broker_request.access_key,
-            secret_key: create_broker_request.secret_key,
-            is_aws_region: create_broker_request.is_aws_region,
-            remove_duplicate_files: create_broker_request.remove_duplicate_files,
-            fk_owner: user.pk,
-            hls_enabled: false,
-            enable_presigned_get: create_broker_request.enable_presigned_get.unwrap_or(true),
-        })
-        .get_result::<Broker>(&mut connection)
+    run_serializable_transaction(&mut connection, |connection| {
+        async {
+            let user = registered_user::table
+                .filter(registered_user::pk.eq(user_pk))
+                .get_result::<User>(connection)
+                .await?;
+
+            let s3_object = diesel::insert_into(s3_object::table)
+                .values(&avatar_object)
+                .get_result::<S3Object>(connection)
+                .await?;
+
+            diesel::update(registered_user::table.filter(registered_user::pk.eq(user_pk)))
+                .set(registered_user::avatar_object_key.eq(&s3_object.object_key))
+                .execute(connection)
+                .await?;
+
+            if let Some(avatar_object_key) = user.avatar_object_key {
+                delete_s3_objects(&[avatar_object_key], &get_system_user(), connection).await?;
+            }
+
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await?;
+
+    let updated_user = registered_user::table
+        .filter(registered_user::pk.eq(user.pk))
+        .get_result::<User>(&mut connection)
         .await
         .map_err(Error::from)?;
 
-    Ok(warp::reply::json(&created_broker))
+    Ok(warp::reply::json(&updated_user))
 }
 
-#[derive(Serialize)]
-pub struct BrokerAvailability {
-    pub broker: Broker,
-    pub used_bytes: i64,
-    pub quota_bytes: Option<i64>,
-}
+pub async fn create_user_group_avatar_handler(
+    request: CreateUserAvatarRequest,
+    user_group_pk: i64,
+    user: User,
+) -> Result<impl Reply, Rejection> {
+    request.validate().map_err(|e| {
+        warp::reject::custom(Error::InvalidRequestInputError(format!(
+            "Validation failed for CreateUserAvatarRequest: {e}"
+        )))
+    })?;
 
-pub async fn get_brokers_handler(user: User) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
-    let brokers = perms::get_brokers_secured(&mut connection, Some(&user)).await?;
-    let broker_pks = brokers.iter().map(|b| b.pk).collect::<Vec<i64>>();
-
-    let broker_usages = s3_object::table
-        .group_by(s3_object::fk_broker)
-        .select((s3_object::fk_broker, sum(s3_object::size_bytes)))
-        .filter(
-            s3_object::fk_uploader
-                .eq(user.pk)
-                .and(s3_object::fk_broker.eq_any(&broker_pks)),
-        )
-        .load::<(i64, Option<BigDecimal>)>(&mut connection)
-        .await
-        .map_err(Error::from)?
-        .into_iter()
-        .map(|(broker_pk, size_used)| (broker_pk, size_used.unwrap_or(BigDecimal::from(0))))
-        .collect::<HashMap<i64, BigDecimal>>();
-
-    let unlimited_brokers = broker::table
-        .select(broker::pk)
-        .filter(
-            broker::pk.eq_any(&broker_pks).and(
-                broker::fk_owner.eq(user.pk).or(exists(
-                    broker_access::table.filter(
-                        get_group_access_or_public_condition!(
-                            broker_access::fk_broker,
-                            broker::pk,
-                            &Some(user.pk),
-                            broker_access::fk_granted_group.is_null(),
-                            broker_access::fk_granted_group
-                        )
-                        .and(broker_access::quota.is_null()),
-                    ),
-                )),
-            ),
-        )
-        .load::<i64>(&mut connection)
-        .await
-        .map_err(Error::from)?
-        .into_iter()
-        .collect::<HashSet<i64>>();
-
-    let broker_quotas = broker::table
-        .inner_join(
-            broker_access::table.on(get_group_access_or_public_condition!(
-                broker_access::fk_broker,
-                broker::pk,
-                &Some(user.pk),
-                broker_access::fk_granted_group.is_null(),
-                broker_access::fk_granted_group
-            )
-            .and(broker_access::quota.is_not_null())),
-        )
-        .group_by(broker::pk)
-        .select((broker::pk, max(broker_access::quota)))
-        .filter(
-            broker::pk
-                .eq_any(&broker_pks)
-                .and(not(broker::pk.eq_any(&unlimited_brokers))),
-        )
-        .load::<(i64, Option<i64>)>(&mut connection)
-        .await
-        .map_err(Error::from)?
-        .into_iter()
-        .collect::<HashMap<i64, Option<i64>>>();
-
-    let mut broker_availabilities = Vec::new();
-    for broker in brokers {
-        let used_bytes = broker_usages
-            .get(&broker.pk)
-            .map(|usage_bytes| {
-                usage_bytes.to_i64().ok_or_else(|| {
-                    Error::InternalError(format!(
-                        "Could not convert broker usage bytes {usage_bytes} to i64"
-                    ))
-                })
-            })
-            .unwrap_or(Ok(0))?;
-        let quota_bytes = if unlimited_brokers.contains(&broker.pk) {
-            None
-        } else {
-            broker_quotas.get(&broker.pk).cloned().flatten()
-        };
-
-        broker_availabilities.push(BrokerAvailability {
-            broker,
-            used_bytes,
-            quota_bytes,
-        });
+    if !perms::is_user_group_editable(user_group_pk, Some(&user), &mut connection).await? {
+        return Err(warp::reject::custom(Error::InaccessibleObjectError(
+            user_group_pk,
+        )));
     }
+    drop(connection);
 
-    Ok(warp::reply::json(&broker_availabilities))
+    let avatar_object = encode::generate_avatar(
+        request.source_object_key,
+        user.pk,
+        request.width,
+        request.height,
+        request.x,
+        request.y,
+    )
+    .await?;
+
+    let mut connection = acquire_db_connection().await?;
+    let updated_user_group = run_serializable_transaction(&mut connection, |connection| {
+        async {
+            let user_group = user_group::table
+                .filter(user_group::pk.eq(user_group_pk))
+                .get_result::<UserGroup>(connection)
+                .await?;
+
+            let s3_object = diesel::insert_into(s3_object::table)
+                .values(&avatar_object)
+                .get_result::<S3Object>(connection)
+                .await?;
+
+            let updated_user_group =
+                diesel::update(user_group::table.filter(user_group::pk.eq(user_group_pk)))
+                    .set(user_group::avatar_object_key.eq(&s3_object.object_key))
+                    .get_result::<UserGroup>(connection)
+                    .await?;
+
+            diesel::insert_into(user_group_audit_log::table)
+                .values(NewUserGroupAuditLog {
+                    fk_user_group: user_group.pk,
+                    fk_user: user.pk,
+                    action: UserGroupAuditAction::AvatarChange,
+                    fk_target_user: None,
+                    invite_code: None,
+                    reason: None,
+                    creation_timestamp: Utc::now(),
+                })
+                .execute(connection)
+                .await?;
+
+            if let Some(avatar_object_key) = user_group.avatar_object_key {
+                delete_s3_objects(&[avatar_object_key], &get_system_user(), connection).await?;
+            }
+
+            Ok(updated_user_group)
+        }
+        .scope_boxed()
+    })
+    .await?;
+
+    let user_group_detailed =
+        load_user_group_detailed(updated_user_group, Some(&user), &mut connection).await?;
+
+    Ok(warp::reply::json(&user_group_detailed))
 }
 
 pub async fn load_object(
@@ -615,7 +577,7 @@ pub async fn load_object(
         .await
         .optional()
         .map_err(Error::from)?
-        .ok_or_else(|| Error::InaccessibleS3ObjectError(String::from(object_key)))
+        .ok_or_else(|| Error::InaccessibleObjectKeyError(String::from(object_key)))
 }
 
 pub fn create_bucket(
@@ -664,4 +626,28 @@ pub fn create_bucket(
                 b.with_path_style()
             }
         })
+}
+
+pub async fn get_system_bucket(
+    connection: &mut AsyncPgConnection,
+) -> Result<Option<(Broker, Bucket)>, Error> {
+    let system_broker = broker::table
+        .filter(broker::is_system_bucket.eq(true))
+        .get_result::<Broker>(connection)
+        .await
+        .optional()?;
+
+    match system_broker {
+        Some(broker) => {
+            let bucket = create_bucket(
+                &broker.bucket,
+                &broker.endpoint,
+                &broker.access_key,
+                &broker.secret_key,
+                broker.is_aws_region,
+            )?;
+            Ok(Some((broker, bucket)))
+        }
+        None => Ok(None),
+    }
 }

@@ -23,6 +23,7 @@ use warp::{
 };
 use zxcvbn::zxcvbn;
 
+use crate::model::UserPublic;
 use crate::{
     CERT_PATH, HOST_BASE_PATH, acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension, QueryDsl},
@@ -71,8 +72,6 @@ pub struct UserRegistration {
     pub password: String,
     #[validate(email)]
     pub email: Option<String>,
-    #[validate(url)]
-    pub avatar_url: Option<String>,
     pub captcha_token: Option<String>,
 }
 
@@ -415,15 +414,13 @@ async fn refresh_user_login_data(
                 ))
                 .get_result::<RefreshToken>(connection)
                 .await
-                .optional()
-                .map_err(|e| Error::QueryError(e.to_string()))?
+                .optional()?
                 .ok_or(Error::InvalidRefreshTokenError)?;
 
             let user = registered_user::table
                 .filter(registered_user::pk.eq(updated_token.fk_user))
                 .get_result::<User>(connection)
-                .await
-                .map_err(|e| Error::QueryError(e.to_string()))?;
+                .await?;
 
             let uuid = updated_token.uuid.to_string();
             let expiry = updated_token.expiry.to_rfc2822();
@@ -464,10 +461,10 @@ pub async fn register_handler(
     authority: Authority,
 ) -> Result<impl Reply, Rejection> {
     // set empty mail to None since an empty string would not validate
-    if let Some(ref email) = user_registration.email {
-        if email.trim().is_empty() {
-            user_registration.email = None;
-        }
+    if let Some(ref email) = user_registration.email
+        && email.trim().is_empty()
+    {
+        user_registration.email = None;
     }
     user_registration.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
@@ -512,7 +509,6 @@ pub async fn register_handler(
         user_name: user_registration.user_name,
         password: hashed_password,
         email: user_registration.email,
-        avatar_url: user_registration.avatar_url,
         creation_timestamp: Utc::now(),
         email_confirmed: false,
         display_name: user_registration.display_name,
@@ -606,7 +602,6 @@ pub struct UserInfo {
     pub pk: i64,
     pub user_name: String,
     pub email: Option<String>,
-    pub avatar_url: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub email_confirmed: bool,
     pub display_name: Option<String>,
@@ -614,6 +609,7 @@ pub struct UserInfo {
     pub password_fail_count: i32,
     pub is_admin: bool,
     pub is_banned: bool,
+    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for UserInfo {
@@ -622,7 +618,6 @@ impl From<User> for UserInfo {
             pk: user.pk,
             user_name: user.user_name,
             email: user.email,
-            avatar_url: user.avatar_url,
             creation_timestamp: user.creation_timestamp,
             email_confirmed: user.email_confirmed,
             display_name: user.display_name,
@@ -630,6 +625,7 @@ impl From<User> for UserInfo {
             password_fail_count: user.password_fail_count,
             is_admin: user.is_admin,
             is_banned: user.is_banned,
+            avatar_object_key: user.avatar_object_key,
         }
     }
 }
@@ -772,13 +768,11 @@ pub struct UpdateUserRequest {
     pub display_name: Option<String>,
     #[validate(email)]
     pub email: Option<String>,
-    #[validate(url)]
-    pub avatar_url: Option<String>,
 }
 
 impl UpdateUserRequest {
     pub fn has_changes(&self) -> bool {
-        self.display_name.is_some() || self.email.is_some() || self.avatar_url.is_some()
+        self.display_name.is_some() || self.email.is_some()
     }
 }
 
@@ -789,11 +783,11 @@ pub async fn edit_user_handler(
 ) -> Result<impl Reply, Rejection> {
     // set empty mail to None since an empty string would not validate
     let mut cleared_mail = false;
-    if let Some(ref email) = request.email {
-        if email.trim().is_empty() {
-            request.email = None;
-            cleared_mail = true;
-        }
+    if let Some(ref email) = request.email
+        && email.trim().is_empty()
+    {
+        request.email = None;
+        cleared_mail = true;
     }
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
@@ -1174,4 +1168,30 @@ pub async fn reset_password_handler(
     })
     .await
     .map_err(warp::reject::custom)
+}
+
+pub async fn get_user_public_handler(user_pk: i64) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection().await?;
+    let user_public = registered_user::table
+        .filter(registered_user::pk.eq(user_pk))
+        .get_result::<UserPublic>(&mut connection)
+        .await
+        .optional()
+        .map_err(Error::from)?
+        .ok_or(Error::NotFoundError)?;
+
+    Ok(warp::reply::json(&user_public))
+}
+
+pub async fn get_user_public_name_handler(user_name: String) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection().await?;
+    let user_public = registered_user::table
+        .filter(lower(registered_user::user_name).eq(user_name.to_lowercase()))
+        .get_result::<UserPublic>(&mut connection)
+        .await
+        .optional()
+        .map_err(Error::from)?
+        .ok_or(Error::NotFoundError)?;
+
+    Ok(warp::reply::json(&user_public))
 }

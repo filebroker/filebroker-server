@@ -1,6 +1,7 @@
+use diesel::sql_types::Bool;
 use diesel::{
-    BoolExpressionMethods, ExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
-    Table,
+    BoolExpressionMethods, ExpressionMethods, IntoSql, JoinOnDsl, NullableExpressionMethods,
+    QueryDsl, Table,
     dsl::{exists, not},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
@@ -12,12 +13,12 @@ use crate::{
     acquire_db_connection,
     error::{Error, TransactionRuntimeError},
     model::{DeferredS3ObjectDeletion, HlsStream, Post, PostCollection, S3Object, User},
-    perms::{self, get_group_membership_condition},
+    perms::{self, get_group_membership_administrator_condition},
     run_serializable_transaction,
     schema::{
         broker, broker_access, deferred_s3_object_deletion, hls_stream, post, post_collection,
         post_collection_group_access, post_collection_item, post_collection_tag, post_group_access,
-        post_tag, s3_object, user_group, user_group_membership,
+        post_tag, s3_object,
     },
     util::dedup_vec,
 };
@@ -71,24 +72,26 @@ pub async fn delete_posts_handler(
                     .left_join(s3_object::table)
                     .left_join(broker::table.on(s3_object::fk_broker.eq(broker::pk)))
                     .select(post::pk)
-                    .filter(
-                        post::pk
-                            .eq_any(&post_pks)
-                            .and(not(post::fk_create_user.eq(user.pk).or(broker::fk_owner
-                                .eq(user.pk)
-                                .or(exists(broker_access::table.filter(
-                                    perms::get_broker_group_access_write_condition!(user.pk),
-                                )))))),
-                    )
+                    .filter(post::pk.eq_any(&post_pks).and(not(
+                        user.is_admin.into_sql::<Bool>().or(
+                            post::fk_create_user.eq(user.pk).or(
+                                broker::fk_owner.eq(user.pk).or(
+                                    exists(broker_access::table.filter(
+                                        perms::get_broker_access_write_condition!(user.pk),
+                                    )),
+                                ),
+                            ),
+                        ),
+                    )))
                     .get_results::<i64>(connection)
                     .await?;
 
-                if let Some(DeleteInaccessiblePostMode::Reject) = request.inaccessible_post_mode {
-                    if !inaccessible_posts.is_empty() {
-                        return Err(TransactionRuntimeError::Rollback(
-                            Error::InaccessibleObjectsError(inaccessible_posts),
-                        ));
-                    }
+                if let Some(DeleteInaccessiblePostMode::Reject) = request.inaccessible_post_mode
+                    && !inaccessible_posts.is_empty()
+                {
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InaccessibleObjectsError(inaccessible_posts),
+                    ));
                 }
 
                 post_pks.retain(|pk| !inaccessible_posts.contains(pk));
@@ -179,11 +182,14 @@ pub async fn delete_s3_objects(
         .select(s3_object::table::all_columns())
         .filter(
             s3_object::object_key.eq_any(object_keys).and(
-                s3_object::fk_uploader.eq(user.pk).or(broker::fk_owner
-                    .eq(user.pk)
-                    .or(exists(broker_access::table.filter(
-                        perms::get_broker_group_access_write_condition!(user.pk),
-                    )))),
+                user.is_admin
+                    .into_sql::<Bool>()
+                    .or(s3_object::fk_uploader
+                        .eq(user.pk)
+                        .or(broker::fk_owner.eq(user.pk).or(exists(
+                            broker_access::table
+                                .filter(perms::get_broker_access_write_condition!(user.pk)),
+                        )))),
             ),
         )
         .get_results::<S3Object>(connection)
@@ -294,12 +300,11 @@ pub async fn delete_posts_collections_handler(
 
                 if let Some(DeleteInaccessiblePostMode::Reject) =
                     request.inaccessible_post_collection_mode
+                    && !inaccessible_post_collections.is_empty()
                 {
-                    if !inaccessible_post_collections.is_empty() {
-                        return Err(TransactionRuntimeError::Rollback(
-                            Error::InaccessibleObjectsError(inaccessible_post_collections),
-                        ));
-                    }
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InaccessibleObjectsError(inaccessible_post_collections),
+                    ));
                 }
 
                 post_collection_pks.retain(|pk| !inaccessible_post_collections.contains(pk));

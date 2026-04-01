@@ -75,10 +75,10 @@ pub async fn create_post_handler(
 
     let mut connection = acquire_db_connection().await?;
 
-    if let Some(ref group_access) = create_post_request.group_access {
-        if !group_access.is_empty() {
-            report_inaccessible_groups(group_access, &user, &mut connection).await?;
-        }
+    if let Some(ref group_access) = create_post_request.group_access
+        && !group_access.is_empty()
+    {
+        report_inaccessible_groups(group_access, &user, &mut connection).await?;
     }
 
     // run as repeatable read transaction and retry serialisation errors when a concurrent transaction
@@ -138,27 +138,27 @@ pub async fn create_post_handler(
                         .await?;
                 }
 
-                if let Some(ref group_access) = create_post_request.group_access {
-                    if !group_access.is_empty() {
-                        let group_pks = group_access.iter().map(|g| g.group_pk).collect::<Vec<_>>();
-                        report_missing_pks!(user_group, &group_pks, connection)??;
-                        let now = Utc::now();
-                        let post_group_access = group_access
-                            .iter()
-                            .map(|g| PostGroupAccess {
-                                fk_post: post.pk,
-                                fk_granted_group: g.group_pk,
-                                write: g.write,
-                                fk_granted_by: user.pk,
-                                creation_timestamp: now,
-                            })
-                            .collect::<Vec<_>>();
+                if let Some(ref group_access) = create_post_request.group_access
+                    && !group_access.is_empty()
+                {
+                    let group_pks = group_access.iter().map(|g| g.group_pk).collect::<Vec<_>>();
+                    report_missing_pks!(user_group, &group_pks, connection)??;
+                    let now = Utc::now();
+                    let post_group_access = group_access
+                        .iter()
+                        .map(|g| PostGroupAccess {
+                            fk_post: post.pk,
+                            fk_granted_group: g.group_pk,
+                            write: g.write,
+                            fk_granted_by: user.pk,
+                            creation_timestamp: now,
+                        })
+                        .collect::<Vec<_>>();
 
-                        diesel::insert_into(post_group_access::table)
-                            .values(&post_group_access)
-                            .execute(connection)
-                            .await?;
-                    }
+                    diesel::insert_into(post_group_access::table)
+                        .values(&post_group_access)
+                        .execute(connection)
+                        .await?;
                 }
 
                 let tags = get_post_tags(post.pk, connection)
@@ -273,10 +273,10 @@ pub async fn create_post_collection_handler(
 
     let mut connection = acquire_db_connection().await?;
 
-    if let Some(ref group_access) = request.group_access {
-        if !group_access.is_empty() {
-            report_inaccessible_groups(group_access, &user, &mut connection).await?;
-        }
+    if let Some(ref group_access) = request.group_access
+        && !group_access.is_empty()
+    {
+        report_inaccessible_groups(group_access, &user, &mut connection).await?;
     }
 
     let (post_collection_detailed, apply_auto_tags_task) =
@@ -318,27 +318,27 @@ pub async fn create_post_collection_handler(
                         .await?;
                 }
 
-                if let Some(ref group_access) = request.group_access {
-                    if !group_access.is_empty() {
-                        let group_pks = group_access.iter().map(|g| g.group_pk).collect::<Vec<_>>();
-                        report_missing_pks!(user_group, &group_pks, connection)??;
-                        let now = Utc::now();
-                        let post_collection_group_access = group_access
-                            .iter()
-                            .map(|g| PostCollectionGroupAccess {
-                                fk_post_collection: post_collection.pk,
-                                fk_granted_group: g.group_pk,
-                                write: g.write,
-                                fk_granted_by: user.pk,
-                                creation_timestamp: now,
-                            })
-                            .collect::<Vec<_>>();
+                if let Some(ref group_access) = request.group_access
+                    && !group_access.is_empty()
+                {
+                    let group_pks = group_access.iter().map(|g| g.group_pk).collect::<Vec<_>>();
+                    report_missing_pks!(user_group, &group_pks, connection)??;
+                    let now = Utc::now();
+                    let post_collection_group_access = group_access
+                        .iter()
+                        .map(|g| PostCollectionGroupAccess {
+                            fk_post_collection: post_collection.pk,
+                            fk_granted_group: g.group_pk,
+                            write: g.write,
+                            fk_granted_by: user.pk,
+                            creation_timestamp: now,
+                        })
+                        .collect::<Vec<_>>();
 
-                        diesel::insert_into(post_collection_group_access::table)
-                            .values(&post_collection_group_access)
-                            .execute(connection)
-                            .await?;
-                    }
+                    diesel::insert_into(post_collection_group_access::table)
+                        .values(&post_collection_group_access)
+                        .execute(connection)
+                        .await?;
                 }
 
                 let current_ordinal = if let Some(ref post_pks) = request.post_pks {
@@ -372,35 +372,35 @@ pub async fn create_post_collection_handler(
                     0
                 };
 
-                if let Some(query) = request.post_query {
-                    if !query.is_empty() {
-                        let found_posts = query::find_all_posts(query, &Some(user.clone())).await?;
-                        let post_collection_items = found_posts
-                            .into_iter()
-                            .enumerate()
-                            .map(|(idx, post_query_object)| NewPostCollectionItem {
-                                fk_post: post_query_object.pk,
-                                fk_post_collection: post_collection.pk,
-                                fk_added_by: user.pk,
-                                ordinal: (current_ordinal + idx) as i32,
-                            })
-                            .collect::<Vec<_>>();
-                        if current_ordinal + post_collection_items.len() > 10000 {
-                            return Err(TransactionRuntimeError::Rollback(
-                                Error::TooManyResultsError(
-                                    (current_ordinal + post_collection_items.len()) as u32,
-                                    10000,
-                                ),
-                            ));
-                        }
-                        if !post_collection_items.is_empty() {
-                            // split items into chunks to avoid hitting the parameter limit
-                            for item_chunk in post_collection_items.chunks(4096) {
-                                diesel::insert_into(post_collection_item::table)
-                                    .values(item_chunk)
-                                    .execute(connection)
-                                    .await?;
-                            }
+                if let Some(query) = request.post_query
+                    && !query.is_empty()
+                {
+                    let found_posts = query::find_all_posts(query, &Some(user.clone())).await?;
+                    let post_collection_items = found_posts
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, post_query_object)| NewPostCollectionItem {
+                            fk_post: post_query_object.pk,
+                            fk_post_collection: post_collection.pk,
+                            fk_added_by: user.pk,
+                            ordinal: (current_ordinal + idx) as i32,
+                        })
+                        .collect::<Vec<_>>();
+                    if current_ordinal + post_collection_items.len() > 10000 {
+                        return Err(TransactionRuntimeError::Rollback(
+                            Error::TooManyResultsError(
+                                (current_ordinal + post_collection_items.len()) as u32,
+                                10000,
+                            ),
+                        ));
+                    }
+                    if !post_collection_items.is_empty() {
+                        // split items into chunks to avoid hitting the parameter limit
+                        for item_chunk in post_collection_items.chunks(4096) {
+                            diesel::insert_into(post_collection_item::table)
+                                .values(item_chunk)
+                                .execute(connection)
+                                .await?;
                         }
                     }
                 }

@@ -2,17 +2,18 @@ use crate::error::{Error, TransactionRuntimeError};
 use crate::model::{
     Tag, TagCategory, TagEditHistory, TagEditHistoryAlias, TagEditHistoryParent, User, UserPublic,
 };
-use crate::query::PaginationQueryParams;
+use crate::post::history::HistoryPaginationQueryParams;
 use crate::schema::{registered_user, tag, tag_category, tag_edit_history};
 use crate::tag::auto_matching::spawn_apply_auto_tags_task;
 use crate::tag::update::update_tag;
 use crate::tag::{get_tag_aliases, get_tag_parents, load_tag_detailed};
-use crate::{acquire_db_connection, run_serializable_transaction};
+use crate::{acquire_db_connection, run_repeatable_read_transaction, run_serializable_transaction};
 use chrono::{DateTime, Utc};
 use diesel::{BelongingToDsl, ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl, Table};
 use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::Serialize;
+use validator::Validate;
 use warp::{Rejection, Reply};
 
 #[derive(Serialize)]
@@ -38,66 +39,81 @@ pub struct TagEditHistoryResponse {
 }
 
 pub async fn get_tag_edit_history_handler(
-    pagination: PaginationQueryParams,
+    pagination: HistoryPaginationQueryParams,
     tag_pk: i64,
 ) -> Result<impl Reply, Rejection> {
+    pagination.validate().map_err(|e| {
+        Error::InvalidRequestInputError(format!(
+            "Validation failed for HistoryPaginationQueryParams: {e}"
+        ))
+    })?;
+
     let mut connection = acquire_db_connection().await?;
+    let response = run_repeatable_read_transaction(&mut connection, |connection| {
+        async {
+            let (tag, edit_user) = tag::table
+                .inner_join(registered_user::table.on(tag::fk_edit_user.eq(registered_user::pk)))
+                .filter(tag::pk.eq(tag_pk))
+                .get_result::<(Tag, UserPublic)>(connection)
+                .await
+                .optional()
+                .map_err(Error::from)?
+                .ok_or(Error::NotFoundError)?;
 
-    let (tag, edit_user) = tag::table
-        .inner_join(registered_user::table.on(tag::fk_edit_user.eq(registered_user::pk)))
-        .filter(tag::pk.eq(tag_pk))
-        .get_result::<(Tag, UserPublic)>(&mut connection)
-        .await
-        .optional()
-        .map_err(Error::from)?
-        .ok_or(Error::NotFoundError)?;
+            let total_snapshot_count = tag_edit_history::table
+                .filter(tag_edit_history::fk_tag.eq(tag_pk))
+                .count()
+                .get_result::<i64>(connection)
+                .await
+                .map_err(Error::from)?;
 
-    let total_snapshot_count = tag_edit_history::table
-        .filter(tag_edit_history::fk_tag.eq(tag_pk))
-        .count()
-        .get_result::<i64>(&mut connection)
-        .await
-        .map_err(Error::from)?;
+            let limit = pagination.limit.unwrap_or(10);
+            let offset = limit * pagination.page.unwrap_or(0);
 
-    let limit = pagination.limit.unwrap_or(10);
-    let offset = limit * pagination.page.unwrap_or(0);
+            let tag_edit_history_snapshots = tag_edit_history::table
+                .left_join(tag_category::table)
+                .inner_join(registered_user::table)
+                .filter(tag_edit_history::fk_tag.eq(tag_pk))
+                .order(tag_edit_history::pk.desc())
+                .limit(limit.into())
+                .offset(offset.into())
+                .load::<(TagEditHistory, Option<TagCategory>, UserPublic)>(connection)
+                .await
+                .map_err(Error::from)?;
 
-    let tag_edit_history_snapshots = tag_edit_history::table
-        .left_join(tag_category::table)
-        .inner_join(registered_user::table)
-        .filter(tag_edit_history::fk_tag.eq(tag_pk))
-        .order(tag_edit_history::pk.desc())
-        .limit(limit.into())
-        .offset(offset.into())
-        .load::<(TagEditHistory, Option<TagCategory>, UserPublic)>(&mut connection)
-        .await
-        .map_err(Error::from)?;
+            let mut snapshots = Vec::new();
+            for (tag_edit_history_snapshot, tag_category, edit_user) in tag_edit_history_snapshots {
+                let parents =
+                    get_tag_snapshot_parents(&tag_edit_history_snapshot, connection).await?;
+                let aliases =
+                    get_tag_snapshot_aliases(&tag_edit_history_snapshot, connection).await?;
 
-    let mut snapshots = Vec::new();
-    for (tag_edit_history_snapshot, tag_category, edit_user) in tag_edit_history_snapshots {
-        let parents = get_tag_snapshot_parents(&tag_edit_history_snapshot, &mut connection).await?;
-        let aliases = get_tag_snapshot_aliases(&tag_edit_history_snapshot, &mut connection).await?;
+                snapshots.push(TagEditHistorySnapshot {
+                    pk: tag_edit_history_snapshot.pk,
+                    fk_tag: tag_edit_history_snapshot.fk_tag,
+                    edit_user,
+                    edit_timestamp: tag_edit_history_snapshot.edit_timestamp,
+                    tag_category,
+                    tag_category_changed: tag_edit_history_snapshot.tag_category_changed,
+                    parents_changed: tag_edit_history_snapshot.parents_changed,
+                    aliases_changed: tag_edit_history_snapshot.aliases_changed,
+                    parents,
+                    aliases,
+                });
+            }
 
-        snapshots.push(TagEditHistorySnapshot {
-            pk: tag_edit_history_snapshot.pk,
-            fk_tag: tag_edit_history_snapshot.fk_tag,
-            edit_user,
-            edit_timestamp: tag_edit_history_snapshot.edit_timestamp,
-            tag_category,
-            tag_category_changed: tag_edit_history_snapshot.tag_category_changed,
-            parents_changed: tag_edit_history_snapshot.parents_changed,
-            aliases_changed: tag_edit_history_snapshot.aliases_changed,
-            parents,
-            aliases,
-        });
-    }
+            Ok(TagEditHistoryResponse {
+                edit_timestamp: tag.edit_timestamp,
+                edit_user,
+                total_snapshot_count,
+                snapshots,
+            })
+        }
+        .scope_boxed()
+    })
+    .await?;
 
-    Ok(warp::reply::json(&TagEditHistoryResponse {
-        edit_timestamp: tag.edit_timestamp,
-        edit_user,
-        total_snapshot_count,
-        snapshots,
-    }))
+    Ok(warp::reply::json(&response))
 }
 
 async fn get_tag_snapshot_parents(
