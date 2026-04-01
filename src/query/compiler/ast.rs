@@ -384,11 +384,10 @@ impl Visitor for SemanticAnalysisVisitor {
 
         if op == Operator::FuzzyEqual {
             // if the patter does not contain any wildcards (% or _) explicitly, then wrap it in % to make it a fuzzy search
-            if let Some(string_literal) = right.node_type.downcast_mut::<StringLiteralNode>()
-                && !string_literal.val.contains('%')
-                && !string_literal.val.contains('_')
-            {
-                string_literal.val = format!("%{}%", string_literal.val);
+            if let Some(string_literal) = right.node_type.downcast_mut::<StringLiteralNode>() {
+                if !string_literal.val.contains('%') && !string_literal.val.contains('_') {
+                    string_literal.val = format!("%{}%", string_literal.val);
+                }
             }
         }
 
@@ -839,13 +838,6 @@ impl Visitor for QueryBuilderVisitor<'_> {
                 && left_type == Type::String
                 && right_type == Type::String)
         {
-            // for fuzzy equals, explicitly add an IS NOT NULL condition on the left side
-            // this helps the query planner when used with column that are frequently NULL
-            if op == Operator::FuzzyEqual {
-                left.accept(self, scope, log);
-                self.write_buff(" IS NOT NULL AND ");
-            }
-
             // case insensitive matching for fuzzy equals and string equals
             self.write_buff("LOWER(");
             left.accept(self, scope, log);

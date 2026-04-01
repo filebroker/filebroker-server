@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use diesel::sql_types::Bool;
-use diesel::{BoolExpressionMethods, IntoSql, JoinOnDsl, OptionalExtension, Table};
+use diesel::{
+    BoolExpressionMethods, JoinOnDsl, OptionalExtension, Table,
+    dsl::{exists, not},
+};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 
@@ -63,7 +65,8 @@ async fn report_inaccessible_group_pks(
                 .and(perms::get_group_membership_condition!(user.pk)),
         )
         .load::<i64>(connection)
-        .await?;
+        .await
+        .map_err(|e| Error::QueryError(e.to_string()))?;
 
     let missing_pks = group_pks
         .iter()
@@ -189,10 +192,7 @@ pub async fn get_post_group_access(
             .inner_join(user_group::table)
             .filter(
                 post_group_access::fk_post.eq(post_pk).and(
-                    user.is_admin
-                        .into_sql::<Bool>()
-                        .or(user_group::public)
-                        .or(perms::get_group_membership_condition!(user.pk)),
+                    not(user_group::hidden).or(perms::get_group_membership_condition!(user.pk)),
                 ),
             )
             .load::<(PostGroupAccess, UserGroup)>(connection)
@@ -203,7 +203,7 @@ pub async fn get_post_group_access(
             .filter(
                 post_group_access::fk_post
                     .eq(post_pk)
-                    .and(user_group::public),
+                    .and(not(user_group::hidden)),
             )
             .load::<(PostGroupAccess, UserGroup)>(connection)
             .await
@@ -232,10 +232,7 @@ pub async fn get_posts_group_access(
             .inner_join(user_group::table)
             .filter(
                 post_group_access::fk_post.eq_any(post_pks).and(
-                    user.is_admin
-                        .into_sql::<Bool>()
-                        .or(user_group::public)
-                        .or(perms::get_group_membership_condition!(user.pk)),
+                    not(user_group::hidden).or(perms::get_group_membership_condition!(user.pk)),
                 ),
             )
             .load::<(PostGroupAccess, UserGroup)>(connection)
@@ -246,7 +243,7 @@ pub async fn get_posts_group_access(
             .filter(
                 post_group_access::fk_post
                     .eq_any(post_pks)
-                    .and(user_group::public),
+                    .and(not(user_group::hidden)),
             )
             .load::<(PostGroupAccess, UserGroup)>(connection)
             .await
@@ -284,10 +281,7 @@ pub async fn get_post_collection_group_access(
                 post_collection_group_access::fk_post_collection
                     .eq(post_collection_pk)
                     .and(
-                        user.is_admin
-                            .into_sql::<Bool>()
-                            .or(user_group::public)
-                            .or(perms::get_group_membership_condition!(user.pk)),
+                        not(user_group::hidden).or(perms::get_group_membership_condition!(user.pk)),
                     ),
             )
             .load::<(PostCollectionGroupAccess, UserGroup)>(connection)
@@ -298,7 +292,7 @@ pub async fn get_post_collection_group_access(
             .filter(
                 post_collection_group_access::fk_post_collection
                     .eq(post_collection_pk)
-                    .and(user_group::public),
+                    .and(not(user_group::hidden)),
             )
             .load::<(PostCollectionGroupAccess, UserGroup)>(connection)
             .await

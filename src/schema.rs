@@ -1,15 +1,5 @@
 // @generated automatically by Diesel CLI.
 
-pub mod sql_types {
-    #[derive(diesel::sql_types::SqlType)]
-    #[diesel(postgres_type(name = "broker_audit_action"))]
-    pub struct BrokerAuditAction;
-
-    #[derive(diesel::sql_types::SqlType)]
-    #[diesel(postgres_type(name = "user_group_audit_action"))]
-    pub struct UserGroupAuditAction;
-}
-
 diesel::table! {
     apply_auto_tags_task (pk) {
         pk -> Int8,
@@ -43,10 +33,6 @@ diesel::table! {
         creation_timestamp -> Timestamptz,
         hls_enabled -> Bool,
         enable_presigned_get -> Bool,
-        is_system_bucket -> Bool,
-        description -> Nullable<Text>,
-        total_quota -> Nullable<Int8>,
-        disable_uploads -> Bool,
     }
 }
 
@@ -59,24 +45,6 @@ diesel::table! {
         quota -> Nullable<Int8>,
         fk_granted_by -> Int8,
         creation_timestamp -> Timestamptz,
-        fk_granted_user -> Nullable<Int8>,
-        public -> Bool,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::*;
-    use super::sql_types::BrokerAuditAction;
-
-    broker_audit_log (pk) {
-        pk -> Int8,
-        fk_broker -> Int8,
-        fk_user -> Int8,
-        action -> BrokerAuditAction,
-        fk_target_group -> Nullable<Int8>,
-        new_quota -> Nullable<Int8>,
-        creation_timestamp -> Timestamptz,
-        fk_target_user -> Nullable<Int8>,
     }
 }
 
@@ -320,6 +288,8 @@ diesel::table! {
         password -> Varchar,
         #[max_length = 320]
         email -> Nullable<Varchar>,
+        #[max_length = 2048]
+        avatar_url -> Nullable<Varchar>,
         creation_timestamp -> Timestamptz,
         email_confirmed -> Bool,
         #[max_length = 32]
@@ -328,8 +298,6 @@ diesel::table! {
         password_fail_count -> Int4,
         is_admin -> Bool,
         is_banned -> Bool,
-        #[max_length = 255]
-        avatar_object_key -> Nullable<Varchar>,
     }
 }
 
@@ -493,75 +461,9 @@ diesel::table! {
         #[max_length = 255]
         name -> Varchar,
         public -> Bool,
+        hidden -> Bool,
         fk_owner -> Int8,
         creation_timestamp -> Timestamptz,
-        description -> Nullable<Text>,
-        allow_member_invite -> Bool,
-        #[max_length = 255]
-        avatar_object_key -> Nullable<Varchar>,
-        fk_create_user -> Int8,
-        edit_timestamp -> Timestamptz,
-        fk_edit_user -> Int8,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::*;
-    use super::sql_types::UserGroupAuditAction;
-
-    user_group_audit_log (pk) {
-        pk -> Int8,
-        fk_user_group -> Int8,
-        fk_user -> Int8,
-        action -> UserGroupAuditAction,
-        fk_target_user -> Nullable<Int8>,
-        #[max_length = 10]
-        invite_code -> Nullable<Varchar>,
-        reason -> Nullable<Text>,
-        creation_timestamp -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    user_group_edit_history (pk) {
-        pk -> Int8,
-        fk_user_group -> Int8,
-        fk_edit_user -> Int8,
-        edit_timestamp -> Timestamptz,
-        #[max_length = 255]
-        name -> Varchar,
-        name_changed -> Bool,
-        public -> Bool,
-        public_changed -> Bool,
-        description -> Nullable<Text>,
-        description_changed -> Bool,
-        allow_member_invite -> Bool,
-        allow_member_invite_changed -> Bool,
-        tags_changed -> Bool,
-    }
-}
-
-diesel::table! {
-    user_group_edit_history_tag (fk_user_group_edit_history, fk_tag) {
-        fk_user_group_edit_history -> Int8,
-        fk_tag -> Int8,
-        auto_matched -> Bool,
-    }
-}
-
-diesel::table! {
-    user_group_invite (code) {
-        #[max_length = 10]
-        code -> Varchar,
-        fk_user_group -> Int8,
-        fk_create_user -> Int8,
-        fk_invited_user -> Nullable<Int8>,
-        creation_timestamp -> Timestamptz,
-        expiration_timestamp -> Nullable<Timestamptz>,
-        last_used_timestamp -> Nullable<Timestamptz>,
-        max_uses -> Nullable<Int4>,
-        uses_count -> Int4,
-        revoked -> Bool,
     }
 }
 
@@ -576,23 +478,14 @@ diesel::table! {
     }
 }
 
-diesel::table! {
-    user_group_tag (fk_user_group, fk_tag) {
-        fk_user_group -> Int8,
-        fk_tag -> Int8,
-        auto_matched -> Bool,
-    }
-}
-
 diesel::joinable!(apply_auto_tags_task -> post (post_to_apply));
 diesel::joinable!(apply_auto_tags_task -> post_collection (post_collection_to_apply));
 diesel::joinable!(apply_auto_tags_task -> tag (tag_to_apply));
 diesel::joinable!(apply_auto_tags_task -> tag_category (tag_category_to_apply));
 diesel::joinable!(broker -> registered_user (fk_owner));
 diesel::joinable!(broker_access -> broker (fk_broker));
+diesel::joinable!(broker_access -> registered_user (fk_granted_by));
 diesel::joinable!(broker_access -> user_group (fk_granted_group));
-diesel::joinable!(broker_audit_log -> broker (fk_broker));
-diesel::joinable!(broker_audit_log -> user_group (fk_target_group));
 diesel::joinable!(deferred_s3_object_deletion -> broker (fk_broker));
 diesel::joinable!(email_confirmation_token -> registered_user (fk_user));
 diesel::joinable!(one_time_password -> registered_user (fk_user));
@@ -627,6 +520,7 @@ diesel::joinable!(post_tag -> post (fk_post));
 diesel::joinable!(post_tag -> tag (fk_tag));
 diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
+diesel::joinable!(s3_object -> registered_user (fk_uploader));
 diesel::joinable!(s3_object_metadata -> s3_object (object_key));
 diesel::joinable!(tag -> tag_category (tag_category));
 diesel::joinable!(tag_edit_history -> registered_user (fk_edit_user));
@@ -636,22 +530,13 @@ diesel::joinable!(tag_edit_history_alias -> tag (fk_alias));
 diesel::joinable!(tag_edit_history_alias -> tag_edit_history (fk_tag_edit_history));
 diesel::joinable!(tag_edit_history_parent -> tag (fk_parent));
 diesel::joinable!(tag_edit_history_parent -> tag_edit_history (fk_tag_edit_history));
-diesel::joinable!(user_group -> s3_object (avatar_object_key));
-diesel::joinable!(user_group_audit_log -> user_group (fk_user_group));
-diesel::joinable!(user_group_edit_history -> registered_user (fk_edit_user));
-diesel::joinable!(user_group_edit_history -> user_group (fk_user_group));
-diesel::joinable!(user_group_edit_history_tag -> tag (fk_tag));
-diesel::joinable!(user_group_edit_history_tag -> user_group_edit_history (fk_user_group_edit_history));
-diesel::joinable!(user_group_invite -> user_group (fk_user_group));
+diesel::joinable!(user_group -> registered_user (fk_owner));
 diesel::joinable!(user_group_membership -> user_group (fk_group));
-diesel::joinable!(user_group_tag -> tag (fk_tag));
-diesel::joinable!(user_group_tag -> user_group (fk_user_group));
 
 diesel::allow_tables_to_appear_in_same_query!(
     apply_auto_tags_task,
     broker,
     broker_access,
-    broker_audit_log,
     deferred_s3_object_deletion,
     email_confirmation_token,
     hls_stream,
@@ -682,10 +567,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     tag_edit_history_alias,
     tag_edit_history_parent,
     user_group,
-    user_group_audit_log,
-    user_group_edit_history,
-    user_group_edit_history_tag,
-    user_group_invite,
     user_group_membership,
-    user_group_tag,
 );

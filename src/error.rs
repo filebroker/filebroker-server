@@ -55,16 +55,6 @@ pub enum Error {
     QuotaExceededError(i64, i64),
     #[error("The Filebroker-Upload-Size header value does not match the actual upload size")]
     InvalidUploadSizeError,
-    #[error("The provided group invite code is invalid or expired: {0}")]
-    InvalidUserGroupInviteCodeError(String),
-    #[error("User already is member of group {0}")]
-    UserAlreadyMemberOfGroupError(i64),
-    #[error("The provided reference path is invalid: '{0}'")]
-    InvalidReferencePathError(String),
-    #[error("Broker access for user or group {0:?} already exists")]
-    BrokerAccessAlreadyExistsError(Option<i64>),
-    #[error("Broker {0} currently does not accept further uploads")]
-    BrokerDisabledError(i64),
 
     // 401
     #[error("invalid credentials")]
@@ -80,15 +70,11 @@ pub enum Error {
     #[error("Cannot access object with provided pk {0}")]
     InaccessibleObjectError(i64),
     #[error("Cannot access object with provided key {0}")]
-    InaccessibleObjectKeyError(String),
+    InaccessibleS3ObjectError(String),
     #[error("Cannot access objects with provided pks {0:?}")]
     InaccessibleObjectsError(Vec<i64>),
     #[error("User must be admin to perform this action")]
     UserNotAdmin,
-    #[error("User has been banned")]
-    UserBannedError,
-    #[error("User has been banned from group {0}")]
-    UserBannedFromGroupError(i64),
 
     // 404
     #[error("The requested entity was not found")]
@@ -131,8 +117,6 @@ pub enum Error {
     ChildProcessError(String),
     #[error("Failed to parse m3u8 playlist: {0}")]
     M3U8ParseError(String),
-    #[error("No system bucket configured")]
-    NoSystemBucketError,
 
     #[error("Received error response code from S3: {0}")]
     S3ResponseError(u16),
@@ -145,11 +129,9 @@ impl Error {
         match self {
             Error::NotFoundError => StatusCode::NOT_FOUND,
             Error::InaccessibleObjectError(_)
-            | Error::InaccessibleObjectKeyError(_)
+            | Error::InaccessibleS3ObjectError(_)
             | Error::InaccessibleObjectsError(_)
-            | Error::UserNotAdmin
-            | Error::UserBannedError
-            | Error::UserBannedFromGroupError(_) => StatusCode::FORBIDDEN,
+            | Error::UserNotAdmin => StatusCode::FORBIDDEN,
             Error::InvalidCredentialsError
             | Error::MissingAuthHeaderError
             | Error::InvalidJwtError
@@ -173,12 +155,7 @@ impl Error {
             | Error::TooManyResultsError(..)
             | Error::DuplicatePostCollectionItemError(..)
             | Error::QuotaExceededError(..)
-            | Error::InvalidUploadSizeError
-            | Error::InvalidUserGroupInviteCodeError(_)
-            | Error::UserAlreadyMemberOfGroupError(_)
-            | Error::InvalidReferencePathError(_)
-            | Error::BrokerAccessAlreadyExistsError(_)
-            | Error::BrokerDisabledError(_) => StatusCode::BAD_REQUEST,
+            | Error::InvalidUploadSizeError => StatusCode::BAD_REQUEST,
             Error::DatabaseConnectionError(_)
             | Error::QueryError(_)
             | Error::TransactionError(_)
@@ -194,8 +171,7 @@ impl Error {
             | Error::InvalidUrlError(_)
             | Error::ReqwestError(_)
             | Error::ChildProcessError(_)
-            | Error::M3U8ParseError(_)
-            | Error::NoSystemBucketError => StatusCode::INTERNAL_SERVER_ERROR,
+            | Error::M3U8ParseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::IllegalRangeError(..) => StatusCode::RANGE_NOT_SATISFIABLE,
             Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => {
                 StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -225,11 +201,6 @@ impl Error {
             Self::DuplicatePostCollectionItemError(..) => 400_018,
             Self::QuotaExceededError(..) => 400_019,
             Self::InvalidUploadSizeError => 400_020,
-            Self::InvalidUserGroupInviteCodeError(_) => 400_021,
-            Self::UserAlreadyMemberOfGroupError(_) => 400_022,
-            Self::InvalidReferencePathError(_) => 400_023,
-            Self::BrokerAccessAlreadyExistsError(_) => 400_024,
-            Self::BrokerDisabledError(_) => 400_025,
 
             Self::InvalidCredentialsError => 401_001,
             Self::MissingAuthHeaderError => 401_002,
@@ -237,11 +208,9 @@ impl Error {
             Self::InvalidRefreshTokenError => 401_004,
 
             Self::InaccessibleObjectError(_) => 403_001,
-            Self::InaccessibleObjectKeyError(_) => 403_002,
+            Self::InaccessibleS3ObjectError(_) => 403_002,
             Self::InaccessibleObjectsError(_) => 403_003,
             Self::UserNotAdmin => 403_004,
-            Self::UserBannedError => 403_005,
-            Self::UserBannedFromGroupError(_) => 403_006,
 
             Self::NotFoundError => 404_001,
 
@@ -263,7 +232,6 @@ impl Error {
             Self::ReqwestError(_) => 500_014,
             Self::ChildProcessError(_) => 500_015,
             Self::M3U8ParseError(_) => 500_016,
-            Self::NoSystemBucketError => 500_017,
 
             Self::S3ResponseError(_) => 500_998,
             Self::S3ResponseErrorMsg(..) => 500_999,
@@ -332,10 +300,7 @@ impl fmt::Display for TransactionRuntimeError {
 
 impl From<Error> for TransactionRuntimeError {
     fn from(e: Error) -> Self {
-        match e {
-            Error::TransactionError(diesel_err) => TransactionRuntimeError::from(diesel_err),
-            _ => TransactionRuntimeError::Rollback(e),
-        }
+        TransactionRuntimeError::Rollback(e)
     }
 }
 

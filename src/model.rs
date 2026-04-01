@@ -18,7 +18,7 @@ use diesel::serialize::{self, Output, ToSql};
 use diesel::sql_types::{
     BigInt, Bool, Float8, Int4, Int8, Integer, Interval, Jsonb, Nullable, Timestamptz, Varchar,
 };
-use diesel::{Associations, Identifiable, Insertable, Queryable, QueryableByName};
+use diesel::{Associations, Identifiable, Insertable, Queryable};
 use diesel_async::AsyncPgConnection;
 use serde::{Deserialize, Serialize, Serializer};
 use validator::{Validate, ValidationError};
@@ -27,20 +27,32 @@ use validator::{Validate, ValidationError};
 #[diesel(table_name = registered_user)]
 #[diesel(primary_key(pk))]
 pub struct User {
+    #[diesel(sql_type = BigInt)]
     pub pk: i64,
+    #[diesel(sql_type = Varchar)]
     pub user_name: String,
+    #[diesel(sql_type = Varchar)]
     #[serde(skip_serializing)]
     pub password: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub email: Option<String>,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    pub avatar_url: Option<String>,
+    #[diesel(sql_type = Timestamptz)]
     pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = Bool)]
     pub email_confirmed: bool,
+    #[diesel(sql_type = Nullable<Varchar>)]
     pub display_name: Option<String>,
+    #[diesel(sql_type = Int4)]
     #[serde(skip_serializing)]
     pub jwt_version: i32,
+    #[diesel(sql_type = Int4)]
     pub password_fail_count: i32,
+    #[diesel(sql_type = Bool)]
     pub is_admin: bool,
+    #[diesel(sql_type = Bool)]
     pub is_banned: bool,
-    pub avatar_object_key: Option<String>,
 }
 
 pub fn get_system_user() -> User {
@@ -49,6 +61,7 @@ pub fn get_system_user() -> User {
         user_name: "system".to_string(),
         password: "".to_string(),
         email: None,
+        avatar_url: None,
         creation_timestamp: Default::default(),
         email_confirmed: false,
         display_name: None,
@@ -56,7 +69,6 @@ pub fn get_system_user() -> User {
         password_fail_count: 0,
         is_admin: true,
         is_banned: false,
-        avatar_object_key: None,
     }
 }
 
@@ -80,7 +92,8 @@ pub struct UserPublic {
     #[diesel(sql_type = Nullable<Varchar>)]
     #[serde(skip_serializing)]
     pub email: Option<String>,
-
+    #[diesel(sql_type = Nullable<Varchar>)]
+    pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     pub creation_timestamp: DateTime<Utc>,
     #[diesel(sql_type = Bool)]
@@ -98,8 +111,6 @@ pub struct UserPublic {
     pub is_admin: bool,
     #[diesel(sql_type = Bool)]
     pub is_banned: bool,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for UserPublic {
@@ -109,6 +120,7 @@ impl From<User> for UserPublic {
             user_name: value.user_name,
             password: value.password,
             email: value.email,
+            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             email_confirmed: value.email_confirmed,
             display_name: value.display_name,
@@ -116,7 +128,6 @@ impl From<User> for UserPublic {
             password_fail_count: value.password_fail_count,
             is_admin: value.is_admin,
             is_banned: value.is_banned,
-            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -128,6 +139,7 @@ impl From<UserPublic> for User {
             user_name: value.user_name,
             password: value.password,
             email: value.email,
+            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             email_confirmed: value.email_confirmed,
             display_name: value.display_name,
@@ -135,7 +147,6 @@ impl From<UserPublic> for User {
             password_fail_count: value.password_fail_count,
             is_admin: value.is_admin,
             is_banned: value.is_banned,
-            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -146,6 +157,7 @@ pub struct NewUser {
     pub user_name: String,
     pub password: String,
     pub email: Option<String>,
+    pub avatar_url: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub email_confirmed: bool,
     pub display_name: Option<String>,
@@ -193,10 +205,10 @@ impl Post {
         if self.public_edit {
             return Ok(true);
         }
-        if let Some(user) = user
-            && (user.is_admin || user.pk == self.fk_create_user)
-        {
-            return Ok(true);
+        if let Some(user) = user {
+            if user.is_admin || user.pk == self.fk_create_user {
+                return Ok(true);
+            }
         }
 
         perms::is_post_editable(connection, user, self.pk).await
@@ -207,10 +219,10 @@ impl Post {
         user: Option<&User>,
         connection: &mut AsyncPgConnection,
     ) -> Result<bool, Error> {
-        if let Some(user) = user
-            && (user.is_admin || user.pk == self.fk_create_user)
-        {
-            return Ok(true);
+        if let Some(user) = user {
+            if user.is_admin || user.pk == self.fk_create_user {
+                return Ok(true);
+            }
         }
 
         perms::is_post_deletable(connection, user, self.pk).await
@@ -240,21 +252,15 @@ pub struct PostCreateUser {
     #[diesel(sql_type = Varchar)]
     #[diesel(column_name = "post_create_user_user_name")]
     pub user_name: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_create_user_avatar_url")]
+    pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     #[diesel(column_name = "post_create_user_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_create_user_display_name")]
     pub display_name: Option<String>,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "post_create_user_is_admin")]
-    pub is_admin: bool,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "post_create_user_is_banned")]
-    pub is_banned: bool,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "post_create_user_avatar_object_key")]
-    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for PostCreateUser {
@@ -262,11 +268,9 @@ impl From<User> for PostCreateUser {
         Self {
             pk: value.pk,
             user_name: value.user_name,
+            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             display_name: value.display_name,
-            is_admin: value.is_admin,
-            is_banned: value.is_banned,
-            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -580,7 +584,6 @@ impl SearchQueryResultObject for PostQueryObject {
             posts: Some(objects),
             collections: None,
             collection_items: None,
-            user_groups: None,
         }
     }
 
@@ -617,21 +620,15 @@ pub struct PostCollectionCreateUser {
     #[diesel(sql_type = Varchar)]
     #[diesel(column_name = "post_collection_create_user_user_name")]
     pub user_name: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_create_user_avatar_url")]
+    pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     #[diesel(column_name = "post_collection_create_user_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_create_user_display_name")]
     pub display_name: Option<String>,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "post_collection_create_user_is_admin")]
-    pub is_admin: bool,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "post_collection_create_user_is_banned")]
-    pub is_banned: bool,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "post_collection_create_user_avatar_object_key")]
-    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for PostCollectionCreateUser {
@@ -639,11 +636,9 @@ impl From<User> for PostCollectionCreateUser {
         Self {
             pk: value.pk,
             user_name: value.user_name,
+            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             display_name: value.display_name,
-            is_admin: value.is_admin,
-            is_banned: value.is_banned,
-            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -819,7 +814,6 @@ impl SearchQueryResultObject for PostCollectionQueryObject {
             posts: None,
             collections: Some(objects),
             collection_items: None,
-            user_groups: None,
         }
     }
 
@@ -841,21 +835,15 @@ pub struct PostCollectionItemAddedUser {
     #[diesel(sql_type = Varchar)]
     #[diesel(column_name = "post_collection_item_added_user_user_name")]
     pub user_name: String,
+    #[diesel(sql_type = Nullable<Varchar>)]
+    #[diesel(column_name = "post_collection_item_added_user_avatar_url")]
+    pub avatar_url: Option<String>,
     #[diesel(sql_type = Timestamptz)]
     #[diesel(column_name = "post_collection_item_added_user_creation_timestamp")]
     pub creation_timestamp: DateTime<Utc>,
     #[diesel(sql_type = Nullable<Varchar>)]
     #[diesel(column_name = "post_collection_item_added_user_display_name")]
     pub display_name: Option<String>,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "post_collection_item_added_user_is_admin")]
-    pub is_admin: bool,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "post_collection_item_added_user_is_banned")]
-    pub is_banned: bool,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "post_collection_item_added_user_avatar_object_key")]
-    pub avatar_object_key: Option<String>,
 }
 
 impl From<User> for PostCollectionItemAddedUser {
@@ -863,11 +851,9 @@ impl From<User> for PostCollectionItemAddedUser {
         Self {
             pk: value.pk,
             user_name: value.user_name,
+            avatar_url: value.avatar_url,
             creation_timestamp: value.creation_timestamp,
             display_name: value.display_name,
-            is_admin: value.is_admin,
-            is_banned: value.is_banned,
-            avatar_object_key: value.avatar_object_key,
         }
     }
 }
@@ -876,6 +862,26 @@ impl From<UserPublic> for PostCollectionItemAddedUser {
     fn from(value: UserPublic) -> Self {
         PostCollectionItemAddedUser::from(User::from(value))
     }
+}
+
+#[derive(Queryable, QueryableByName, Serialize)]
+#[diesel(table_name = post_collection_item)]
+pub struct PostCollectionItemFull {
+    #[diesel(embed)]
+    pub post: PostFull,
+    #[diesel(embed)]
+    pub post_collection: PostCollectionFull,
+    #[diesel(embed)]
+    pub added_by: PostCollectionItemAddedUser,
+    #[diesel(sql_type = Timestamptz)]
+    #[diesel(column_name = "post_collection_item_creation_timestamp")]
+    pub creation_timestamp: DateTime<Utc>,
+    #[diesel(sql_type = BigInt)]
+    #[diesel(column_name = "post_collection_item_pk")]
+    pub pk: i64,
+    #[diesel(sql_type = Int4)]
+    #[diesel(column_name = "post_collection_item_ordinal")]
+    pub ordinal: i32,
 }
 
 #[derive(Queryable, QueryableByName, Serialize)]
@@ -919,119 +925,6 @@ impl SearchQueryResultObject for PostCollectionItemQueryObject {
             posts: None,
             collections: None,
             collection_items: Some(objects),
-            user_groups: None,
-        }
-    }
-
-    fn get_full_count(&self) -> Option<i64> {
-        self.full_count
-    }
-
-    fn get_evaluated_limit(&self) -> i32 {
-        self.evaluated_limit
-    }
-}
-
-#[derive(Queryable, QueryableByName, Serialize)]
-#[diesel(table_name = user_group)]
-pub struct UserGroupQueryObject {
-    #[diesel(sql_type = BigInt)]
-    #[diesel(column_name = "user_group_pk")]
-    pub pk: i64,
-    #[diesel(sql_type = Varchar)]
-    #[diesel(column_name = "user_group_name")]
-    pub name: String,
-    #[serde(rename = "is_public")]
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "user_group_public")]
-    pub public: bool,
-    #[diesel(embed)]
-    pub owner: UserGroupOwnerUser,
-    #[diesel(sql_type = Timestamptz)]
-    #[diesel(column_name = "user_group_creation_timestamp")]
-    pub creation_timestamp: DateTime<Utc>,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "user_group_description")]
-    pub description: Option<String>,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "user_group_allow_member_invite")]
-    pub allow_member_invite: bool,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "user_group_avatar_object_key")]
-    pub avatar_object_key: Option<String>,
-    #[diesel(sql_type = Timestamptz)]
-    #[diesel(column_name = "user_group_edit_timestamp")]
-    pub edit_timestamp: DateTime<Utc>,
-    #[serde(skip_serializing)]
-    #[diesel(sql_type = Nullable<Int8>)]
-    pub full_count: Option<i64>,
-    #[serde(skip_serializing)]
-    #[diesel(sql_type = Int4)]
-    pub evaluated_limit: i32,
-}
-
-#[derive(Queryable, QueryableByName, Serialize)]
-#[diesel(table_name = registered_user)]
-pub struct UserGroupOwnerUser {
-    #[diesel(sql_type = BigInt)]
-    #[diesel(column_name = "user_group_owner_user_pk")]
-    pub pk: i64,
-    #[diesel(sql_type = Varchar)]
-    #[diesel(column_name = "user_group_owner_user_user_name")]
-    pub user_name: String,
-    #[diesel(sql_type = Timestamptz)]
-    #[diesel(column_name = "user_group_owner_user_creation_timestamp")]
-    pub creation_timestamp: DateTime<Utc>,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "user_group_owner_user_display_name")]
-    pub display_name: Option<String>,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "user_group_owner_user_is_admin")]
-    pub is_admin: bool,
-    #[diesel(sql_type = Bool)]
-    #[diesel(column_name = "user_group_owner_user_is_banned")]
-    pub is_banned: bool,
-    #[diesel(sql_type = Nullable<Varchar>)]
-    #[diesel(column_name = "user_group_owner_user_avatar_object_key")]
-    pub avatar_object_key: Option<String>,
-}
-
-impl From<User> for UserGroupOwnerUser {
-    fn from(value: User) -> Self {
-        Self {
-            pk: value.pk,
-            user_name: value.user_name,
-            creation_timestamp: value.creation_timestamp,
-            display_name: value.display_name,
-            is_admin: value.is_admin,
-            is_banned: value.is_banned,
-            avatar_object_key: value.avatar_object_key,
-        }
-    }
-}
-
-impl From<UserPublic> for UserGroupOwnerUser {
-    fn from(value: UserPublic) -> Self {
-        UserGroupOwnerUser::from(User::from(value))
-    }
-}
-
-impl SearchQueryResultObject for UserGroupQueryObject {
-    fn construct_search_result(
-        full_count: Option<i64>,
-        pages: Option<i64>,
-        objects: Vec<Self>,
-    ) -> SearchResult
-    where
-        Self: Sized,
-    {
-        SearchResult {
-            full_count,
-            pages,
-            posts: None,
-            collections: None,
-            collection_items: None,
-            user_groups: Some(objects),
         }
     }
 
@@ -1303,10 +1196,6 @@ pub struct Broker {
     pub creation_timestamp: DateTime<Utc>,
     pub hls_enabled: bool,
     pub enable_presigned_get: bool,
-    pub is_system_bucket: bool,
-    pub description: Option<String>,
-    pub total_quota: Option<i64>,
-    pub disable_uploads: bool,
 }
 
 #[derive(Insertable)]
@@ -1322,50 +1211,6 @@ pub struct NewBroker {
     pub fk_owner: i64,
     pub hls_enabled: bool,
     pub enable_presigned_get: bool,
-    pub is_system_bucket: bool,
-    pub description: Option<String>,
-    pub total_quota: Option<i64>,
-}
-
-#[derive(Clone, diesel_derive_enum::DbEnum, Debug, Serialize)]
-#[ExistingTypePath = "crate::schema::sql_types::BrokerAuditAction"]
-pub enum BrokerAuditAction {
-    Edit,
-    BucketConnectionEdit,
-    AccessGranted,
-    AccessRevoked,
-    AccessQuotaEdit,
-    AccessAdminPromote,
-    AccessAdminDemote,
-    DisableUploads,
-    EnableUploads,
-}
-
-#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[diesel(belongs_to(Broker, foreign_key = fk_broker))]
-#[diesel(table_name = broker_audit_log)]
-#[diesel(primary_key(pk))]
-pub struct BrokerAuditLog {
-    pub pk: i64,
-    pub fk_broker: i64,
-    pub fk_user: i64,
-    pub action: BrokerAuditAction,
-    pub fk_target_group: Option<i64>,
-    pub new_quota: Option<i64>,
-    pub creation_timestamp: DateTime<Utc>,
-    pub fk_target_user: Option<i64>,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = broker_audit_log)]
-pub struct NewBrokerAuditLog {
-    pub fk_broker: i64,
-    pub fk_user: i64,
-    pub action: BrokerAuditAction,
-    pub fk_target_group: Option<i64>,
-    pub new_quota: Option<i64>,
-    pub creation_timestamp: DateTime<Utc>,
-    pub fk_target_user: Option<i64>,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, QueryableByName, Serialize)]
@@ -1418,14 +1263,9 @@ pub struct UserGroup {
     pub name: String,
     #[serde(rename = "is_public")]
     pub public: bool,
+    pub hidden: bool,
     pub fk_owner: i64,
     pub creation_timestamp: DateTime<Utc>,
-    pub description: Option<String>,
-    pub allow_member_invite: bool,
-    pub avatar_object_key: Option<String>,
-    pub fk_create_user: i64,
-    pub edit_timestamp: DateTime<Utc>,
-    pub fk_edit_user: i64,
 }
 
 #[derive(Insertable)]
@@ -1433,12 +1273,9 @@ pub struct UserGroup {
 pub struct NewUserGroup {
     pub name: String,
     pub public: bool,
+    pub hidden: bool,
     pub fk_owner: i64,
     pub creation_timestamp: DateTime<Utc>,
-    pub description: Option<String>,
-    pub allow_member_invite: bool,
-    pub avatar_object_key: Option<String>,
-    pub fk_create_user: i64,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -1452,77 +1289,6 @@ pub struct UserGroupMembership {
     pub administrator: bool,
     pub revoked: bool,
     pub fk_granted_by: i64,
-    pub creation_timestamp: DateTime<Utc>,
-}
-
-#[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
-#[diesel(table_name = user_group_tag)]
-#[diesel(primary_key(fk_user_group, fk_tag))]
-#[diesel(belongs_to(UserGroup, foreign_key = fk_user_group))]
-#[diesel(belongs_to(Tag, foreign_key = fk_tag))]
-pub struct UserGroupTag {
-    pub fk_user_group: i64,
-    pub fk_tag: i64,
-    pub auto_matched: bool,
-}
-
-#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[diesel(belongs_to(UserGroup, foreign_key = fk_user_group))]
-#[diesel(table_name = user_group_invite)]
-#[diesel(primary_key(code))]
-pub struct UserGroupInvite {
-    pub code: String,
-    pub fk_user_group: i64,
-    pub fk_create_user: i64,
-    pub fk_invited_user: Option<i64>,
-    pub creation_timestamp: DateTime<Utc>,
-    pub expiration_timestamp: Option<DateTime<Utc>>,
-    pub last_used_timestamp: Option<DateTime<Utc>>,
-    pub max_uses: Option<i32>,
-    pub uses_count: i32,
-    pub revoked: bool,
-}
-
-#[derive(Clone, diesel_derive_enum::DbEnum, Debug, Serialize)]
-#[ExistingTypePath = "crate::schema::sql_types::UserGroupAuditAction"]
-pub enum UserGroupAuditAction {
-    Edit,
-    Join,
-    Invite,
-    RevokeInvite,
-    Leave,
-    Kick,
-    Ban,
-    Unban,
-    AdminPromote,
-    AdminDemote,
-    AvatarChange,
-}
-
-#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[diesel(belongs_to(UserGroup, foreign_key = fk_user_group))]
-#[diesel(table_name = user_group_audit_log)]
-#[diesel(primary_key(pk))]
-pub struct UserGroupAuditLog {
-    pub pk: i64,
-    pub fk_user_group: i64,
-    pub fk_user: i64,
-    pub action: UserGroupAuditAction,
-    pub fk_target_user: Option<i64>,
-    pub invite_code: Option<String>,
-    pub reason: Option<String>,
-    pub creation_timestamp: DateTime<Utc>,
-}
-
-#[derive(Insertable)]
-#[diesel(table_name = user_group_audit_log)]
-pub struct NewUserGroupAuditLog {
-    pub fk_user_group: i64,
-    pub fk_user: i64,
-    pub action: UserGroupAuditAction,
-    pub fk_target_user: Option<i64>,
-    pub invite_code: Option<String>,
-    pub reason: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
 }
 
@@ -1553,10 +1319,10 @@ impl PostCollection {
         if self.public_edit {
             return Ok(true);
         }
-        if let Some(user) = user
-            && (user.is_admin || user.pk == self.fk_create_user)
-        {
-            return Ok(true);
+        if let Some(user) = user {
+            if user.is_admin || user.pk == self.fk_create_user {
+                return Ok(true);
+            }
         }
 
         perms::is_post_collection_editable(connection, user, self.pk).await
@@ -1567,10 +1333,10 @@ impl PostCollection {
         user: Option<&User>,
         connection: &mut AsyncPgConnection,
     ) -> Result<bool, Error> {
-        if let Some(user) = user
-            && (user.is_admin || user.pk == self.fk_create_user)
-        {
-            return Ok(true);
+        if let Some(user) = user {
+            if user.is_admin || user.pk == self.fk_create_user {
+                return Ok(true);
+            }
         }
 
         perms::is_post_collection_deletable(connection, user, self.pk).await
@@ -1662,22 +1428,6 @@ pub struct BrokerAccess {
     pub quota: Option<i64>,
     pub fk_granted_by: i64,
     pub creation_timestamp: DateTime<Utc>,
-    pub fk_granted_user: Option<i64>,
-    #[serde(rename = "is_public")]
-    pub public: bool,
-}
-
-#[derive(Clone, Insertable)]
-#[diesel(table_name = broker_access)]
-pub struct NewBrokerAccess {
-    pub fk_broker: i64,
-    pub fk_granted_group: Option<i64>,
-    pub write: bool,
-    pub quota: Option<i64>,
-    pub fk_granted_by: i64,
-    pub creation_timestamp: DateTime<Utc>,
-    pub fk_granted_user: Option<i64>,
-    pub public: bool,
 }
 
 #[derive(Associations, Identifiable, Insertable, Queryable, Serialize)]
@@ -1976,56 +1726,6 @@ pub struct TagEditHistoryParent {
 pub struct TagEditHistoryAlias {
     pub fk_tag_edit_history: i64,
     pub fk_alias: i64,
-}
-
-#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[diesel(belongs_to(UserGroup, foreign_key = fk_user_group))]
-#[diesel(belongs_to(User, foreign_key = fk_edit_user))]
-#[diesel(table_name = user_group_edit_history)]
-#[diesel(primary_key(pk))]
-pub struct UserGroupEditHistory {
-    pub pk: i64,
-    pub fk_user_group: i64,
-    pub fk_edit_user: i64,
-    pub edit_timestamp: DateTime<Utc>,
-    pub name: String,
-    pub name_changed: bool,
-    #[serde(rename = "is_public")]
-    pub public: bool,
-    pub public_changed: bool,
-    pub description: Option<String>,
-    pub description_changed: bool,
-    pub allow_member_invite: bool,
-    pub allow_member_invite_changed: bool,
-    pub tags_changed: bool,
-}
-
-#[derive(Clone, Insertable)]
-#[diesel(table_name = user_group_edit_history)]
-pub struct NewUserGroupEditHistory {
-    pub fk_user_group: i64,
-    pub fk_edit_user: i64,
-    pub edit_timestamp: DateTime<Utc>,
-    pub name: String,
-    pub name_changed: bool,
-    pub public: bool,
-    pub public_changed: bool,
-    pub description: Option<String>,
-    pub description_changed: bool,
-    pub allow_member_invite: bool,
-    pub allow_member_invite_changed: bool,
-    pub tags_changed: bool,
-}
-
-#[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]
-#[diesel(belongs_to(UserGroupEditHistory, foreign_key = fk_user_group_edit_history))]
-#[diesel(belongs_to(Tag, foreign_key = fk_tag))]
-#[diesel(table_name = user_group_edit_history_tag)]
-#[diesel(primary_key(fk_user_group_edit_history, fk_tag))]
-pub struct UserGroupEditHistoryTag {
-    pub fk_user_group_edit_history: i64,
-    pub fk_tag: i64,
-    pub auto_matched: bool,
 }
 
 #[derive(
