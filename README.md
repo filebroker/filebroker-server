@@ -95,4 +95,6 @@ if you send your mails through an SMTP relay that manages DKIM for you this is r
 
 `FILEBROKER_PRESIGNED_GET_EXPIRATION_SECS` (optional, u32): Number of seconds after which S3 presigned get URLs expire. May be set to 0 to disable presigned get URLs entirely, forcing clients to always use filebroker's /get-object endpoint. Defaults to 28800 (8 hours).
 
+`FILEBROKER_RECONCILE_QUOTA_GRACE_PERIOD` (optional, string): The grace period for quota reconciliation, in ISO 8601 period format. Defaults to 30 days (P30D). When the available upload quota changes for a user, this time period determines how long the task will wait before deleting uploads that exceed the new quota.
+
 Note that CORS headers are only set when running debug binaries for development, for production you need to set up nginx.

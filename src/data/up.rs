@@ -2,9 +2,7 @@ use std::{ffi::OsStr, io, path::Path};
 
 use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
-use diesel::{
-    NullableExpressionMethods, OptionalExtension, PgSortExpressionMethods, QueryDsl, dsl::sum,
-};
+use diesel::{OptionalExtension, QueryDsl, dsl::sum};
 use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use futures::{TryStream, stream::IntoAsyncRead};
 use s3::{Bucket, error::S3Error};
@@ -13,14 +11,13 @@ use uuid::Uuid;
 use super::s3utils;
 use crate::broker::is_broker_admin;
 use crate::{
-    acquire_db_connection,
+    acquire_db_connection, broker,
     data::encode::{generate_hls_playlist, generate_thumbnail, load_object_metadata},
     diesel::{BoolExpressionMethods, ExpressionMethods},
     error::Error,
-    model::{Broker, BrokerAccess, S3Object, User},
-    perms::get_group_membership_condition,
+    model::{Broker, BrokerAccess, ObjectType, S3Object, User},
     run_serializable_transaction,
-    schema::{broker_access, s3_object, user_group, user_group_membership},
+    schema::s3_object,
 };
 
 pub async fn upload_file<S>(
@@ -157,6 +154,8 @@ where
                     thumbnail_disabled: false,
                     metadata_locked_at: None,
                     metadata_fail_count: None,
+                    derived_from: None,
+                    object_type: ObjectType::Original,
                 })
                 .get_result::<S3Object>(connection)
                 .await?;
@@ -291,48 +290,15 @@ pub async fn check_broker_quota_usage(
         }
     }
 
-    let access: BrokerAccess = broker_access::table
-        .filter(
-            broker_access::fk_broker.eq(broker.pk).and(
-                broker_access::public
-                    .or(broker_access::fk_granted_user.eq(user.pk))
-                    .or(broker_access::fk_granted_group.eq_any(
-                        user_group::table
-                            .select(user_group::pk)
-                            .filter(get_group_membership_condition!(user.pk))
-                            .nullable(),
-                    )),
-            ),
-        )
-        .order((
-            broker_access::fk_granted_user.asc().nulls_last(),
-            broker_access::quota.desc().nulls_first(),
-        ))
-        .first::<BrokerAccess>(connection)
-        .await
-        .optional()?
+    let access: BrokerAccess = broker::get_applicable_broker_access(broker.pk, user.pk, connection)
+        .await?
         .ok_or(Error::InaccessibleObjectError(broker.pk))?;
 
     if let Some(quota) = access.quota {
-        let used_quota: BigDecimal = s3_object::table
-            .select(sum(s3_object::size_bytes))
-            .filter(
-                s3_object::fk_broker
-                    .eq(broker.pk)
-                    .and(s3_object::fk_uploader.eq(user.pk)),
-            )
-            .get_result::<Option<BigDecimal>>(connection)
-            .await?
-            .unwrap_or_default();
+        let used_quota =
+            broker::get_broker_quota_used_by_user(broker.pk, user.pk, connection).await?;
 
-        if used_quota
-            .to_u128()
-            .ok_or(Error::InternalError(String::from(
-                "Used quota cannot be converted to u128",
-            )))?
-            + upload_size as u128
-            > quota as u128
-        {
+        if used_quota + upload_size as u128 > quota as u128 {
             return Err(Error::QuotaExceededError(
                 quota,
                 quota - used_quota.to_i64().unwrap_or(0),

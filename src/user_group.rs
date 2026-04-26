@@ -3,10 +3,11 @@ pub mod history;
 pub mod invite;
 pub mod update;
 
+use crate::broker::BrokerQuotaUsage;
 use crate::error::{Error, TransactionRuntimeError};
 use crate::model::{
-    Broker, BrokerAccess, NewUserGroupAuditLog, Tag, User, UserGroup, UserGroupAuditAction,
-    UserGroupMembership, UserPublic,
+    Broker, BrokerAccess, NewUserGroupAuditLog, ObjectType, Tag, User, UserGroup,
+    UserGroupAuditAction, UserGroupMembership, UserPublic,
 };
 use crate::perms::{get_group_membership_condition, load_user_group_secured};
 use crate::query::{ApplyOrderFn, apply_key_ordering, order_by_col_fn, order_by_col_with_tie_fn};
@@ -20,7 +21,7 @@ use crate::{
 };
 use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::{DateTime, Utc};
-use diesel::dsl::{not, sum};
+use diesel::dsl::{case_when, not, sum};
 use diesel::query_builder::BoxedSelectStatement;
 use diesel::sql_types::Bool;
 use diesel::{
@@ -790,6 +791,7 @@ pub struct BrokerAccessInnerJoined {
     pub write: bool,
     pub quota: Option<i64>,
     pub used_bytes: i64,
+    pub used_quota: i64,
     pub granted_by: UserPublic,
     pub creation_timestamp: DateTime<Utc>,
 }
@@ -883,27 +885,53 @@ pub async fn get_user_group_brokers_handler(
                 .filter(broker_access::fk_broker.eq_any(broker_pks))
                 .filter(s3_object::fk_uploader.ne(broker::fk_owner))
                 .group_by(broker_access::pk)
-                .select((broker_access::pk, sum(s3_object::size_bytes)))
-                .load::<(i64, Option<BigDecimal>)>(connection)
+                .select((
+                    broker_access::pk,
+                    sum(s3_object::size_bytes),
+                    sum(case_when(
+                        s3_object::object_type.eq(ObjectType::Original),
+                        s3_object::size_bytes,
+                    )
+                    .otherwise(0)),
+                ))
+                .load::<(i64, Option<BigDecimal>, Option<BigDecimal>)>(connection)
                 .await?
                 .into_iter()
-                .map(|(broker_pk, size_used)| (broker_pk, size_used.unwrap_or(BigDecimal::from(0))))
-                .collect::<HashMap<i64, BigDecimal>>();
+                .map(|(broker_pk, size_used, quota_used)| {
+                    let size_used = size_used.unwrap_or_default();
+                    let used_bytes = size_used.to_i64().ok_or_else(|| {
+                        Error::InternalError(format!(
+                            "Could not convert broker usage bytes {size_used} to i64"
+                        ))
+                    })?;
+
+                    let quota_used = quota_used.unwrap_or_default();
+                    let used_quota = quota_used.to_i64().ok_or_else(|| {
+                        Error::InternalError(format!(
+                            "Could not convert broker quota bytes {quota_used} to i64"
+                        ))
+                    })?;
+
+                    Ok((
+                        broker_pk,
+                        BrokerQuotaUsage {
+                            used_bytes,
+                            used_quota,
+                        },
+                    ))
+                })
+                .collect::<Result<HashMap<i64, BrokerQuotaUsage>, Error>>()?;
 
             let brokers = records
                 .into_iter()
                 .map(|(broker_access, broker, granted_by)| {
-                    let used_bytes = broker_usages
+                    let BrokerQuotaUsage {
+                        used_bytes,
+                        used_quota,
+                    } = broker_usages
                         .get(&broker_access.pk)
-                        .map(|bytes_decimal| {
-                            bytes_decimal.to_i64().ok_or_else(|| {
-                                Error::InternalError(format!(
-                                    "Could not convert broker usage bytes {bytes_decimal} to i64"
-                                ))
-                            })
-                        })
-                        .transpose()?
-                        .unwrap_or(0);
+                        .copied()
+                        .unwrap_or_default();
 
                     Ok(BrokerAccessInnerJoined {
                         pk: broker_access.pk,
@@ -911,6 +939,7 @@ pub async fn get_user_group_brokers_handler(
                         write: broker_access.write,
                         quota: broker_access.quota,
                         used_bytes,
+                        used_quota,
                         granted_by,
                         creation_timestamp: broker_access.creation_timestamp,
                     })

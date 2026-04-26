@@ -14,6 +14,7 @@ use diesel::data_types::PgInterval;
 use diesel::deserialize::{self, FromSql, FromSqlRow};
 use diesel::expression::AsExpression;
 use diesel::pg::{Pg, PgValue};
+use diesel::query_builder::QueryId;
 use diesel::serialize::{self, Output, ToSql};
 use diesel::sql_types::{
     BigInt, Bool, Float8, Int4, Int8, Integer, Interval, Jsonb, Nullable, Timestamptz, Varchar,
@@ -1394,6 +1395,18 @@ pub struct S3Object {
     pub thumbnail_disabled: bool,
     pub metadata_locked_at: Option<DateTime<Utc>>,
     pub metadata_fail_count: Option<i32>,
+    pub derived_from: Option<String>,
+    pub object_type: ObjectType,
+}
+
+#[derive(Clone, diesel_derive_enum::DbEnum, Debug, QueryId, Serialize)]
+#[ExistingTypePath = "crate::schema::sql_types::ObjectType"]
+pub enum ObjectType {
+    Original,
+    Thumbnail,
+    HlsPlaylist,
+    HlsSegment,
+    Avatar,
 }
 
 #[derive(Associations, Debug, Clone, Identifiable, Insertable, Queryable, Serialize)]
@@ -2059,7 +2072,9 @@ pub struct NewApplyAutoTagsTask {
     pub post_collection_to_apply: Option<i64>,
 }
 
-#[derive(Associations, Clone, Debug, Identifiable, Insertable, Queryable, Serialize)]
+#[derive(
+    Associations, Clone, Debug, Identifiable, Insertable, Queryable, QueryableByName, Serialize,
+)]
 #[diesel(belongs_to(User, foreign_key = fk_user))]
 #[diesel(belongs_to(Broker, foreign_key = fk_broker))]
 #[diesel(table_name = reconcile_broker_quota_usage_task)]

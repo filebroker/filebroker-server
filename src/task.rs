@@ -8,7 +8,7 @@ use std::{
 
 use chrono::Utc;
 use diesel::{
-    QueryDsl,
+    JoinOnDsl, NullableExpressionMethods, OptionalExtension, QueryDsl,
     sql_types::{Array, VarChar},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
@@ -19,7 +19,10 @@ use tokio::{runtime::Handle, sync::Mutex, task::JoinHandle};
 use lazy_static::lazy_static;
 use uuid::Uuid;
 
-use crate::schema::apply_auto_tags_task;
+use crate::broker::{get_broker_access_quota, get_broker_quota_used_by_user};
+use crate::model::{ReconcileBrokerQuotaUsageTask, get_system_user};
+use crate::post::delete::execute_delete_posts;
+use crate::schema::{apply_auto_tags_task, post, reconcile_broker_quota_usage_task, s3_object};
 use crate::tag::auto_matching::run_apply_auto_tags_task;
 use crate::{
     acquire_db_connection,
@@ -71,6 +74,11 @@ lazy_static! {
                 .expect("FILEBROKER_DISABLE_LOAD_MISSING_METADATA is invalid"))
             .unwrap_or(false);
     pub static ref IS_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+    pub static ref RECONCILE_QUOTA_GRACE_PERIOD: pg_interval::Interval =
+        std::env::var("FILEBROKER_RECONCILE_QUOTA_GRACE_PERIOD")
+            .map(|s| pg_interval::Interval::from_iso(&s)
+                .expect("FILEBROKER_RECONCILE_QUOTA_GRACE_PERIOD is invalid"))
+            .unwrap_or(pg_interval::Interval::new(0, 30, 0));
 }
 
 pub fn submit_task(
@@ -739,6 +747,166 @@ pub fn run_apply_auto_tags_tasks(tokio_handle: Handle) -> Result<(), Error> {
                         .await;
                     if let Err(e) = delete_task_res {
                         log::error!("Failed to delete apply_auto_tags_task {}: {e}", task.pk);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    })
+}
+
+pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<(), Error> {
+    tokio_handle.block_on(async {
+        loop {
+            if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                log::warn!(
+                    "Stopping task run_reconcile_broker_quota_usage_tasks because the task pool is shutting down"
+                );
+            }
+
+            let grace_period = RECONCILE_QUOTA_GRACE_PERIOD.to_postgres();
+
+            let mut connection = acquire_db_connection().await?;
+            let tasks = run_serializable_transaction(&mut connection, |connection| async {
+                diesel::sql_query("
+                    WITH relevant_reconcile_broker_quota_usage_tasks AS(
+                        SELECT * FROM reconcile_broker_quota_usage_task
+                        WHERE locked_at IS NULL
+                        AND creation_timestamp < NOW() - $1::interval
+                        AND fail_count < 3
+                        ORDER BY fail_count ASC NULLS FIRST, creation_timestamp ASC
+                        LIMIT 5
+                    )
+                    UPDATE reconcile_broker_quota_usage_task SET locked_at = NOW() WHERE locked_at IS NULL AND pk IN(SELECT pk FROM relevant_reconcile_broker_quota_usage_tasks) RETURNING *;
+                ")
+                .bind::<VarChar, _>(&grace_period)
+                .load::<ReconcileBrokerQuotaUsageTask>(connection)
+                .await
+                .map_err(retry_on_serialization_failure)
+            }.scope_boxed()).await?;
+
+            if tasks.is_empty() {
+                break;
+            }
+
+            log::info!("Found {} reconcile_broker_quota_usage_tasks to run (grace period: {})", tasks.len(), &grace_period);
+
+            let _sentinel = LockedObjectsTaskSentinel::new_with_values(
+                "locked_at",
+                "reconcile_broker_quota_usage_task",
+                "pk",
+                tasks.iter().map(|t| t.pk).collect::<Vec<i64>>(),
+                &tokio_handle,
+            ).await;
+
+            for task in tasks {
+                if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                    log::warn!("Stopping task run_reconcile_broker_quota_usage_tasks because the task pool is shutting down");
+                    return Ok(());
+                }
+
+                let res = run_serializable_transaction(&mut connection, |connection| async move {
+                    let user = registered_user::table.filter(registered_user::pk.eq(task.fk_user)).get_result::<User>(connection).await?;
+                    let broker = broker::table.filter(broker::pk.eq(task.fk_broker)).get_result::<Broker>(connection).await?;
+                    let system_user = get_system_user();
+
+                    let quota = get_broker_access_quota(&broker, &user, connection).await?;
+                    let mut used_quota = get_broker_quota_used_by_user(broker.pk, user.pk, connection).await?;
+
+                    if let Some(quota) = quota && used_quota > quota as u128 {
+                        log::info!("reconcile_broker_quota_usage_task: Quota exceeded for user '{}' ({}) on broker '{}' ({}) (quota: {}, used: {}), going to clean up posts", &user.user_name, user.pk, &broker.name, broker.pk, quota, used_quota);
+                        let mut deleted_post_count = 0;
+
+                        // First, delete all posts where the s3_object exceeds the quota
+                        let (post_object, derived_object) = diesel::alias!(
+                            s3_object as post_object,
+                            s3_object as derived_object
+                        );
+                        let post_pks_to_delete = post::table
+                            .inner_join(post_object)
+                            .left_join(derived_object.on(
+                                derived_object.field(s3_object::derived_from).eq(post_object.field(s3_object::object_key).nullable())
+                                    .and(derived_object.field(s3_object::fk_broker).eq(broker.pk))
+                            ))
+                            .filter(
+                                post::fk_create_user.eq(user.pk)
+                                    .and(post_object.field(s3_object::fk_broker).eq(broker.pk))
+                                    .and(post_object.field(s3_object::size_bytes).gt(quota).or(
+                                        // also delete post if there is a derived object that exceeds quota
+                                        derived_object.field(s3_object::size_bytes).gt(quota)
+                                    ))
+                            )
+                            .select(post::pk)
+                            .distinct()
+                            .load::<i64>(connection)
+                            .await?;
+
+                        if !post_pks_to_delete.is_empty() {
+                            log::debug!("reconcile_broker_quota_usage_task: Deleting following posts for user '{}' ({}) on broker '{}' ({}): {:?}", &user.user_name, user.pk, &broker.name, broker.pk, &post_pks_to_delete);
+                            deleted_post_count += post_pks_to_delete.len();
+                            for chunk in post_pks_to_delete.chunks(4096) {
+                                execute_delete_posts(chunk, true, &system_user, connection).await?;
+                            }
+                            used_quota = get_broker_quota_used_by_user(broker.pk, user.pk, connection).await?;
+                        }
+
+                        while used_quota > quota as u128 {
+                            let post_pk = post::table
+                                .inner_join(s3_object::table)
+                                .filter(
+                                    post::fk_create_user.eq(user.pk)
+                                        .and(s3_object::fk_broker.eq(broker.pk))
+                                )
+                                .select(post::pk)
+                                .order_by(post::creation_timestamp.asc())
+                                .limit(1)
+                                .first::<i64>(connection)
+                                .await
+                                .optional()?;
+
+                            if let Some(post_pk) = post_pk {
+                                log::debug!("reconcile_broker_quota_usage_task: Deleting post with pk {} for user '{}' ({}) on broker '{}' ({})", post_pk, &user.user_name, user.pk, &broker.name, broker.pk);
+                                deleted_post_count += 1;
+                                execute_delete_posts(&[post_pk], true, &system_user, connection).await?;
+                                used_quota = get_broker_quota_used_by_user(broker.pk, user.pk, connection).await?;
+                            } else {
+                                log::warn!("reconcile_broker_quota_usage_task: No posts left to delete for user '{}' ({}) on broker '{}' ({}) (quota: {:?}, used: {})", &user.user_name, user.pk, &broker.name, broker.pk, quota, used_quota);
+                            }
+                        }
+
+                        log::info!("reconcile_broker_quota_usage_task: Deleted {} posts for user '{}' ({}) on broker '{}' ({}) (quota: {:?}, used: {})", deleted_post_count, &user.user_name, user.pk, &broker.name, broker.pk, quota, used_quota);
+                    } else {
+                        log::info!("reconcile_broker_quota_usage_task: Quota not exceeded for user '{}' ({}) on broker '{}' ({}) (quota: {:?}, used: {})", &user.user_name, user.pk, &broker.name, broker.pk, quota, used_quota);
+                    }
+
+                    Ok(())
+                }.scope_boxed()).await;
+
+                if let Err(e) = res {
+                    log::error!(
+                        "Failed to run reconcile_broker_quota_usage_task {task:?}: {e}");
+                    let res = diesel::update(reconcile_broker_quota_usage_task::table)
+                        .filter(reconcile_broker_quota_usage_task::pk.eq(task.pk))
+                        .set(
+                            reconcile_broker_quota_usage_task::fail_count
+                                .eq(reconcile_broker_quota_usage_task::fail_count + 1),
+                        )
+                        .execute(&mut connection)
+                        .await;
+                    if let Err(e) = res {
+                        log::error!(
+                            "Failed to increment fail_count for reconcile_broker_quota_usage_task {}: {e}",
+                            task.pk
+                        );
+                    }
+                } else {
+                    let delete_task_res = diesel::delete(reconcile_broker_quota_usage_task::table)
+                        .filter(reconcile_broker_quota_usage_task::pk.eq(task.pk))
+                        .execute(&mut connection)
+                        .await;
+                    if let Err(e) = delete_task_res {
+                        log::error!("Failed to delete reconcile_broker_quota_usage_task {}: {e}", task.pk);
                     }
                 }
             }

@@ -1,11 +1,15 @@
 // @generated automatically by Diesel CLI.
 
 pub mod sql_types {
-    #[derive(diesel::sql_types::SqlType)]
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "broker_audit_action"))]
     pub struct BrokerAuditAction;
 
-    #[derive(diesel::sql_types::SqlType)]
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "object_type"))]
+    pub struct ObjectType;
+
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "user_group_audit_action"))]
     pub struct UserGroupAuditAction;
 }
@@ -347,6 +351,9 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::ObjectType;
+
     s3_object (object_key) {
         #[max_length = 255]
         object_key -> Varchar,
@@ -372,6 +379,9 @@ diesel::table! {
         thumbnail_disabled -> Bool,
         metadata_locked_at -> Nullable<Timestamptz>,
         metadata_fail_count -> Nullable<Int4>,
+        #[max_length = 255]
+        derived_from -> Nullable<Varchar>,
+        object_type -> ObjectType,
     }
 }
 

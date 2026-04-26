@@ -12,7 +12,9 @@ use warp::{reject::Rejection, reply::Reply};
 use crate::{
     acquire_db_connection,
     error::{Error, TransactionRuntimeError},
-    model::{DeferredS3ObjectDeletion, HlsStream, Post, PostCollection, S3Object, User},
+    model::{
+        DeferredS3ObjectDeletion, HlsStream, ObjectType, Post, PostCollection, S3Object, User,
+    },
     perms::{self, get_group_membership_administrator_condition},
     run_serializable_transaction,
     schema::{
@@ -96,45 +98,14 @@ pub async fn delete_posts_handler(
 
                 post_pks.retain(|pk| !inaccessible_posts.contains(pk));
 
-                diesel::delete(post_collection_item::table)
-                    .filter(post_collection_item::fk_post.eq_any(&post_pks))
-                    .execute(connection)
-                    .await?;
-
-                diesel::delete(post_group_access::table)
-                    .filter(post_group_access::fk_post.eq_any(&post_pks))
-                    .execute(connection)
-                    .await?;
-
-                diesel::delete(post_tag::table)
-                    .filter(post_tag::fk_post.eq_any(&post_pks))
-                    .execute(connection)
-                    .await?;
-
-                let deleted_posts = diesel::delete(post::table)
-                    .filter(post::pk.eq_any(&post_pks))
-                    .get_results::<Post>(connection)
-                    .await?;
-
-                let deleted_objects = if request.delete_unreferenced_objects.unwrap_or(true) {
-                    let s3_object_keys_to_del = deleted_posts
-                        .iter()
-                        .map(|post| &post.s3_object)
-                        .collect::<Vec<_>>();
-                    if !s3_object_keys_to_del.is_empty() {
-                        delete_unreferenced_objects(&s3_object_keys_to_del, &user, connection)
-                            .await?
-                    } else {
-                        Vec::new()
-                    }
-                } else {
-                    Vec::new()
-                };
-
-                Ok(DeletePostsResponse {
-                    deleted_posts,
-                    deleted_objects,
-                })
+                execute_delete_posts(
+                    &post_pks,
+                    request.delete_unreferenced_objects.unwrap_or(true),
+                    &user,
+                    connection,
+                )
+                .await
+                .map_err(TransactionRuntimeError::from)
             }
             .scope_boxed()
         })
@@ -147,6 +118,52 @@ pub async fn delete_posts_handler(
     };
 
     Ok(warp::reply::json(&res))
+}
+
+pub async fn execute_delete_posts(
+    post_pks: &[i64],
+    delete_objects: bool,
+    user: &User,
+    connection: &mut AsyncPgConnection,
+) -> Result<DeletePostsResponse, Error> {
+    diesel::delete(post_collection_item::table)
+        .filter(post_collection_item::fk_post.eq_any(post_pks))
+        .execute(connection)
+        .await?;
+
+    diesel::delete(post_group_access::table)
+        .filter(post_group_access::fk_post.eq_any(post_pks))
+        .execute(connection)
+        .await?;
+
+    diesel::delete(post_tag::table)
+        .filter(post_tag::fk_post.eq_any(post_pks))
+        .execute(connection)
+        .await?;
+
+    let deleted_posts = diesel::delete(post::table)
+        .filter(post::pk.eq_any(post_pks))
+        .get_results::<Post>(connection)
+        .await?;
+
+    let deleted_objects = if delete_objects {
+        let s3_object_keys_to_del = deleted_posts
+            .iter()
+            .map(|post| &post.s3_object)
+            .collect::<Vec<_>>();
+        if !s3_object_keys_to_del.is_empty() {
+            delete_unreferenced_objects(&s3_object_keys_to_del, user, connection).await?
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    Ok(DeletePostsResponse {
+        deleted_posts,
+        deleted_objects,
+    })
 }
 
 async fn delete_unreferenced_objects(
@@ -253,6 +270,21 @@ pub async fn delete_s3_objects(
         .collect::<Vec<_>>();
     diesel::insert_into(deferred_s3_object_deletion::table)
         .values(deferred_s3_objects_deletions)
+        .execute(connection)
+        .await?;
+
+    // derived avatars from deleted objects can stay but need to be unlinked
+    let deleted_object_keys = deleted_objects
+        .iter()
+        .map(|deleted_object| &deleted_object.object_key)
+        .collect::<Vec<_>>();
+    diesel::update(s3_object::table)
+        .filter(
+            s3_object::derived_from
+                .eq_any(&deleted_object_keys)
+                .and(s3_object::object_type.eq(ObjectType::Avatar)),
+        )
+        .set(s3_object::derived_from.eq(None::<String>))
         .execute(connection)
         .await?;
 
