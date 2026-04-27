@@ -1310,11 +1310,20 @@ fn configure_scheduler() -> Scheduler<Utc> {
     });
     scheduler
         .every(clokwerk::Interval::Days(1))
-        .at("01:00")
+        .at("03:00")
         .run(|| {
             task::submit_task(
                 "run_reconcile_broker_quota_usage_tasks",
                 task::run_reconcile_broker_quota_usage_tasks,
+            );
+        });
+    scheduler
+        .every(clokwerk::Interval::Days(1))
+        .at("01:00")
+        .run(|| {
+            task::submit_task(
+                "run_broker_quota_usage_audits",
+                task::run_broker_quota_usage_audits,
             );
         });
 

@@ -1285,7 +1285,7 @@ pub struct TagEdge {
     pub fk_child: i64,
 }
 
-#[derive(Associations, Identifiable, Queryable, Serialize, Clone)]
+#[derive(Associations, Identifiable, Queryable, QueryableByName, Serialize, Clone)]
 #[diesel(belongs_to(User, foreign_key = fk_owner))]
 #[diesel(table_name = broker)]
 #[diesel(primary_key(pk))]

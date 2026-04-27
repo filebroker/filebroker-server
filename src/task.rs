@@ -9,7 +9,7 @@ use std::{
 use chrono::Utc;
 use diesel::{
     JoinOnDsl, NullableExpressionMethods, OptionalExtension, QueryDsl,
-    sql_types::{Array, VarChar},
+    sql_types::{Array, BigInt, VarChar},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use rusty_pool::ThreadPool;
@@ -20,7 +20,9 @@ use lazy_static::lazy_static;
 use uuid::Uuid;
 
 use crate::broker::{get_broker_access_quota, get_broker_quota_used_by_user};
-use crate::model::{ReconcileBrokerQuotaUsageTask, get_system_user};
+use crate::model::{
+    NewReconcileBrokerQuotaUsageTask, ReconcileBrokerQuotaUsageTask, get_system_user,
+};
 use crate::post::delete::execute_delete_posts;
 use crate::schema::{apply_auto_tags_task, post, reconcile_broker_quota_usage_task, s3_object};
 use crate::tag::auto_matching::run_apply_auto_tags_task;
@@ -909,6 +911,172 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                         log::error!("Failed to delete reconcile_broker_quota_usage_task {}: {e}", task.pk);
                     }
                 }
+            }
+        }
+
+        Ok(())
+    })
+}
+
+pub fn run_broker_quota_usage_audits(tokio_handle: Handle) -> Result<(), Error> {
+    tokio_handle.block_on(async {
+        loop {
+            if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
+                log::warn!(
+                    "Stopping task run_broker_quota_usage_audits because the task pool is shutting down"
+                );
+            }
+
+            let mut connection = acquire_db_connection().await?;
+            let broker_to_check = run_serializable_transaction(&mut connection, |connection| async {
+                diesel::sql_query("
+                    WITH broker_to_update AS(
+                        SELECT * FROM broker
+                        WHERE quota_audit_locked_at IS NULL
+                        AND (last_quota_audit IS NULL OR last_quota_audit < NOW() - interval '1 day')
+                        ORDER BY pk
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE broker SET quota_audit_locked_at = NOW() WHERE quota_audit_locked_at IS NULL AND pk IN(SELECT pk FROM broker_to_update) RETURNING *;
+                ")
+                .get_result::<Broker>(connection)
+                .await
+                .optional()
+                .map_err(retry_on_serialization_failure)
+            }.scope_boxed()).await?;
+
+            let broker_to_check = match broker_to_check {
+                Some(broker) => broker,
+                None => break,
+            };
+
+            log::info!("quota audit: Auditing quota usage for broker '{}' ({})", broker_to_check.name, broker_to_check.pk);
+
+            let _sentinel = LockedObjectsTaskSentinel::new_with_values(
+                "quota_audit_locked_at",
+                "broker",
+                "pk",
+                vec![broker_to_check.pk],
+                &tokio_handle,
+            ).await;
+
+            let res = run_serializable_transaction(&mut connection, |connection| async {
+                let broker_to_check = broker_to_check.clone();
+                let mut violations_found = 0;
+
+                #[derive(QueryableByName)]
+                struct UserOverQuotaQueryResult {
+                    #[diesel(sql_type = BigInt)]
+                    user_pk: i64,
+                }
+
+                let user_over_quota_pks = diesel::sql_query("
+                    WITH users AS (
+                        SELECT DISTINCT fk_uploader AS user_pk
+                        FROM s3_object
+                        WHERE fk_broker = $1
+                          AND fk_uploader <> $2
+                    ),
+
+                    quota_usage AS (
+                        SELECT
+                            fk_uploader AS user_pk,
+                            SUM(size_bytes) FILTER (WHERE object_type = 'original') AS used_quota
+                        FROM s3_object
+                        WHERE fk_broker = $1
+                          AND fk_uploader <> $2
+                        GROUP BY fk_uploader
+                    ),
+
+                    user_applicable_access AS (
+                        SELECT
+                            u.user_pk,
+                            ba.pk    AS broker_access_pk,
+                            ba.quota AS quota,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY u.user_pk
+                                ORDER BY
+                                    ba.fk_granted_user ASC NULLS LAST,
+                                    ba.quota DESC NULLS FIRST
+                            ) AS rn
+                        FROM users u
+                        JOIN broker_access ba
+                          ON ba.fk_broker = $1
+
+                        LEFT JOIN user_group_membership ugm
+                          ON ugm.fk_group = ba.fk_granted_group
+                         AND ugm.fk_user = u.user_pk
+                         AND NOT ugm.revoked
+
+                        WHERE (
+                               ba.public
+                            OR ba.fk_granted_user = u.user_pk
+                            OR ugm.fk_user IS NOT NULL
+                        )
+                    ),
+
+                    resolved_access AS (
+                        SELECT
+                            user_pk,
+                            broker_access_pk,
+                            quota
+                        FROM user_applicable_access
+                        WHERE rn = 1
+                    )
+
+                    SELECT
+                        q.user_pk
+                    FROM quota_usage q
+                    LEFT JOIN resolved_access ra
+                      ON ra.user_pk = q.user_pk
+                    WHERE q.used_quota > COALESCE(ra.quota, 0);
+                ")
+                .bind::<BigInt, _>(broker_to_check.pk)
+                .bind::<BigInt, _>(broker_to_check.fk_owner)
+                .load::<UserOverQuotaQueryResult>(connection)
+                .await?
+                .into_iter()
+                .map(|query_result| query_result.user_pk)
+                .collect::<Vec<_>>();
+
+                for user_pk in user_over_quota_pks {
+                    let user = registered_user::table.filter(registered_user::pk.eq(user_pk)).get_result::<User>(connection).await?;
+
+                    let quota = get_broker_access_quota(&broker_to_check, &user, connection).await?;
+                    let used_quota = get_broker_quota_used_by_user(broker_to_check.pk, user.pk, connection).await?;
+
+                    if let Some(quota) = quota && used_quota > quota as u128 {
+                        let affected = diesel::insert_into(reconcile_broker_quota_usage_task::table)
+                            .values(NewReconcileBrokerQuotaUsageTask {
+                                fk_user: user_pk,
+                                fk_broker: broker_to_check.pk,
+                            })
+                            .on_conflict_do_nothing()
+                            .execute(connection)
+                            .await?;
+
+                        if affected > 0 {
+                            violations_found += 1;
+                            log::warn!("quota audit: Detected quota violation for user '{}' ({}) on broker '{}' ({}) (quota: {}, used: {}), creating reconcile_broker_quota_usage_task", &user.user_name, user.pk, &broker_to_check.name, broker_to_check.pk, quota, used_quota);
+                        }
+                    }
+                }
+
+                Ok(violations_found)
+            }.scope_boxed()).await;
+
+            match res {
+                Ok(violations_found) => log::info!("quota audit: Quota audit completed for broker '{}' ({}), found {} violations", &broker_to_check.name, broker_to_check.pk, violations_found),
+                Err(e) => log::error!("quota audit: Error occurred during quota audit for broker '{}' ({}): {}", &broker_to_check.name, broker_to_check.pk, e)
+            }
+
+            if let Err(e) = diesel::update(broker::table)
+                .set(broker::last_quota_audit.eq(Utc::now()))
+                .filter(broker::pk.eq(broker_to_check.pk))
+                .execute(&mut connection)
+                .await {
+                log::error!("quota audit: Error updating last_quota_audit for broker '{}' ({}): {}", &broker_to_check.name, broker_to_check.pk, e);
             }
         }
 
