@@ -1278,19 +1278,19 @@ fn configure_scheduler() -> Scheduler<Utc> {
     scheduler.every(clokwerk::Interval::Minutes(40)).run(|| {
         task::submit_task(
             "generate_missing_hls_streams",
-            task::generate_missing_hls_streams,
+            task::object_tasks::generate_missing_hls_streams,
         )
     });
     scheduler.every(clokwerk::Interval::Minutes(30)).run(|| {
         task::submit_task(
             "generate_missing_thumbnails",
-            task::generate_missing_thumbnails,
+            task::object_tasks::generate_missing_thumbnails,
         )
     });
     scheduler.every(clokwerk::Interval::Minutes(20)).run(|| {
         task::submit_task(
             "load_missing_object_metadata",
-            task::load_missing_object_metadata,
+            task::object_tasks::load_missing_object_metadata,
         )
     });
     scheduler.every(clokwerk::Interval::Hours(1)).run(|| {
@@ -1302,11 +1302,14 @@ fn configure_scheduler() -> Scheduler<Utc> {
     scheduler.every(clokwerk::Interval::Minutes(15)).run(|| {
         task::submit_task(
             "execute_deferred_s3_object_deletions",
-            task::execute_deferred_s3_object_deletions,
+            task::object_tasks::execute_deferred_s3_object_deletions,
         );
     });
     scheduler.every(clokwerk::Interval::Minutes(10)).run(|| {
-        task::submit_task("run_apply_auto_tags_tasks", task::run_apply_auto_tags_tasks);
+        task::submit_task(
+            "run_apply_auto_tags_tasks",
+            task::tag_tasks::run_apply_auto_tags_tasks,
+        );
     });
     scheduler
         .every(clokwerk::Interval::Days(1))
@@ -1314,7 +1317,7 @@ fn configure_scheduler() -> Scheduler<Utc> {
         .run(|| {
             task::submit_task(
                 "run_reconcile_broker_quota_usage_tasks",
-                task::run_reconcile_broker_quota_usage_tasks,
+                task::broker_tasks::run_reconcile_broker_quota_usage_tasks,
             );
         });
     scheduler
@@ -1323,7 +1326,7 @@ fn configure_scheduler() -> Scheduler<Utc> {
         .run(|| {
             task::submit_task(
                 "run_broker_quota_usage_audits",
-                task::run_broker_quota_usage_audits,
+                task::broker_tasks::run_broker_quota_usage_audits,
             );
         });
 
