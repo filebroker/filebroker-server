@@ -1,0 +1,13 @@
+DROP INDEX reconcile_broker_quota_usage_task_unique_idx;
+DROP TABLE reconcile_broker_quota_usage_task;
+
+DROP TRIGGER on_user_group_membership_change_reconcile_broker_quota_usage ON user_group_membership;
+DROP FUNCTION create_reconcile_broker_quota_usage_task_on_membership_change();
+
+DROP TRIGGER on_broker_access_change_reconcile_broker_quota_usage ON broker_access;
+DROP FUNCTION create_reconcile_broker_quota_usage_task_on_access_change();
+
+DROP INDEX s3_object_fk_broker_fk_uploader_idx;
+
+ALTER TABLE broker DROP COLUMN last_quota_audit;
+ALTER TABLE broker DROP COLUMN quota_audit_locked_at;

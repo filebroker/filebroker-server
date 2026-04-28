@@ -1,11 +1,15 @@
 // @generated automatically by Diesel CLI.
 
 pub mod sql_types {
-    #[derive(diesel::sql_types::SqlType)]
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "broker_audit_action"))]
     pub struct BrokerAuditAction;
 
-    #[derive(diesel::sql_types::SqlType)]
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "object_type"))]
+    pub struct ObjectType;
+
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "user_group_audit_action"))]
     pub struct UserGroupAuditAction;
 }
@@ -47,6 +51,8 @@ diesel::table! {
         description -> Nullable<Text>,
         total_quota -> Nullable<Int8>,
         disable_uploads -> Bool,
+        quota_audit_locked_at -> Nullable<Timestamptz>,
+        last_quota_audit -> Nullable<Timestamptz>,
     }
 }
 
@@ -303,6 +309,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    reconcile_broker_quota_usage_task (pk) {
+        pk -> Int8,
+        fk_user -> Int8,
+        fk_broker -> Int8,
+        creation_timestamp -> Timestamptz,
+        locked_at -> Nullable<Timestamptz>,
+        fail_count -> Int4,
+    }
+}
+
+diesel::table! {
     refresh_token (uuid) {
         uuid -> Uuid,
         expiry -> Timestamptz,
@@ -334,6 +351,9 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::ObjectType;
+
     s3_object (object_key) {
         #[max_length = 255]
         object_key -> Varchar,
@@ -359,6 +379,9 @@ diesel::table! {
         thumbnail_disabled -> Bool,
         metadata_locked_at -> Nullable<Timestamptz>,
         metadata_fail_count -> Nullable<Int4>,
+        #[max_length = 255]
+        derived_from -> Nullable<Varchar>,
+        object_type -> ObjectType,
     }
 }
 
@@ -625,6 +648,8 @@ diesel::joinable!(post_group_access -> registered_user (fk_granted_by));
 diesel::joinable!(post_group_access -> user_group (fk_granted_group));
 diesel::joinable!(post_tag -> post (fk_post));
 diesel::joinable!(post_tag -> tag (fk_tag));
+diesel::joinable!(reconcile_broker_quota_usage_task -> broker (fk_broker));
+diesel::joinable!(reconcile_broker_quota_usage_task -> registered_user (fk_user));
 diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
 diesel::joinable!(s3_object_metadata -> s3_object (object_key));
@@ -669,6 +694,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     post_edit_history_tag,
     post_group_access,
     post_tag,
+    reconcile_broker_quota_usage_task,
     refresh_token,
     registered_user,
     s3_object,

@@ -2,7 +2,7 @@ use crate::data::create_bucket;
 use crate::diesel::ExpressionMethods;
 use crate::diesel::NullableExpressionMethods;
 use crate::error::{Error, TransactionRuntimeError};
-use crate::model::{Broker, BrokerAccess, User, UserGroup, UserPublic};
+use crate::model::{Broker, BrokerAccess, ObjectType, User, UserGroup, UserPublic};
 use crate::perms::{get_broker_access_condition, get_broker_access_write_condition};
 use crate::perms::{
     get_broker_write_condition, get_group_membership_administrator_condition,
@@ -15,10 +15,12 @@ use crate::schema::{
 use crate::{acquire_db_connection, perms, run_repeatable_read_transaction};
 use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::{DateTime, Utc};
-use diesel::dsl::{exists, max, not, sum};
+use diesel::dsl::{case_when, exists, max, not, sum};
 use diesel::query_builder::BoxedSelectStatement;
 use diesel::sql_types::{Array, BigInt, Bool, Nullable, Numeric};
-use diesel::{BoolExpressionMethods, IntoSql, JoinOnDsl, OptionalExtension, QueryDsl};
+use diesel::{
+    BoolExpressionMethods, IntoSql, JoinOnDsl, OptionalExtension, PgSortExpressionMethods, QueryDsl,
+};
 use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use s3::Bucket;
@@ -61,6 +63,83 @@ pub async fn get_broker_joined(
         .ok_or(Error::InaccessibleObjectError(broker_pk))?;
 
     Ok(BrokerJoined { broker, owner })
+}
+
+/// Get the most applicable broker_access quota for the given user. `None` means unlimited quota,
+/// and is returned for broker owner, broker admins, or when a broker_access with unlimited quota exists.
+/// If the user doesn't have access at all, `Some(0)` is returned.
+pub async fn get_broker_access_quota(
+    broker: &Broker,
+    user: &User,
+    connection: &mut AsyncPgConnection,
+) -> Result<Option<i64>, Error> {
+    if broker.fk_owner == user.pk {
+        return Ok(None);
+    }
+    if is_broker_admin(broker.pk, user, connection).await? {
+        return Ok(None);
+    }
+
+    let access = get_applicable_broker_access(broker.pk, user.pk, connection).await?;
+
+    if let Some(access) = access {
+        Ok(access.quota)
+    } else {
+        Ok(Some(0))
+    }
+}
+
+/// Get the most applicable broker_access for the given user. User-specific access is preferred over group-specific access, and the highest quota is returned (nulls first).
+pub async fn get_applicable_broker_access(
+    broker_pk: i64,
+    user_pk: i64,
+    connection: &mut AsyncPgConnection,
+) -> Result<Option<BrokerAccess>, Error> {
+    broker_access::table
+        .filter(
+            broker_access::fk_broker.eq(broker_pk).and(
+                broker_access::public
+                    .or(broker_access::fk_granted_user.eq(user_pk))
+                    .or(broker_access::fk_granted_group.eq_any(
+                        user_group::table
+                            .select(user_group::pk)
+                            .filter(get_group_membership_condition!(user_pk))
+                            .nullable(),
+                    )),
+            ),
+        )
+        .order((
+            broker_access::fk_granted_user.asc().nulls_last(),
+            broker_access::quota.desc().nulls_first(),
+        ))
+        .first::<BrokerAccess>(connection)
+        .await
+        .optional()
+        .map_err(Error::from)
+}
+
+pub async fn get_broker_quota_used_by_user(
+    broker_pk: i64,
+    user_pk: i64,
+    connection: &mut AsyncPgConnection,
+) -> Result<u128, Error> {
+    let used_quota: BigDecimal = s3_object::table
+        .select(sum(s3_object::size_bytes))
+        .filter(
+            s3_object::fk_broker
+                .eq(broker_pk)
+                .and(s3_object::fk_uploader.eq(user_pk))
+                .and(s3_object::object_type.eq(ObjectType::Original)),
+        )
+        .get_result::<Option<BigDecimal>>(connection)
+        .await?
+        .unwrap_or_default();
+
+    used_quota
+        .to_u128()
+        .ok_or(Error::InternalError(String::from(
+            "Used quota cannot be converted to u128",
+        )))
 }
 
 pub async fn is_broker_public(
@@ -127,6 +206,7 @@ pub struct BrokerDetailed {
     pub is_public: bool,
     pub is_admin: bool,
     pub used_bytes: i64,
+    pub used_quota: i64,
     pub quota_bytes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     // only include for single broker, not broker lists
@@ -144,27 +224,43 @@ pub async fn get_broker_handler(broker_pk: i64, user: User) -> Result<impl Reply
             let is_admin =
                 owner.pk == user.pk || is_broker_admin(broker.pk, &user, connection).await?;
 
-            let used_bytes = s3_object::table
+            let (used_bytes, used_quota) = s3_object::table
                 .group_by(s3_object::fk_broker)
-                .select(sum(s3_object::size_bytes))
+                .select((
+                    sum(s3_object::size_bytes),
+                    sum(case_when(
+                        s3_object::object_type.eq(ObjectType::Original),
+                        s3_object::size_bytes,
+                    )
+                    .otherwise(0)),
+                ))
                 .filter(
                     s3_object::fk_uploader
                         .eq(user.pk)
                         .and(s3_object::fk_broker.eq(broker.pk)),
                 )
-                .get_result::<Option<BigDecimal>>(connection)
+                .get_result::<(Option<BigDecimal>, Option<BigDecimal>)>(connection)
                 .await
                 .optional()
                 .map_err(Error::from)?
-                .flatten()
-                .map(|usage_bytes| {
-                    usage_bytes.to_i64().ok_or_else(|| {
+                .map(|(usage_bytes, usage_quota)| {
+                    let usage_bytes = usage_bytes.unwrap_or_default();
+                    let used_bytes = usage_bytes.to_i64().ok_or_else(|| {
                         Error::InternalError(format!(
                             "Could not convert broker usage bytes {usage_bytes} to i64"
                         ))
-                    })
+                    })?;
+
+                    let usage_quota = usage_quota.unwrap_or_default();
+                    let used_quota = usage_quota.to_i64().ok_or_else(|| {
+                        Error::InternalError(format!(
+                            "Could not convert broker usage bytes {usage_quota} to i64"
+                        ))
+                    })?;
+
+                    Ok::<(i64, i64), Error>((used_bytes, used_quota))
                 })
-                .unwrap_or(Ok(0))?;
+                .unwrap_or(Ok((0, 0)))?;
 
             let is_unlimited = broker::table
                 .select(broker::pk)
@@ -251,6 +347,7 @@ pub async fn get_broker_handler(broker_pk: i64, user: User) -> Result<impl Reply
                 is_public,
                 is_admin,
                 used_bytes,
+                used_quota,
                 quota_bytes,
                 total_used_bytes,
             })
@@ -372,28 +469,28 @@ pub async fn get_brokers_handler(
                 .load::<i64>(connection)
                 .await?;
 
-            let (broker_usages, unlimited_brokers, broker_quotas) =
-                load_broker_quota_usages(&broker_pks, &user, connection).await?;
+            let BrokerUsageInformation {
+                broker_quota_usages,
+                unlimited_access_brokers,
+                broker_quota_limits,
+            } = load_broker_quota_usages(&broker_pks, &user, connection).await?;
 
             let brokers = records
                 .into_iter()
                 .map(|(broker, owner)| {
                     let is_admin = admin_brokers.contains(&broker.pk);
                     let is_public = public_brokers.contains(&broker.pk);
-                    let used_bytes = broker_usages
+                    let BrokerQuotaUsage {
+                        used_bytes,
+                        used_quota,
+                    } = broker_quota_usages
                         .get(&broker.pk)
-                        .map(|usage_bytes| {
-                            usage_bytes.to_i64().ok_or_else(|| {
-                                Error::InternalError(format!(
-                                    "Could not convert broker usage bytes {usage_bytes} to i64"
-                                ))
-                            })
-                        })
-                        .unwrap_or(Ok(0))?;
-                    let quota_bytes = if unlimited_brokers.contains(&broker.pk) {
+                        .copied()
+                        .unwrap_or_default();
+                    let quota_bytes = if unlimited_access_brokers.contains(&broker.pk) {
                         None
                     } else {
-                        broker_quotas.get(&broker.pk).cloned().flatten()
+                        broker_quota_limits.get(&broker.pk).cloned().flatten()
                     };
 
                     Ok(BrokerDetailed {
@@ -424,6 +521,7 @@ pub async fn get_brokers_handler(
                         is_public,
                         is_admin,
                         used_bytes,
+                        used_quota,
                         quota_bytes,
                         total_used_bytes: None,
                     })
@@ -446,6 +544,7 @@ pub async fn get_brokers_handler(
 pub struct BrokerAvailability {
     pub broker: Broker,
     pub used_bytes: i64,
+    pub used_quota: i64,
     pub quota_bytes: Option<i64>,
 }
 
@@ -454,30 +553,31 @@ pub async fn get_available_brokers_handler(user: User) -> Result<impl Reply, Rej
     let brokers = perms::get_available_brokers_secured(&mut connection, Some(&user)).await?;
     let broker_pks = brokers.iter().map(|b| b.pk).collect::<Vec<i64>>();
 
-    let (broker_usages, unlimited_brokers, broker_quotas) =
-        load_broker_quota_usages(&broker_pks, &user, &mut connection).await?;
+    let BrokerUsageInformation {
+        broker_quota_usages,
+        unlimited_access_brokers,
+        broker_quota_limits,
+    } = load_broker_quota_usages(&broker_pks, &user, &mut connection).await?;
 
     let mut broker_availabilities = Vec::new();
     for broker in brokers {
-        let used_bytes = broker_usages
+        let BrokerQuotaUsage {
+            used_bytes,
+            used_quota,
+        } = broker_quota_usages
             .get(&broker.pk)
-            .map(|usage_bytes| {
-                usage_bytes.to_i64().ok_or_else(|| {
-                    Error::InternalError(format!(
-                        "Could not convert broker usage bytes {usage_bytes} to i64"
-                    ))
-                })
-            })
-            .unwrap_or(Ok(0))?;
-        let quota_bytes = if unlimited_brokers.contains(&broker.pk) {
+            .copied()
+            .unwrap_or_default();
+        let quota_bytes = if unlimited_access_brokers.contains(&broker.pk) {
             None
         } else {
-            broker_quotas.get(&broker.pk).cloned().flatten()
+            broker_quota_limits.get(&broker.pk).cloned().flatten()
         };
 
         broker_availabilities.push(BrokerAvailability {
             broker,
             used_bytes,
+            used_quota,
             quota_bytes,
         });
     }
@@ -485,34 +585,71 @@ pub async fn get_available_brokers_handler(user: User) -> Result<impl Reply, Rej
     Ok(warp::reply::json(&broker_availabilities))
 }
 
+struct BrokerUsageInformation {
+    broker_quota_usages: HashMap<i64, BrokerQuotaUsage>,
+    unlimited_access_brokers: HashSet<i64>,
+    broker_quota_limits: HashMap<i64, Option<i64>>,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub struct BrokerQuotaUsage {
+    /// total bytes used by user on the broker, including derived system data like thumbs and HLS segments
+    pub used_bytes: i64,
+    /// total quota relevant bytes used by user on the broker, only including direct uploads
+    pub used_quota: i64,
+}
+
 async fn load_broker_quota_usages(
     broker_pks: &[i64],
     user: &User,
     connection: &mut AsyncPgConnection,
-) -> Result<
-    (
-        HashMap<i64, BigDecimal>,
-        HashSet<i64>,
-        HashMap<i64, Option<i64>>,
-    ),
-    Error,
-> {
-    let broker_usages = s3_object::table
+) -> Result<BrokerUsageInformation, Error> {
+    let broker_quota_usages = s3_object::table
         .group_by(s3_object::fk_broker)
-        .select((s3_object::fk_broker, sum(s3_object::size_bytes)))
+        .select((
+            s3_object::fk_broker,
+            sum(s3_object::size_bytes),
+            sum(case_when(
+                s3_object::object_type.eq(ObjectType::Original),
+                s3_object::size_bytes,
+            )
+            .otherwise(0)),
+        ))
         .filter(
             s3_object::fk_uploader
                 .eq(user.pk)
                 .and(s3_object::fk_broker.eq_any(broker_pks)),
         )
-        .load::<(i64, Option<BigDecimal>)>(connection)
+        .load::<(i64, Option<BigDecimal>, Option<BigDecimal>)>(connection)
         .await
         .map_err(Error::from)?
         .into_iter()
-        .map(|(broker_pk, size_used)| (broker_pk, size_used.unwrap_or(BigDecimal::from(0))))
-        .collect::<HashMap<i64, BigDecimal>>();
+        .map(|(broker_pk, size_used, quota_used)| {
+            let size_used = size_used.unwrap_or_default();
+            let used_bytes = size_used.to_i64().ok_or_else(|| {
+                Error::InternalError(format!(
+                    "Could not convert broker usage bytes {size_used} to i64"
+                ))
+            })?;
 
-    let unlimited_brokers =
+            let quota_used = quota_used.unwrap_or_default();
+            let used_quota = quota_used.to_i64().ok_or_else(|| {
+                Error::InternalError(format!(
+                    "Could not convert broker quota bytes {quota_used} to i64"
+                ))
+            })?;
+
+            Ok((
+                broker_pk,
+                BrokerQuotaUsage {
+                    used_bytes,
+                    used_quota,
+                },
+            ))
+        })
+        .collect::<Result<HashMap<i64, BrokerQuotaUsage>, Error>>()?;
+
+    let unlimited_access_brokers =
         broker::table
             .select(broker::pk)
             .filter(
@@ -533,7 +670,7 @@ async fn load_broker_quota_usages(
             .into_iter()
             .collect::<HashSet<i64>>();
 
-    let broker_quotas = broker::table
+    let broker_quota_limits = broker::table
         .inner_join(
             broker_access::table
                 .on(get_broker_access_condition!(user.pk).and(broker_access::quota.is_not_null())),
@@ -543,7 +680,7 @@ async fn load_broker_quota_usages(
         .filter(
             broker::pk
                 .eq_any(broker_pks)
-                .and(not(broker::pk.eq_any(&unlimited_brokers))),
+                .and(not(broker::pk.eq_any(&unlimited_access_brokers))),
         )
         .load::<(i64, Option<i64>)>(connection)
         .await
@@ -551,7 +688,11 @@ async fn load_broker_quota_usages(
         .into_iter()
         .collect::<HashMap<i64, Option<i64>>>();
 
-    Ok((broker_usages, unlimited_brokers, broker_quotas))
+    Ok(BrokerUsageInformation {
+        broker_quota_usages,
+        unlimited_access_brokers,
+        broker_quota_limits,
+    })
 }
 
 #[derive(Serialize)]
@@ -614,6 +755,9 @@ pub struct BrokerAccessUsage {
 
     #[diesel(sql_type = Nullable<Numeric>)]
     used_bytes: Option<BigDecimal>,
+
+    #[diesel(sql_type = Nullable<Numeric>)]
+    used_quota: Option<BigDecimal>,
 }
 
 #[derive(Deserialize, Validate)]
@@ -632,6 +776,7 @@ pub struct BrokerAccessInnerJoined {
     pub write: bool,
     pub quota: Option<i64>,
     pub used_bytes: i64,
+    pub used_quota: i64,
     pub granted_by: UserPublic,
     pub creation_timestamp: DateTime<Utc>,
     pub granted_user: Option<UserPublic>,
@@ -743,50 +888,55 @@ pub async fn get_broker_access_handler(
                 .collect::<Vec<_>>();
             let broker_access_usages = diesel::sql_query(
                 r#"
-                WITH group_users AS (
-                    SELECT DISTINCT ugm.fk_user
-                    FROM broker_access ba
-                    JOIN user_group_membership ugm
+                WITH user_applicable_access AS (
+                    SELECT
+                        so.fk_uploader        AS user_pk,
+                        ba.pk                 AS broker_access_pk,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY so.fk_uploader
+                            ORDER BY
+                                ba.fk_granted_user ASC NULLS LAST,
+                                ba.quota DESC NULLS FIRST
+                        ) AS rn
+                    FROM s3_object so
+
+                    JOIN broker_access ba
+                      ON ba.fk_broker = so.fk_broker
+
+                    LEFT JOIN user_group_membership ugm
                       ON ugm.fk_group = ba.fk_granted_group
-                    WHERE ba.fk_broker = $1
-                      AND ba.fk_granted_group IS NOT NULL
+                     AND ugm.fk_user = so.fk_uploader
+                     AND NOT ugm.revoked
+
+                    WHERE so.fk_broker = $1
                       AND ba.pk = ANY($2)
-                      AND NOT ugm.revoked
-                      AND ugm.fk_user <> $3
+                      AND so.fk_uploader <> $3
+
+                      AND (
+                           ba.public
+                        OR ba.fk_granted_user = so.fk_uploader
+                        OR ugm.fk_user IS NOT NULL
+                      )
+                ),
+
+                resolved_access AS (
+                    SELECT
+                        user_pk,
+                        broker_access_pk
+                    FROM user_applicable_access
+                    WHERE rn = 1
                 )
 
                 SELECT
-                    ba.pk               AS broker_access_pk,
-                    SUM(so.size_bytes)  AS used_bytes
-                FROM broker_access ba
-                JOIN user_group_membership ugm
-                  ON ugm.fk_group = ba.fk_granted_group
+                    ra.broker_access_pk,
+                    SUM(so.size_bytes) AS used_bytes,
+                    SUM(so.size_bytes) FILTER (WHERE so.object_type = 'original') AS used_quota
+                FROM resolved_access ra
                 JOIN s3_object so
-                  ON so.fk_uploader = ugm.fk_user
-                  AND so.fk_broker   = ba.fk_broker
-                WHERE ba.fk_broker = $1
-                  AND ba.fk_granted_group IS NOT NULL
-                  AND ba.pk = ANY($2)
-                  AND NOT ugm.revoked
-                  AND so.fk_uploader <> $3
-                GROUP BY ba.pk
-
-                UNION ALL
-
-                SELECT
-                    ba.pk               AS broker_access_pk,
-                    SUM(so.size_bytes)  AS used_bytes
-                FROM broker_access ba
-                JOIN s3_object so
-                  ON so.fk_broker = ba.fk_broker
-                LEFT JOIN group_users gu
-                  ON gu.fk_user = so.fk_uploader
-                WHERE ba.fk_broker = $1
-                  AND ba.fk_granted_group IS NULL
-                  AND ba.pk = ANY($2)
-                  AND gu.fk_user IS NULL
-                  AND so.fk_uploader <> $3
-                GROUP BY ba.pk
+                  ON so.fk_uploader = ra.user_pk
+                 AND so.fk_broker   = $1
+                WHERE so.fk_uploader <> $3
+                GROUP BY ra.broker_access_pk;
                 "#,
             )
             .bind::<BigInt, _>(broker.pk)
@@ -796,29 +946,40 @@ pub async fn get_broker_access_handler(
             .await?
             .into_iter()
             .map(|broker_access_usage| {
-                (
+                let size_used = broker_access_usage.used_bytes.unwrap_or_default();
+                let used_bytes = size_used.to_i64().ok_or_else(|| {
+                    Error::InternalError(format!(
+                        "Could not convert broker access usage bytes {size_used} to i64"
+                    ))
+                })?;
+
+                let quota_used = broker_access_usage.used_quota.unwrap_or_default();
+                let used_quota = quota_used.to_i64().ok_or_else(|| {
+                    Error::InternalError(format!(
+                        "Could not convert broker access quota bytes {quota_used} to i64"
+                    ))
+                })?;
+
+                Ok((
                     broker_access_usage.broker_access_pk,
-                    broker_access_usage
-                        .used_bytes
-                        .unwrap_or(BigDecimal::from(0)),
-                )
+                    BrokerQuotaUsage {
+                        used_bytes,
+                        used_quota,
+                    },
+                ))
             })
-            .collect::<HashMap<i64, BigDecimal>>();
+            .collect::<Result<HashMap<i64, BrokerQuotaUsage>, Error>>()?;
 
             let broker_access = records
                 .into_iter()
                 .map(|(broker_access, granted_group, granted_user, granted_by)| {
-                    let used_bytes = broker_access_usages
+                    let BrokerQuotaUsage {
+                        used_bytes,
+                        used_quota,
+                    } = broker_access_usages
                         .get(&broker_access.pk)
-                        .map(|bytes_decimal| {
-                            bytes_decimal.to_i64().ok_or_else(|| {
-                                Error::InternalError(format!(
-                                    "Could not convert broker usage bytes {bytes_decimal} to i64"
-                                ))
-                            })
-                        })
-                        .transpose()?
-                        .unwrap_or(0);
+                        .copied()
+                        .unwrap_or_default();
 
                     Ok(BrokerAccessInnerJoined {
                         pk: broker_access.pk,
@@ -826,6 +987,7 @@ pub async fn get_broker_access_handler(
                         write: broker_access.write,
                         quota: broker_access.quota,
                         used_bytes,
+                        used_quota,
                         granted_by,
                         creation_timestamp: broker_access.creation_timestamp,
                         granted_user,

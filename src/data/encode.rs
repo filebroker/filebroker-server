@@ -27,7 +27,8 @@ use crate::{
     diesel::ExpressionMethods,
     error::Error,
     model::{
-        Broker, HlsStream, PgIntervalQuery, PgIntervalWrapper, S3Object, S3ObjectMetadata, User,
+        Broker, HlsStream, ObjectType, PgIntervalQuery, PgIntervalWrapper, S3Object,
+        S3ObjectMetadata, User,
     },
     query::functions::substring,
     retry_on_serialization_failure, run_retryable_transaction, run_serializable_transaction,
@@ -753,6 +754,8 @@ pub async fn generate_avatar(
         thumbnail_disabled: true,
         metadata_locked_at: None,
         metadata_fail_count: None,
+        derived_from: Some(source_object_key),
+        object_type: ObjectType::Avatar,
     })
 }
 
@@ -935,6 +938,8 @@ pub async fn generate_thumbnail(
                         thumbnail_disabled: true,
                         metadata_locked_at: None,
                         metadata_fail_count: None,
+                        derived_from: Some(source_object_key.clone()),
+                        object_type: ObjectType::Thumbnail,
                     })
                     .get_result::<S3Object>(connection)
                     .await
@@ -1752,7 +1757,7 @@ async fn persist_hls_transcode_results(
         thumbnail_object_key: None,
         creation_timestamp: Utc::now(),
         filename: None,
-        hls_master_playlist: None,
+        hls_master_playlist: Some(master_playlist_result.path.clone()),
         hls_disabled: true,
         hls_locked_at: None,
         thumbnail_locked_at: None,
@@ -1761,6 +1766,8 @@ async fn persist_hls_transcode_results(
         thumbnail_disabled: true,
         metadata_locked_at: None,
         metadata_fail_count: None,
+        derived_from: Some(source_object_key.to_string()),
+        object_type: ObjectType::HlsPlaylist,
     }];
 
     let mut hls_streams = Vec::new();
@@ -1779,7 +1786,7 @@ async fn persist_hls_transcode_results(
             thumbnail_object_key: None,
             creation_timestamp: Utc::now(),
             filename: None,
-            hls_master_playlist: None,
+            hls_master_playlist: Some(master_playlist_result.path.clone()),
             hls_disabled: true,
             hls_locked_at: None,
             thumbnail_locked_at: None,
@@ -1788,6 +1795,8 @@ async fn persist_hls_transcode_results(
             thumbnail_disabled: true,
             metadata_locked_at: None,
             metadata_fail_count: None,
+            derived_from: Some(source_object_key.to_string()),
+            object_type: ObjectType::HlsPlaylist,
         });
 
         s3_objects.push(S3Object {
@@ -1800,7 +1809,7 @@ async fn persist_hls_transcode_results(
             thumbnail_object_key: None,
             creation_timestamp: Utc::now(),
             filename: None,
-            hls_master_playlist: None,
+            hls_master_playlist: Some(master_playlist_result.path.clone()),
             hls_disabled: true,
             hls_locked_at: None,
             thumbnail_locked_at: None,
@@ -1809,6 +1818,8 @@ async fn persist_hls_transcode_results(
             thumbnail_disabled: true,
             metadata_locked_at: None,
             metadata_fail_count: None,
+            derived_from: Some(source_object_key.to_string()),
+            object_type: ObjectType::HlsSegment,
         });
     }
 

@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate diesel;
 use chrono::Utc;
-use clokwerk::Scheduler;
+use clokwerk::{Job, Scheduler};
 use diesel::{ConnectionError, ConnectionResult};
 use diesel_async::{
     AsyncPgConnection,
@@ -1308,6 +1308,24 @@ fn configure_scheduler() -> Scheduler<Utc> {
     scheduler.every(clokwerk::Interval::Minutes(10)).run(|| {
         task::submit_task("run_apply_auto_tags_tasks", task::run_apply_auto_tags_tasks);
     });
+    scheduler
+        .every(clokwerk::Interval::Days(1))
+        .at("03:00")
+        .run(|| {
+            task::submit_task(
+                "run_reconcile_broker_quota_usage_tasks",
+                task::run_reconcile_broker_quota_usage_tasks,
+            );
+        });
+    scheduler
+        .every(clokwerk::Interval::Days(1))
+        .at("01:00")
+        .run(|| {
+            task::submit_task(
+                "run_broker_quota_usage_audits",
+                task::run_broker_quota_usage_audits,
+            );
+        });
 
     scheduler
 }
