@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use diesel::{
     JoinOnDsl, NullableExpressionMethods, OptionalExtension, QueryDsl,
     sql_types::{Array, BigInt, VarChar},
@@ -35,7 +35,7 @@ use crate::{
     diesel::{BoolExpressionMethods, ExpressionMethods},
     error::Error,
     model::{ApplyAutoTagsTask, Broker, DeferredS3ObjectDeletion, S3Object, User},
-    retry_on_serialization_failure, run_serializable_transaction,
+    retry_on_constraint_violation, retry_on_serialization_failure, run_serializable_transaction,
     schema::{
         broker, deferred_s3_object_deletion, email_confirmation_token, one_time_password,
         refresh_token, registered_user,
@@ -536,6 +536,62 @@ pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
                 .await
                 .map_err(retry_on_serialization_failure)?;
 
+            diesel::sql_query("UPDATE reconcile_broker_quota_usage_task SET locked_at = NULL WHERE locked_at < NOW() - interval '1 day' AND NOT(fail_count < 3)")
+                .execute(connection)
+                .await
+                .map_err(retry_on_serialization_failure)?;
+            // avoid unlocking reconcile_broker_quota_usage_task violating unique index: "reconcile_broker_quota_usage_task_unique_idx" UNIQUE, btree (fk_user, fk_broker) WHERE locked_at IS NULL AND fail_count < 3
+            // delete stale tasks where an unlocked task for the same user and broker exists, and deduplicate locked tasks
+            diesel::sql_query(r#"
+                WITH ranked AS (
+                    SELECT
+                        pk,
+                        fk_user,
+                        fk_broker,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY fk_user, fk_broker
+                            ORDER BY fail_count, pk
+                        ) AS rn
+                    FROM reconcile_broker_quota_usage_task
+                    WHERE locked_at < NOW() - interval '1 day'
+                      AND fail_count < 3
+                ),
+                deleted AS (
+                    DELETE FROM reconcile_broker_quota_usage_task t
+                    USING ranked r
+                    WHERE t.pk = r.pk
+                      AND (
+                          r.rn > 1
+                          OR EXISTS (
+                              SELECT *
+                              FROM reconcile_broker_quota_usage_task other
+                              WHERE other.fk_user = r.fk_user
+                                AND other.fk_broker = r.fk_broker
+                                AND other.locked_at IS NULL
+                                AND other.fail_count < 3
+                          )
+                      )
+                    RETURNING t.pk
+                )
+                UPDATE reconcile_broker_quota_usage_task t
+                SET locked_at = NULL
+                FROM ranked r
+                WHERE t.pk = r.pk
+                  AND r.rn = 1
+                  AND NOT EXISTS (
+                      SELECT *
+                      FROM deleted d
+                      WHERE d.pk = t.pk
+                  );
+                "#)
+                .execute(connection)
+                .await?;
+
+            diesel::sql_query("UPDATE broker SET quota_audit_locked_at = NULL WHERE quota_audit_locked_at < NOW() - interval '1 day'")
+                .execute(connection)
+                .await
+                .map_err(retry_on_serialization_failure)?;
+
             Ok(())
         }.scope_boxed()).await
     })
@@ -794,11 +850,12 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
 
             log::info!("Found {} reconcile_broker_quota_usage_tasks to run (grace period: {})", tasks.len(), &grace_period);
 
-            let _sentinel = LockedObjectsTaskSentinel::new_with_values(
+            let task_keys = tasks.iter().map(|t| t.pk).collect::<Vec<i64>>();
+            let sentinel = LockedObjectsTaskSentinel::new_with_values(
                 "locked_at",
                 "reconcile_broker_quota_usage_task",
                 "pk",
-                tasks.iter().map(|t| t.pk).collect::<Vec<i64>>(),
+                task_keys.clone(),
                 &tokio_handle,
             ).await;
 
@@ -912,6 +969,46 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                     }
                 }
             }
+
+            sentinel.release_manually(async move {
+                let res: Result<(), Error> = async {
+                    let mut connection = acquire_db_connection().await?;
+                    run_serializable_transaction(&mut connection, |connection| async {
+                        // first delete tasks that have become obsolete because a new task for the same user/broker combination has been created while this task was locked
+                        diesel::sql_query(r#"
+                            DELETE FROM reconcile_broker_quota_usage_task task
+                            WHERE pk = ANY($1)
+                            AND EXISTS (
+                                SELECT *
+                                FROM reconcile_broker_quota_usage_task other
+                                WHERE task.fk_user = other.fk_user
+                                  AND task.fk_broker = other.fk_broker
+                                  AND other.fail_count < 3
+                                  AND other.pk != task.pk
+                            )
+                            "#)
+                            .bind::<Array<BigInt>, _>(&task_keys)
+                            .execute(connection)
+                            .await?;
+
+                        diesel::update(reconcile_broker_quota_usage_task::table)
+                            .filter(reconcile_broker_quota_usage_task::pk.eq_any(&task_keys))
+                            .set(reconcile_broker_quota_usage_task::locked_at.eq(None::<DateTime<Utc>>))
+                            .execute(connection)
+                            .await
+                            .map_err(retry_on_constraint_violation)?;
+
+                        Ok(())
+                    }.scope_boxed()).await?;
+                    Ok(())
+                }.await;
+
+                if let Err(e) = res {
+                    log::error!("Failed to release reconcile_broker_quota_usage_task locks: {e}");
+                } else {
+                    log::debug!("Successfully released reconcile_broker_quota_usage_task locks for tasks {task_keys:?}");
+                }
+            });
         }
 
         Ok(())
@@ -1114,6 +1211,7 @@ where
     pub object_keys: Vec<T>,
     pub refresh_task_join_handle: JoinHandle<()>,
     pub update_mutex: Arc<Mutex<()>>,
+    manually_released: bool,
 }
 
 impl<T> LockedObjectsTaskSentinel<T>
@@ -1240,7 +1338,17 @@ where
             key_column,
             refresh_task_join_handle,
             update_mutex,
+            manually_released: false,
         }
+    }
+
+    pub fn release_manually<F: Future + Send + 'static>(mut self, fut: F) {
+        self.refresh_task_join_handle.abort();
+        self.manually_released = true;
+        tokio::spawn(async move {
+            let _mutex = self.update_mutex.lock().await;
+            fut.await;
+        });
     }
 }
 
@@ -1250,6 +1358,10 @@ where
     diesel::pg::Pg: diesel::sql_types::HasSqlType<T::Sql>,
 {
     fn drop(&mut self) {
+        if self.manually_released {
+            return;
+        }
+
         self.refresh_task_join_handle.abort();
         let update_mutex = self.update_mutex.clone();
         let object_keys = std::mem::take(&mut self.object_keys);
