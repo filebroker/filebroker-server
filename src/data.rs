@@ -23,6 +23,7 @@ use crate::schema::{registered_user, user_group_audit_log};
 use crate::user_group::load_user_group_detailed;
 use crate::{
     acquire_db_connection,
+    data::encode::avatar::generate_avatar,
     diesel::{ExpressionMethods, OptionalExtension},
     error::Error,
     model::{Broker, S3Object, S3ObjectMetadata, User},
@@ -442,7 +443,7 @@ pub async fn create_user_avatar_handler(
         )))
     })?;
 
-    let avatar_object = encode::generate_avatar(
+    let avatar_object = generate_avatar(
         request.source_object_key,
         user.pk,
         request.width,
@@ -508,7 +509,7 @@ pub async fn create_user_group_avatar_handler(
     }
     drop(connection);
 
-    let avatar_object = encode::generate_avatar(
+    let avatar_object = generate_avatar(
         request.source_object_key,
         user.pk,
         request.width,

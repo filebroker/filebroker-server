@@ -12,7 +12,9 @@ use super::s3utils;
 use crate::broker::is_broker_admin;
 use crate::{
     acquire_db_connection, broker,
-    data::encode::{generate_hls_playlist, generate_thumbnail, load_object_metadata},
+    data::encode::{
+        hls::generate_hls_playlist, metadata::load_object_metadata, thumb::generate_thumbnail,
+    },
     diesel::{BoolExpressionMethods, ExpressionMethods},
     error::Error,
     model::{Broker, BrokerAccess, ObjectType, S3Object, User},

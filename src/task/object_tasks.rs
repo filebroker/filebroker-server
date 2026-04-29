@@ -1,5 +1,10 @@
+use crate::data::create_bucket;
 use crate::data::encode::{SUBMITTED_HLS_TRANSCODINGS, VIDEO_TRANSCODE_SEMAPHORE};
-use crate::data::{create_bucket, encode};
+use crate::data::encode::{
+    hls::{generate_hls_playlist, is_hls_supported_on_current_platform},
+    metadata::load_object_metadata,
+    thumb::generate_thumbnail,
+};
 use crate::error::Error;
 use crate::model::{Broker, DeferredS3ObjectDeletion, S3Object, User};
 use crate::schema::{broker, deferred_s3_object_deletion, registered_user};
@@ -24,7 +29,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
         log::info!("generate_missing_hls_streams disabled");
         return Ok(());
     }
-    if !encode::is_hls_supported_on_current_platform() {
+    if !is_hls_supported_on_current_platform() {
         log::warn!(
             "Skipping generate_missing_hls_streams because it is unsupported on the current platform"
         );
@@ -125,7 +130,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                     }
                 };
 
-                if let Err(e) = encode::generate_hls_playlist(
+                if let Err(e) = generate_hls_playlist(
                     bucket,
                     object.object_key.clone(),
                     file_id,
@@ -252,7 +257,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                     }
                 };
 
-                if let Err(e) = encode::generate_thumbnail(
+                if let Err(e) = generate_thumbnail(
                     bucket,
                     object.object_key.clone(),
                     file_id,
@@ -340,7 +345,7 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
                     return Ok(());
                 }
 
-                if let Err(e) = encode::load_object_metadata(object.object_key.clone(), true).await {
+                if let Err(e) = load_object_metadata(object.object_key.clone(), true).await {
                     log::error!("Failed to load metadata for object {}: {}", &object.object_key, e);
                     if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
                         log::warn!("Stopping task load_missing_object_metadata because the task pool is shutting down");
