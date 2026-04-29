@@ -1,6 +1,6 @@
 use std::cmp;
 
-use rand::{Rng, distr::Alphanumeric};
+use rand::{RngExt, distr::Alphanumeric};
 use s3::Bucket;
 use warp::hyper;
 
