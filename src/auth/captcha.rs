@@ -1,9 +1,9 @@
-use std::net::SocketAddr;
+use std::net::IpAddr;
 
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 
-use crate::{error::Error, util};
+use crate::error::Error;
 
 lazy_static! {
     pub static ref CAPTCHA_SITE_KEY: Option<String> =
@@ -31,12 +31,12 @@ pub struct CaptchaResponse {
 pub async fn verify_captcha(
     secret: String,
     token: String,
-    remote_addr: Option<SocketAddr>,
+    remote_addr: Option<IpAddr>,
 ) -> Result<(), Error> {
     let request = CaptchaRequest {
         secret,
         response: token,
-        remoteip: remote_addr.map(|addr| util::addr_to_ip_string(&addr)),
+        remoteip: remote_addr.map(|addr| addr.to_string()),
         sitekey: CAPTCHA_SITE_KEY.clone(),
     };
 

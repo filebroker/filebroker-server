@@ -1,6 +1,5 @@
 use std::{
     fmt,
-    net::SocketAddr,
     ops::{Deref, DerefMut},
     time::Duration,
 };
@@ -132,13 +131,6 @@ pub fn join_url<'a>(
         path_segments.push(segment);
     }
     Ok(())
-}
-
-pub fn addr_to_ip_string(addr: &SocketAddr) -> String {
-    match addr {
-        SocketAddr::V4(addr) => addr.ip().to_string(),
-        SocketAddr::V6(addr) => addr.ip().to_string(),
-    }
 }
 
 pub fn dedup_vec_optional<T: PartialEq + Ord>(vec: &mut Option<Vec<T>>) {

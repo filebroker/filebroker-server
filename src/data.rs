@@ -1,22 +1,3 @@
-use chrono::Utc;
-use diesel::QueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
-use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use futures::{Stream, TryStreamExt};
-use lazy_static::lazy_static;
-use mime::Mime;
-use mpart_async::server::MultipartStream;
-use ring::digest;
-use s3::{Bucket, Region, creds::Credentials};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use validator::Validate;
-use warp::{
-    Buf, Rejection, Reply,
-    hyper::{self, Response},
-    path::Peek,
-};
-
 use crate::model::{NewUserGroupAuditLog, UserGroup, UserGroupAuditAction, get_system_user};
 use crate::post::delete::delete_s3_objects;
 use crate::schema::{registered_user, user_group_audit_log};
@@ -34,6 +15,23 @@ use crate::{
     schema::{broker, s3_object, s3_object_metadata, user_group},
     util::NOT_BLANK_REGEX,
 };
+use bytes::Bytes;
+use chrono::Utc;
+use diesel::QueryDsl;
+use diesel_async::scoped_futures::ScopedFutureExt;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use futures::{Stream, TryStreamExt};
+use lazy_static::lazy_static;
+use mime::Mime;
+use mpart_async::server::MultipartStream;
+use ring::digest;
+use s3::{Bucket, Region, creds::Credentials};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use validator::Validate;
+use warp::{Buf, Rejection, Reply, hyper::Response, path::Peek};
 
 pub mod down;
 pub mod encode;
@@ -234,7 +232,10 @@ pub async fn get_object_handler(
         broker.is_aws_region,
     )?;
 
-    let (sender, body) = hyper::Body::channel();
+    let (sender, receiver) = mpsc::channel::<Result<Bytes, Error>>(16);
+    let body = warp::reply::stream(ReceiverStream::new(receiver))
+        .into_response()
+        .into_body();
 
     let down::GetObjectResponse {
         response_status,
@@ -313,7 +314,7 @@ pub async fn get_object_head_handler(
 
     Ok(response_builder
         .status(response_status)
-        .body(hyper::Body::empty())
+        .body(Vec::<u8>::new())
         .map_err(|e| Error::SerialisationError(e.to_string()))?)
 }
 

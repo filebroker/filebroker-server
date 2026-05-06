@@ -1,12 +1,14 @@
-use std::cmp;
-
+use crate::{error::Error, model::S3Object};
+use bytes::Bytes;
 use rand::{RngExt, distr::Alphanumeric};
 use s3::Bucket;
-use warp::hyper;
-
-use crate::{error::Error, model::S3Object};
+use std::cmp;
+use tokio::sync::mpsc;
 
 use super::s3utils::{self, ObjectWriter};
+
+pub type BodyItem = Result<Bytes, Error>;
+pub type BodySender = mpsc::Sender<BodyItem>;
 
 pub struct GetObjectResponse {
     pub(crate) response_status: u16,
@@ -19,7 +21,7 @@ pub fn get_object_response(
     range: Option<String>,
     object: S3Object,
     bucket: Bucket,
-    sender: Option<hyper::body::Sender>,
+    sender: Option<BodySender>,
 ) -> Result<GetObjectResponse, Error> {
     let response_status;
     let content_type;

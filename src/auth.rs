@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::IpAddr;
 
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{DateTime, Duration, offset::Utc};
@@ -19,7 +19,6 @@ use warp::{
         Response, StatusCode,
         header::{self, HeaderMap},
     },
-    hyper,
 };
 use zxcvbn::zxcvbn;
 
@@ -149,7 +148,7 @@ async fn get_user_from_auth_header(header_map: HeaderMap) -> Result<Option<User>
 /// results in a 403, if the credentials are not correct.
 pub async fn login_handler(
     request: LoginRequest,
-    remote_addr: Option<SocketAddr>,
+    remote_addr: Option<IpAddr>,
 ) -> Result<impl Reply, Rejection> {
     let captcha_verified = match request.captcha_token {
         Some(captcha_token) => {
@@ -385,7 +384,7 @@ pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply,
         response_builder = response_builder.header(header::SET_COOKIE, refresh_token_cookie);
     }
 
-    Ok(response_builder.body(hyper::Body::empty()))
+    Ok(response_builder.body(Vec::<u8>::new()))
 }
 
 async fn refresh_user_login_data(
@@ -457,7 +456,7 @@ lazy_static! {
 /// constraint violation when committing either transaction.
 pub async fn register_handler(
     mut user_registration: UserRegistration,
-    remote_addr: Option<SocketAddr>,
+    remote_addr: Option<IpAddr>,
     authority: Authority,
 ) -> Result<impl Reply, Rejection> {
     // set empty mail to None since an empty string would not validate
@@ -910,7 +909,7 @@ pub struct ChangePasswordRequest {
 pub async fn change_password_handler(
     request: ChangePasswordRequest,
     user: User,
-    remote_addr: Option<SocketAddr>,
+    remote_addr: Option<IpAddr>,
 ) -> Result<impl Reply, Rejection> {
     match request.captcha_token {
         Some(captcha_token) => {
@@ -993,7 +992,7 @@ pub struct SendPasswordResetRequest {
 
 pub async fn send_password_reset_handler(
     request: SendPasswordResetRequest,
-    remote_addr: Option<SocketAddr>,
+    remote_addr: Option<IpAddr>,
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(

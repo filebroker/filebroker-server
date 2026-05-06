@@ -97,4 +97,6 @@ if you send your mails through an SMTP relay that manages DKIM for you this is r
 
 `FILEBROKER_RECONCILE_QUOTA_GRACE_PERIOD` (optional, string): The grace period for quota reconciliation, in ISO 8601 period format. Defaults to 30 days (P30D). When the available upload quota changes for a user, this time period determines how long the task will wait before deleting uploads that exceed the new quota.
 
+`FILEBROKER_HTTP_SHUTDOWN_TIMEOUT_SECONDS` (optional, u64): The number of seconds to wait for HTTP server to shutdown gracefully before forcefully shutting down. Defaults to 1800 seconds (30 minutes).
+
 Note that CORS headers are only set when running debug binaries for development, for production you need to set up nginx.

@@ -26,6 +26,7 @@ fern = { version = "0.7.1", features = ["date-based"] }
 flurry = "0.5.2"
 futures = "0.3.32"
 governor = "0.10.4"
+hyper-util = "0.1.20"
 iso8601 = "0.6.3"
 itertools = "0.14.0"
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
@@ -56,16 +57,17 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tera = "1.20.1"
 thiserror = "2.0.18"
-# cannot upgrade until warp upgrades to hyper 1.0 because newer versions of tls-listener require it, see TlsAcceptorAdapter. This is not commonly used anyway since https is usually handled by nginx and not used for the API server directly.
-tls-listener = { version = "0.7.0", features = ["native-tls", "rustls", "hyper-h1", "hyper-h2"] }
+tls-listener = { version = "0.11.2", features = ["native-tls", "rustls"] }
 tokio = { version = "1.52.1", features = ["full"] }
 tokio-postgres = "0.7.17"
 tokio-postgres-rustls = "0.13.0"
 tokio-rustls = "0.26.4"
+tokio-stream = "0.1.18"
+tower = "0.5.3"
 url = "2.5.8"
 uuid = { version = "1.23.1", features = ["v4", "serde"] }
 validator = { version = "0.20.0", features = ["derive"] }
-warp = { version = "0.3", features = ["tls"] }
+warp = { version = "0.4.3", features = ["server"] }
 webp = "0.3.1"
 zxcvbn = "3.1.1"
 

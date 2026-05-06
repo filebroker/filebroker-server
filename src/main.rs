@@ -26,7 +26,10 @@ use crate::user_group::{
 use crate::util::OptFmt;
 use dotenvy::dotenv;
 use error::{Error, TransactionRuntimeError};
-use futures::{Future, FutureExt, StreamExt, TryFuture, future::BoxFuture};
+use futures::{Future, FutureExt, Stream, StreamExt, TryFuture, future::BoxFuture, stream};
+use hyper_util::rt::TokioExecutor;
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::{rt::TokioIo, server::conn::auto::Builder as HyperServerBuilder};
 use lazy_static::lazy_static;
 use mime::Mime;
 use query::QueryParametersFilter;
@@ -34,36 +37,31 @@ use rustls::{
     ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer},
 };
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::{
-    convert::Infallible,
     fs,
     future::ready,
     io,
-    pin::Pin,
     str::FromStr,
     sync::{Arc, atomic::AtomicBool},
     thread::JoinHandle,
     time::Duration,
 };
 use tag::GetTagsFilter;
-use tls_listener::{AsyncTls, TlsListener};
+use tls_listener::TlsListener;
+use tokio::net::TcpListener;
+use tokio::time::timeout;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::Runtime,
 };
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use tokio_rustls::TlsAcceptor;
+use tower::Service;
 use url::Url;
 use warp::{
     Filter, Reply,
     host::Authority,
-    hyper::{
-        self, Body, Request, Server,
-        server::{
-            accept::{self, Accept},
-            conn::AddrIncoming,
-        },
-        service::Service,
-    },
+    hyper::{self, Request, body, service::service_fn},
 };
 
 mod auth;
@@ -140,6 +138,16 @@ lazy_static! {
     pub static ref HOST_BASE_PATH: Option<String> = std::env::var("FILEBROKER_HOST_BASE_PATH").ok();
     pub static ref PG_SSL_CERT_PATH: Option<String> =
         std::env::var("FILEBROKER_PG_SSL_CERT_PATH").ok();
+    pub static ref HTTP_SHUTDOWN_TIMEOUT: Duration = {
+        std::env::var("FILEBROKER_HTTP_SHUTDOWN_TIMEOUT_SECONDS")
+            .map(|val| {
+                Duration::from_secs(
+                    u64::from_str(&val)
+                        .expect("FILEBROKER_HTTP_SHUTDOWN_TIMEOUT_SECONDS must be a valid u64"),
+                )
+            })
+            .unwrap_or_else(|_| Duration::from_secs(30 * 60))
+    };
 }
 
 #[cfg(feature = "auto_migration")]
@@ -406,7 +414,7 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
     let login_route = warp::path("login")
         .and(warp::post())
         .and(warp::body::json())
-        .and(warp::filters::addr::remote())
+        .and(client_ip())
         .and_then(auth::login_handler);
 
     let refresh_login_route = warp::path("refresh-login")
@@ -437,7 +445,7 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
     let register_route = warp::path("register")
         .and(warp::post())
         .and(warp::body::json())
-        .and(warp::filters::addr::remote())
+        .and(client_ip())
         .and(warp::filters::header::header::<Authority>("Host"))
         .and_then(auth::register_handler);
 
@@ -592,13 +600,13 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(warp::post())
         .and(warp::body::json())
         .and(auth::with_user())
-        .and(warp::filters::addr::remote())
+        .and(client_ip())
         .and_then(auth::change_password_handler);
 
     let send_password_reset_route = warp::path("send-password-reset")
         .and(warp::post())
         .and(warp::body::json())
-        .and(warp::filters::addr::remote())
+        .and(client_ip())
         .and_then(auth::send_password_reset_handler);
 
     let reset_password_route = warp::path("reset-password")
@@ -1040,8 +1048,7 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
             log::log!(
                 target: "filebroker::api",
                 log_level,
-                "{} \"{} {} {:?}\" {} \"{}\" \"{}\" {:?}",
-                OptFmt(info.remote_addr()),
+                "\"{} {} {:?}\" {} \"{}\" \"{}\" {:?}",
                 info.method(),
                 info.path(),
                 info.version(),
@@ -1072,8 +1079,9 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
             .allow_method(warp::http::Method::HEAD),
     );
 
-    let incoming =
-        AddrIncoming::bind(&([0, 0, 0, 0], *PORT).into()).expect("Failed to bind server to port");
+    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, *PORT))
+        .await
+        .expect("Failed to bind server to port");
     if CERT_PATH.is_some() && KEY_PATH.is_some() {
         let certs = load_certs(CERT_PATH.as_ref().unwrap()).expect("Failed to load TLS cert");
         let key =
@@ -1083,7 +1091,7 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
             .with_single_cert(certs, key)
             .expect("Failed to build TLS ServerConfig");
         let acceptor: TlsAcceptor = Arc::new(server_config).into();
-        let incoming = TlsListener::new(TlsAcceptorAdapter(acceptor), incoming).filter(|conn| {
+        let incoming = TlsListener::new(acceptor, listener).filter(|conn| {
             if let Err(e) = conn {
                 log::error!("Failed to open TLS connection: {e}");
                 ready(false)
@@ -1092,32 +1100,48 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
             }
         });
         log::info!("Enabled TLS");
-        run_server(accept::from_stream(incoming), filter, http_worker_rt)
+        run_server(incoming, filter, http_worker_rt)
             .await
             .expect("Failed running server");
     } else {
+        let incoming = stream::unfold(listener, |listener| async move {
+            let accepted = listener.accept().await;
+            Some((accepted, listener))
+        });
         run_server(incoming, filter, http_worker_rt)
             .await
             .expect("Failed running server");
     }
 }
 
-// cannot use the latest version of tls_listener as it upgraded to hyper 1.0 while warp is still on 0.14, use this to adapt the new tokio_rustls version to the old tls_listener version
-#[derive(Clone)]
-struct TlsAcceptorAdapter(TlsAcceptor);
+pub fn client_ip() -> impl Filter<Extract = (Option<IpAddr>,), Error = warp::Rejection> + Clone {
+    warp::filters::ext::optional::<SocketAddr>()
+        .and(warp::header::optional::<String>("x-forwarded-for"))
+        .and(warp::header::optional::<String>("x-real-ip"))
+        .map(
+            |peer: Option<SocketAddr>, xff: Option<String>, x_real: Option<String>| {
+                let peer_ip = peer.map(|p| p.ip());
 
-impl<C> AsyncTls<C> for TlsAcceptorAdapter
-where
-    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    type Stream = TlsStream<C>;
-    type Error = io::Error;
-    type AcceptFuture = Pin<Box<dyn Future<Output = Result<Self::Stream, Self::Error>> + Send>>;
+                // 1. Prefer X-Real-IP
+                if let Some(ip) = x_real.as_deref().and_then(|v| v.parse::<IpAddr>().ok()) {
+                    return Some(ip);
+                }
 
-    fn accept(&self, conn: C) -> Self::AcceptFuture {
-        let tls = self.clone();
-        Box::pin(async move { TlsAcceptor::accept(&tls.0, conn).await })
-    }
+                // 2. X-Forwarded-For (right-most = nginx)
+                if let Some(xff) = xff
+                    && let Some(ip) = xff
+                        .split(',')
+                        .map(|s| s.trim())
+                        .rev()
+                        .find_map(|s| s.parse::<IpAddr>().ok())
+                {
+                    return Some(ip);
+                }
+
+                // 3. fallback
+                peer_ip
+            },
+        )
 }
 
 #[derive(Clone)]
@@ -1135,42 +1159,106 @@ where
     }
 }
 
-async fn run_server<I, F>(
+async fn run_server<I, S, E, F>(
     incoming: I,
     filter: F,
     http_worker_rt: Arc<Runtime>,
-) -> Result<(), warp::hyper::Error>
+) -> io::Result<()>
 where
-    I: Accept,
-    I::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
-    I::Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    F: Filter + Clone + Send + 'static,
-    <F::Future as TryFuture>::Ok: Reply,
+    I: Stream<Item = Result<(S, SocketAddr), E>> + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    E: std::fmt::Display,
+    F: Filter + Clone + Send + Sync + 'static,
+    F::Extract: Send,
+    <F::Future as TryFuture>::Ok: Reply + Send,
 {
+    futures::pin_mut!(incoming);
+
     let warp_service = warp::service(filter);
-    let service_fn = hyper::service::make_service_fn(move |_| {
-        let warp_service = warp_service.clone();
-        async move {
-            let service = hyper::service::service_fn(move |req: Request<Body>| {
-                let mut warp_service = warp_service.clone();
-                async move { warp_service.call(req).await }
-            });
-            Ok::<_, Infallible>(service)
-        }
-    });
-    let server = Server::builder(incoming)
-        .executor(HttpRequestExecutor {
-            worker_rt: http_worker_rt,
-        })
-        .serve(service_fn);
+    let graceful = GracefulShutdown::new();
+
     log::info!("Server listening on port {}", *PORT);
-    let server = server.with_graceful_shutdown(async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for ctrl-c signal");
-        shutdown_server().await;
-    });
-    server.await
+
+    loop {
+        tokio::select! {
+            _ = shutdown_signal() => {
+                log::info!("Stopping TCP accept loop");
+                break;
+            }
+
+            accepted = incoming.next() => {
+                let Some(accepted) = accepted else {
+                    break;
+                };
+
+                let (stream, remote_addr) = match accepted {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!("TCP accept connection error: {e}");
+                        continue;
+                    }
+                };
+
+                let io = TokioIo::new(stream);
+                let warp_service = warp_service.clone();
+                let watcher = graceful.watcher();
+
+                http_worker_rt.spawn(async move {
+                    let service = service_fn(move |mut req: Request<body::Incoming>| {
+                        let mut warp_service = warp_service.clone();
+
+                        req.extensions_mut().insert(remote_addr);
+
+                        async move {
+                            warp_service.call(req).await
+                        }
+                    });
+
+                    let builder = HyperServerBuilder::new(TokioExecutor::new());
+                    let conn = builder.serve_connection(io, service);
+
+                    if let Err(e) = watcher.watch(conn).await {
+                        log::error!("HTTP connection error: {e}");
+                    }
+                });
+            }
+        }
+    }
+
+    log::info!("Shutting down HTTP connections");
+    match timeout(*HTTP_SHUTDOWN_TIMEOUT, graceful.shutdown()).await {
+        Ok(()) => log::info!("HTTP connections drained"),
+        Err(_) => log::warn!("Timed out waiting for HTTP connections to drain"),
+    }
+
+    shutdown_server().await;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
+    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
+
+    tokio::select! {
+        _ = sigint.recv() => {
+            log::info!("Received SIGINT");
+        }
+        _ = sigterm.recv() => {
+            log::info!("Received SIGTERM");
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to listen for ctrl-c");
+    log::info!("Received Ctrl+C");
 }
 
 async fn shutdown_server() {

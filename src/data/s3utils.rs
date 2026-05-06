@@ -1,15 +1,15 @@
 use std::{task::Poll, time::Duration};
 
+use crate::data::down::{BodyItem, BodySender};
+use crate::{error::Error, model::S3Object, util::format_duration};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{StreamExt, TryStream, ready, stream::IntoAsyncRead};
 use pin_project::pin_project;
 use ring::digest;
 use s3::{Bucket, command::Command, error::S3Error, request::Reqwest, request_trait::Request};
+use tokio::sync::mpsc::error::SendError;
 use tokio::time::timeout;
-use warp::hyper;
-
-use crate::{error::Error, model::S3Object, util::format_duration};
 
 #[pin_project]
 pub struct FileReader<R> {
@@ -57,7 +57,7 @@ where
 
 #[async_trait]
 pub trait ObjectWriter {
-    async fn write_bytes(&self, sender: hyper::body::Sender);
+    async fn write_bytes(&self, sender: BodySender);
 }
 
 pub struct FullObjectWriter {
@@ -67,13 +67,13 @@ pub struct FullObjectWriter {
 
 #[async_trait]
 impl ObjectWriter for FullObjectWriter {
-    async fn write_bytes(&self, mut sender: hyper::body::Sender) {
+    async fn write_bytes(&self, mut sender: BodySender) {
         let res = get_object_stream(&self.bucket, &self.object.object_key, &mut sender).await;
 
         match res {
             Ok(response_code) if response_code < 300 => {}
             Ok(response_code) => {
-                sender.abort();
+                abort(&sender, Error::S3ResponseError(response_code)).await;
                 log::error!(
                     "Non success response code {} reading object {}",
                     response_code,
@@ -81,21 +81,21 @@ impl ObjectWriter for FullObjectWriter {
                 );
             }
             Err(Error::HyperError(msg)) => {
-                sender.abort();
                 // sending probably failed due to broken pipe / connection disconnect, log as info
                 log::debug!(
                     "Error occurred sending bytes to body for object {}: {}",
                     &self.object.object_key,
                     &msg
                 );
+                abort(&sender, Error::HyperError(msg)).await;
             }
             Err(e) => {
-                sender.abort();
                 log::error!(
                     "Error occurred reading object {}: {}",
                     &self.object.object_key,
                     e
                 );
+                abort(&sender, e).await;
             }
         }
 
@@ -112,7 +112,7 @@ pub struct ObjectRangeWriter {
 
 #[async_trait]
 impl ObjectWriter for ObjectRangeWriter {
-    async fn write_bytes(&self, mut sender: hyper::body::Sender) {
+    async fn write_bytes(&self, mut sender: BodySender) {
         let start = self.start;
         let end = self.end;
 
@@ -127,7 +127,7 @@ impl ObjectWriter for ObjectRangeWriter {
         {
             Ok(status_code) if status_code < 300 => {}
             Ok(status_code) => {
-                sender.abort();
+                abort(&sender, Error::S3ResponseError(status_code)).await;
                 log::error!(
                     "Non success response code {} reading object {}",
                     status_code,
@@ -135,16 +135,15 @@ impl ObjectWriter for ObjectRangeWriter {
                 );
             }
             Err(Error::HyperError(msg)) => {
-                sender.abort();
                 // sending probably failed due to broken pipe / connection disconnect, log as info
                 log::debug!(
                     "Error occurred sending bytes to body for object {}: {}",
                     &self.object.object_key,
                     &msg
                 );
+                abort(&sender, Error::HyperError(msg)).await;
             }
             Err(e) => {
-                sender.abort();
                 log::error!(
                     "Error occurred reading range {}-{} for object {}: {}",
                     start,
@@ -152,6 +151,7 @@ impl ObjectWriter for ObjectRangeWriter {
                     &self.object.object_key,
                     e
                 );
+                abort(&sender, e).await;
             }
         }
 
@@ -190,14 +190,15 @@ impl MultipartByteRange {
 
 #[async_trait]
 impl ObjectWriter for MultipartObjectWriter {
-    async fn write_bytes(&self, mut sender: hyper::body::Sender) {
+    async fn write_bytes(&self, mut sender: BodySender) {
         for part in self.parts.iter() {
             if let Err(e) = sender
-                .send_data(Bytes::copy_from_slice(part.fields.as_bytes()))
+                .send(Ok(Bytes::copy_from_slice(part.fields.as_bytes())))
                 .await
             {
+                let msg = format!("Error writing part fields: {e}");
                 log::debug!("Error writing part fields: {e}");
-                sender.abort();
+                abort(&sender, Error::HyperError(msg)).await;
                 return;
             }
 
@@ -214,7 +215,7 @@ impl ObjectWriter for MultipartObjectWriter {
             {
                 Ok(status_code) if status_code < 300 => {}
                 Ok(status_code) => {
-                    sender.abort();
+                    abort(&sender, Error::S3ResponseError(status_code)).await;
                     log::error!(
                         "Non success response code {} reading object {}",
                         status_code,
@@ -223,17 +224,16 @@ impl ObjectWriter for MultipartObjectWriter {
                     return;
                 }
                 Err(Error::HyperError(msg)) => {
-                    sender.abort();
                     // sending probably failed due to broken pipe / connection disconnect, log as info
                     log::debug!(
                         "Error occurred sending bytes to body for object {}: {}",
                         &self.object.object_key,
                         &msg
                     );
+                    abort(&sender, Error::HyperError(msg)).await;
                     return;
                 }
                 Err(e) => {
-                    sender.abort();
                     log::error!(
                         "Error occurred reading range {}-{} for object {}: {}",
                         start,
@@ -241,17 +241,22 @@ impl ObjectWriter for MultipartObjectWriter {
                         &self.object.object_key,
                         e
                     );
+                    abort(&sender, e).await;
                     return;
                 }
             }
         }
 
         if let Err(e) = sender
-            .send_data(Bytes::copy_from_slice(self.end_delimiter.as_bytes()))
+            .send(Ok(Bytes::copy_from_slice(self.end_delimiter.as_bytes())))
             .await
         {
             log::debug!("Error writing end delimiter: {e}");
-            sender.abort();
+            abort(
+                &sender,
+                Error::HyperError(format!("Error writing end delimiter: {e}")),
+            )
+            .await;
             return;
         }
 
@@ -264,7 +269,7 @@ pub async fn get_object_range_stream(
     path: &str,
     mut start: u64,
     end: Option<u64>,
-    sender: &mut hyper::body::Sender,
+    sender: &mut BodySender,
 ) -> Result<u16, Error> {
     loop {
         let command = Command::GetObjectRange { start, end };
@@ -274,7 +279,7 @@ pub async fn get_object_range_stream(
         match res {
             Ok(status) => return Ok(status),
             Err(S3CommandError::S3Error(e)) => return Err(e.into()),
-            Err(S3CommandError::SendError(e)) => return Err(e.into()),
+            Err(S3CommandError::SendError(e)) => return Err(Error::HyperError(e.to_string())),
             Err(S3CommandError::SendTimeout { bytes_sent }) => {
                 log::debug!(
                     "Received timeout trying to send S3 response to reader for range {start}-{end_str} of object {path}, going to retry with range {new_start}-{end_str} after reader becomes available",
@@ -283,7 +288,10 @@ pub async fn get_object_range_stream(
                 );
                 start += bytes_sent as u64;
                 // wait for reader to be ready before requesting next range
-                futures::future::poll_fn(|ctx| sender.poll_ready(ctx)).await?;
+                let _permit = sender
+                    .reserve()
+                    .await
+                    .map_err(|_| Error::HyperError("response body receiver dropped".to_string()))?;
             }
         }
     }
@@ -292,7 +300,7 @@ pub async fn get_object_range_stream(
 pub async fn get_object_stream(
     bucket: &Bucket,
     path: &str,
-    sender: &mut hyper::body::Sender,
+    sender: &mut BodySender,
 ) -> Result<u16, Error> {
     let command = Command::GetObject;
     let res = get_command_stream(command, bucket, path, sender).await;
@@ -300,12 +308,16 @@ pub async fn get_object_stream(
     match res {
         Ok(status) => Ok(status),
         Err(S3CommandError::S3Error(e)) => Err(e.into()),
-        Err(S3CommandError::SendError(e)) => Err(e.into()),
+        Err(S3CommandError::SendError(e)) => Err(Error::HyperError(e.to_string())),
         Err(S3CommandError::SendTimeout { bytes_sent }) => {
             log::debug!(
                 "Received timeout trying to send S3 response to reader for object {path}, going to retry with range {bytes_sent}- after reader becomes available"
             );
-            futures::future::poll_fn(|ctx| sender.poll_ready(ctx)).await?;
+            let permit = sender
+                .reserve()
+                .await
+                .map_err(|_| Error::HyperError("response body receiver dropped".to_string()))?;
+            drop(permit);
             get_object_range_stream(bucket, path, bytes_sent as u64, None, sender).await
         }
     }
@@ -315,7 +327,7 @@ pub async fn get_command_stream(
     command: Command<'_>,
     bucket: &Bucket,
     path: &str,
-    sender: &mut hyper::body::Sender,
+    sender: &mut BodySender,
 ) -> Result<u16, S3CommandError> {
     log::debug!("Executing S3 command streaming: {:?}", &command);
     let now = std::time::Instant::now();
@@ -331,7 +343,7 @@ pub async fn get_command_stream(
         let byte_len = bytes.len();
         #[cfg(debug_assertions)]
         let now = std::time::Instant::now();
-        let res = timeout(Duration::from_secs(30), sender.send_data(bytes)).await;
+        let res = timeout(Duration::from_secs(30), sender.send(Ok(bytes))).await;
         match res {
             Ok(Err(e)) => return Err(S3CommandError::SendError(e)),
             Err(_) => {
@@ -360,7 +372,7 @@ pub async fn get_command_stream(
 
 pub enum S3CommandError {
     S3Error(S3Error),
-    SendError(hyper::Error),
+    SendError(SendError<BodyItem>),
     SendTimeout { bytes_sent: usize },
 }
 
@@ -368,4 +380,8 @@ impl From<S3Error> for S3CommandError {
     fn from(value: S3Error) -> Self {
         Self::S3Error(value)
     }
+}
+
+async fn abort(sender: &BodySender, err: Error) {
+    let _ = sender.send(Err(err)).await;
 }
