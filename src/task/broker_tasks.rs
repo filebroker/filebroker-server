@@ -27,6 +27,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                 log::warn!(
                     "Stopping task run_reconcile_broker_quota_usage_tasks because the task pool is shutting down"
                 );
+                break;
             }
 
             let grace_period = RECONCILE_QUOTA_GRACE_PERIOD.to_postgres();
@@ -228,6 +229,7 @@ pub fn run_broker_quota_usage_audits(tokio_handle: Handle) -> Result<(), Error> 
                 log::warn!(
                     "Stopping task run_broker_quota_usage_audits because the task pool is shutting down"
                 );
+                break;
             }
 
             let mut connection = acquire_db_connection().await?;
