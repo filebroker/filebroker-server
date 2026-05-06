@@ -669,6 +669,7 @@ pub fn run_apply_auto_tags_tasks(tokio_handle: Handle) -> Result<(), Error> {
                 log::warn!(
                     "Stopping task run_apply_auto_tags_tasks because the task pool is shutting down"
                 );
+                break;
             }
 
             let mut connection = acquire_db_connection().await?;
