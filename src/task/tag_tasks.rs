@@ -27,8 +27,9 @@ pub fn run_apply_auto_tags_tasks(tokio_handle: Handle) -> Result<(), Error> {
                         SELECT * FROM apply_auto_tags_task
                         WHERE locked_at IS NULL
                         AND fail_count < 3
-                        ORDER BY fail_count ASC NULLS FIRST, creation_timestamp ASC
+                        ORDER BY fail_count ASC, creation_timestamp ASC
                         LIMIT 5
+                        FOR UPDATE SKIP LOCKED
                     )
                     UPDATE apply_auto_tags_task SET locked_at = NOW() WHERE locked_at IS NULL AND pk IN(SELECT pk FROM relevant_apply_auto_tags_tasks) RETURNING *;
                 ")

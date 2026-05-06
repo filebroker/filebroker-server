@@ -40,8 +40,9 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                         WHERE locked_at IS NULL
                         AND creation_timestamp < NOW() - $1::interval
                         AND fail_count < 3
-                        ORDER BY fail_count ASC NULLS FIRST, creation_timestamp ASC
+                        ORDER BY fail_count ASC, creation_timestamp ASC
                         LIMIT 5
+                        FOR UPDATE SKIP LOCKED
                     )
                     UPDATE reconcile_broker_quota_usage_task SET locked_at = NOW() WHERE locked_at IS NULL AND pk IN(SELECT pk FROM relevant_reconcile_broker_quota_usage_tasks) RETURNING *;
                 ")

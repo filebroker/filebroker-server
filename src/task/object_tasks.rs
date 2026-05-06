@@ -61,6 +61,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                         AND (hls_fail_count IS NULL OR hls_fail_count < 3)
                         ORDER BY hls_fail_count ASC NULLS FIRST, creation_timestamp ASC
                         LIMIT 25
+                        FOR UPDATE SKIP LOCKED
                     )
                     UPDATE s3_object SET hls_locked_at = NOW() WHERE hls_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
                 ")
@@ -190,6 +191,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                         AND (thumbnail_fail_count IS NULL OR thumbnail_fail_count < 3)
                         ORDER BY thumbnail_fail_count ASC NULLS FIRST, creation_timestamp ASC
                         LIMIT 100
+                        FOR UPDATE SKIP LOCKED
                     )
                     UPDATE s3_object SET thumbnail_locked_at = NOW() WHERE thumbnail_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
                 ")
@@ -316,6 +318,7 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
                         AND (metadata_fail_count IS NULL OR metadata_fail_count < 3)
                         ORDER BY metadata_fail_count ASC NULLS FIRST, creation_timestamp ASC
                         LIMIT 100
+                        FOR UPDATE SKIP LOCKED
                     )
                     UPDATE s3_object SET metadata_locked_at = NOW() WHERE metadata_locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3objects) RETURNING *;
                 ")
@@ -404,6 +407,7 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
                         WHERE locked_at IS NULL
                         AND (fail_count IS NULL OR fail_count < 3)
                         LIMIT 50
+                        FOR UPDATE SKIP LOCKED
                     )
                     UPDATE deferred_s3_object_deletion SET locked_at = NOW() WHERE locked_at IS NULL AND object_key IN(SELECT object_key FROM relevant_s3_object_deletions) RETURNING *;
                 ")
