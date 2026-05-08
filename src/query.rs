@@ -512,18 +512,24 @@ pub async fn get_post_handler(
     let s3_object_presigned_url =
         if *PRESIGNED_GET_EXPIRATION_SECS > 0 && broker.enable_presigned_get {
             let now = std::time::Instant::now();
-            match create_bucket(
-                &broker.bucket,
-                &broker.endpoint,
-                &broker.access_key,
-                &broker.secret_key,
-                broker.is_aws_region,
-            )
-            .and_then(|bucket| {
+
+            let result = async {
+                let bucket = create_bucket(
+                    &broker.bucket,
+                    &broker.endpoint,
+                    &broker.access_key,
+                    &broker.secret_key,
+                    broker.is_aws_region,
+                )?;
+
                 bucket
                     .presign_get(&s3_object.object_key, *PRESIGNED_GET_EXPIRATION_SECS, None)
+                    .await
                     .map_err(Error::from)
-            }) {
+            }
+            .await;
+
+            match result {
                 Ok(presigned_url) => {
                     log::debug!(
                         "Generated presigned URL for post {} object {} after {}ms: {presigned_url}",

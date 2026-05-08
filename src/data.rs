@@ -376,10 +376,10 @@ pub async fn get_presigned_hls_playlist_handler(
         );
         response_builder = response_builder.header("Content-Length", object_response.bytes().len());
         Ok(response_builder
-            .body(Vec::from(object_response.bytes()))
+            .body(Vec::from(object_response.as_slice()))
             .map_err(|e| Error::HyperError(e.to_string()))?)
     } else {
-        match m3u8_rs::parse_media_playlist(object_response.bytes()) {
+        match m3u8_rs::parse_media_playlist(object_response.as_slice()) {
             Ok((_, mut pl)) => {
                 let mut presigned_url_map = HashMap::<String, String>::new();
                 for segment in pl.segments.iter_mut() {
@@ -394,6 +394,7 @@ pub async fn get_presigned_hls_playlist_handler(
                         };
                         let presigned_url = bucket
                             .presign_get(&object_path, *PRESIGNED_GET_EXPIRATION_SECS, None)
+                            .await
                             .map_err(Error::from)?;
                         log::debug!(
                             "Generated presigned URL for {object_key} segment {object_path}: {presigned_url}"
@@ -615,10 +616,10 @@ pub fn create_bucket(
         .map(|mut b| {
             if is_aws_region {
                 b.set_request_timeout(None);
-                b
+                *b
             } else {
                 b.set_request_timeout(None);
-                b.with_path_style()
+                *b.with_path_style()
             }
         })
 }

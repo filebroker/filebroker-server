@@ -58,8 +58,8 @@ where
         }
         Err(e) => Err(e.into()),
     }?;
-    if status >= 300 {
-        return Err(Error::S3ResponseError(status));
+    if status.status_code() >= 300 {
+        return Err(Error::S3ResponseError(status.status_code()));
     }
     log::info!("Finished S3 upload for {}", &object_key);
 

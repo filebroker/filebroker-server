@@ -866,7 +866,7 @@ fn upload_tokio_file(
             Ok(S3UploadResult {
                 path: s3_path,
                 bytes_read: reader.byte_count,
-                response_status: res,
+                response_status: res.status_code(),
             })
         })
 }

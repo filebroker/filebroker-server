@@ -47,8 +47,7 @@ rand = "0.10.1"
 regex = "1.12.3"
 reqwest = { version = "0.13", features = ["form", "json"] }
 ring = "0.17.14"
-# don't update until https://github.com/durch/rust-s3/issues/346 and https://github.com/durch/rust-s3/issues/404 is fixed
-rust-s3 = "=0.32.3"
+rust-s3 = "0.37.2"
 rustls = "0.23.40"
 rustls-native-certs = "0.8.3"
 rustls-pemfile = "2.2.0"
