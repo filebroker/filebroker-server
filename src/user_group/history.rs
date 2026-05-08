@@ -20,7 +20,6 @@ use diesel::{
     BelongingToDsl, ExpressionMethods, JoinOnDsl, NullableExpressionMethods, OptionalExtension,
     QueryDsl, Table,
 };
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -65,74 +64,71 @@ pub async fn get_user_group_history_handler(
     })?;
 
     let mut connection = acquire_db_connection().await?;
-    let response = run_repeatable_read_transaction(&mut connection, |connection| {
-        async {
-            let user_group =
-                perms::load_user_group_secured(user_group_pk, Some(&user), connection).await?;
-            if !perms::is_user_group_editable(user_group_pk, Some(&user), connection).await? {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(user_group_pk),
-                ));
-            }
-
-            let total_snapshot_count = user_group_edit_history::table
-                .filter(user_group_edit_history::fk_user_group.eq(user_group_pk))
-                .count()
-                .get_result::<i64>(connection)
-                .await?;
-            let limit = pagination.limit.unwrap_or(10);
-            let offset = limit * pagination.page.unwrap_or(0);
-            let user_group_edit_history_snapshots = user_group_edit_history::table
-                .inner_join(registered_user::table)
-                .filter(user_group_edit_history::fk_user_group.eq(user_group_pk))
-                .order(user_group_edit_history::pk.desc())
-                .limit(limit.into())
-                .offset(offset.into())
-                .load::<(UserGroupEditHistory, UserPublic)>(connection)
-                .await?;
-
-            let mut snapshots = Vec::new();
-            for (user_group_edit_history_snapshot, edit_user) in user_group_edit_history_snapshots {
-                let tags = get_user_group_snapshot_tags(
-                    &user_group_edit_history_snapshot,
-                    &user_group,
-                    connection,
-                )
-                .await?;
-
-                snapshots.push(UserGroupEditHistorySnapshot {
-                    pk: user_group_edit_history_snapshot.pk,
-                    fk_user_group: user_group_edit_history_snapshot.fk_user_group,
-                    edit_user,
-                    edit_timestamp: user_group_edit_history_snapshot.edit_timestamp,
-                    name: user_group_edit_history_snapshot.name,
-                    name_changed: user_group_edit_history_snapshot.name_changed,
-                    public: user_group_edit_history_snapshot.public,
-                    public_changed: user_group_edit_history_snapshot.public_changed,
-                    description: user_group_edit_history_snapshot.description,
-                    description_changed: user_group_edit_history_snapshot.description_changed,
-                    allow_member_invite: user_group_edit_history_snapshot.allow_member_invite,
-                    allow_member_invite_changed: user_group_edit_history_snapshot
-                        .allow_member_invite_changed,
-                    tags_changed: user_group_edit_history_snapshot.tags_changed,
-                    tags,
-                });
-            }
-
-            let edit_user = registered_user::table
-                .filter(registered_user::pk.eq(user_group.fk_edit_user))
-                .get_result::<UserPublic>(connection)
-                .await
-                .map_err(Error::from)?;
-
-            Ok(UserGroupEditHistoryResponse {
-                edit_timestamp: user_group.edit_timestamp,
-                edit_user,
-                total_snapshot_count,
-                snapshots,
-            })
+    let response = run_repeatable_read_transaction(&mut connection, async |connection| {
+        let user_group =
+            perms::load_user_group_secured(user_group_pk, Some(&user), connection).await?;
+        if !perms::is_user_group_editable(user_group_pk, Some(&user), connection).await? {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(user_group_pk),
+            ));
         }
-        .scope_boxed()
+
+        let total_snapshot_count = user_group_edit_history::table
+            .filter(user_group_edit_history::fk_user_group.eq(user_group_pk))
+            .count()
+            .get_result::<i64>(connection)
+            .await?;
+        let limit = pagination.limit.unwrap_or(10);
+        let offset = limit * pagination.page.unwrap_or(0);
+        let user_group_edit_history_snapshots = user_group_edit_history::table
+            .inner_join(registered_user::table)
+            .filter(user_group_edit_history::fk_user_group.eq(user_group_pk))
+            .order(user_group_edit_history::pk.desc())
+            .limit(limit.into())
+            .offset(offset.into())
+            .load::<(UserGroupEditHistory, UserPublic)>(connection)
+            .await?;
+
+        let mut snapshots = Vec::new();
+        for (user_group_edit_history_snapshot, edit_user) in user_group_edit_history_snapshots {
+            let tags = get_user_group_snapshot_tags(
+                &user_group_edit_history_snapshot,
+                &user_group,
+                connection,
+            )
+            .await?;
+
+            snapshots.push(UserGroupEditHistorySnapshot {
+                pk: user_group_edit_history_snapshot.pk,
+                fk_user_group: user_group_edit_history_snapshot.fk_user_group,
+                edit_user,
+                edit_timestamp: user_group_edit_history_snapshot.edit_timestamp,
+                name: user_group_edit_history_snapshot.name,
+                name_changed: user_group_edit_history_snapshot.name_changed,
+                public: user_group_edit_history_snapshot.public,
+                public_changed: user_group_edit_history_snapshot.public_changed,
+                description: user_group_edit_history_snapshot.description,
+                description_changed: user_group_edit_history_snapshot.description_changed,
+                allow_member_invite: user_group_edit_history_snapshot.allow_member_invite,
+                allow_member_invite_changed: user_group_edit_history_snapshot
+                    .allow_member_invite_changed,
+                tags_changed: user_group_edit_history_snapshot.tags_changed,
+                tags,
+            });
+        }
+
+        let edit_user = registered_user::table
+            .filter(registered_user::pk.eq(user_group.fk_edit_user))
+            .get_result::<UserPublic>(connection)
+            .await
+            .map_err(Error::from)?;
+
+        Ok(UserGroupEditHistoryResponse {
+            edit_timestamp: user_group.edit_timestamp,
+            edit_user,
+            total_snapshot_count,
+            snapshots,
+        })
     })
     .await?;
 
@@ -184,141 +180,137 @@ pub async fn rewind_user_group_history_snapshot_handler(
     user: User,
 ) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
-    let user_group = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let user_group_snapshot = user_group_edit_history::table
-                .find(user_group_edit_history_pk)
-                .get_result::<UserGroupEditHistory>(connection)
-                .await
-                .optional()
-                .map_err(Error::from)?
-                .ok_or(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(user_group_edit_history_pk),
-                ))?;
+    let user_group = run_serializable_transaction(&mut connection, async |connection| {
+        let user_group_snapshot = user_group_edit_history::table
+            .find(user_group_edit_history_pk)
+            .get_result::<UserGroupEditHistory>(connection)
+            .await
+            .optional()
+            .map_err(Error::from)?
+            .ok_or(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(user_group_edit_history_pk),
+            ))?;
 
-            let user_group = perms::load_user_group_secured(
-                user_group_snapshot.fk_user_group,
-                Some(&user),
-                connection,
+        let user_group = perms::load_user_group_secured(
+            user_group_snapshot.fk_user_group,
+            Some(&user),
+            connection,
+        )
+        .await?;
+        if !perms::is_user_group_editable(
+            user_group_snapshot.fk_user_group,
+            Some(&user),
+            connection,
+        )
+        .await?
+        {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(user_group_snapshot.fk_user_group),
+            ));
+        }
+
+        let now = Utc::now();
+        let update = UserGroupUpdateOptional {
+            name: Some(user_group_snapshot.name.clone()),
+            public: Some(user_group_snapshot.public),
+            // `None` means "don't update this field", so if the field was empty in the snapshot, use an empty string to clear it
+            description: Some(user_group_snapshot.description.clone().unwrap_or_default()),
+            allow_member_invite: Some(user_group_snapshot.allow_member_invite),
+            edit_timestamp: now,
+            fk_edit_user: user.pk,
+        };
+
+        let mut curr_tags = get_user_group_tags(user_group.pk, connection).await?;
+        let mut snapshot_tags =
+            get_user_group_snapshot_tags(&user_group_snapshot, &user_group, connection).await?;
+        let previous_tags = if !vec_eq_sorted(&mut curr_tags, &mut snapshot_tags) {
+            diesel::delete(
+                user_group_tag::table.filter(user_group_tag::fk_user_group.eq(user_group.pk)),
             )
-            .await?;
-            if !perms::is_user_group_editable(
-                user_group_snapshot.fk_user_group,
-                Some(&user),
-                connection,
-            )
-            .await?
-            {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(user_group_snapshot.fk_user_group),
-                ));
-            }
-
-            let now = Utc::now();
-            let update = UserGroupUpdateOptional {
-                name: Some(user_group_snapshot.name.clone()),
-                public: Some(user_group_snapshot.public),
-                // `None` means "don't update this field", so if the field was empty in the snapshot, use an empty string to clear it
-                description: Some(user_group_snapshot.description.clone().unwrap_or_default()),
-                allow_member_invite: Some(user_group_snapshot.allow_member_invite),
-                edit_timestamp: now,
-                fk_edit_user: user.pk,
-            };
-
-            let mut curr_tags = get_user_group_tags(user_group.pk, connection).await?;
-            let mut snapshot_tags =
-                get_user_group_snapshot_tags(&user_group_snapshot, &user_group, connection).await?;
-            let previous_tags = if !vec_eq_sorted(&mut curr_tags, &mut snapshot_tags) {
-                diesel::delete(
-                    user_group_tag::table.filter(user_group_tag::fk_user_group.eq(user_group.pk)),
+            .execute(connection)
+            .await
+            .map_err(Error::from)?;
+            diesel::insert_into(user_group_tag::table)
+                .values(
+                    snapshot_tags
+                        .iter()
+                        .map(|tag_usage| UserGroupTag {
+                            fk_user_group: user_group.pk,
+                            fk_tag: tag_usage.tag.pk,
+                            auto_matched: tag_usage.auto_matched,
+                        })
+                        .collect::<Vec<_>>(),
                 )
                 .execute(connection)
                 .await
                 .map_err(Error::from)?;
-                diesel::insert_into(user_group_tag::table)
+            Some(curr_tags)
+        } else {
+            None
+        };
+
+        let update_field_changes = update.get_field_changes(&user_group);
+
+        if update_field_changes.has_changes() || previous_tags.is_some() {
+            let updated_user_group = diesel::update(user_group::table)
+                .filter(user_group::pk.eq(user_group.pk))
+                .set(&update)
+                .get_result::<UserGroup>(connection)
+                .await?;
+
+            let user_group_edit_history = diesel::insert_into(user_group_edit_history::table)
+                .values(NewUserGroupEditHistory {
+                    fk_user_group: user_group.pk,
+                    fk_edit_user: user_group.fk_edit_user,
+                    edit_timestamp: user_group.edit_timestamp,
+                    name: user_group.name,
+                    name_changed: update_field_changes.name_changed,
+                    public: user_group.public,
+                    public_changed: update_field_changes.public_changed,
+                    description: user_group.description,
+                    description_changed: update_field_changes.description_changed,
+                    allow_member_invite: user_group.allow_member_invite,
+                    allow_member_invite_changed: update_field_changes.allow_member_invite_changed,
+                    tags_changed: previous_tags.is_some(),
+                })
+                .get_result::<UserGroupEditHistory>(connection)
+                .await?;
+
+            diesel::insert_into(user_group_audit_log::table)
+                .values(NewUserGroupAuditLog {
+                    fk_user_group: user_group.pk,
+                    fk_user: user.pk,
+                    action: UserGroupAuditAction::Edit,
+                    fk_target_user: None,
+                    invite_code: None,
+                    reason: None,
+                    creation_timestamp: now,
+                })
+                .execute(connection)
+                .await?;
+
+            if let Some(previous_tags) = previous_tags
+                && !previous_tags.is_empty()
+            {
+                diesel::insert_into(user_group_edit_history_tag::table)
                     .values(
-                        snapshot_tags
+                        previous_tags
                             .iter()
-                            .map(|tag_usage| UserGroupTag {
-                                fk_user_group: user_group.pk,
+                            .map(|tag_usage| UserGroupEditHistoryTag {
+                                fk_user_group_edit_history: user_group_edit_history.pk,
                                 fk_tag: tag_usage.tag.pk,
                                 auto_matched: tag_usage.auto_matched,
                             })
                             .collect::<Vec<_>>(),
                     )
                     .execute(connection)
-                    .await
-                    .map_err(Error::from)?;
-                Some(curr_tags)
-            } else {
-                None
-            };
-
-            let update_field_changes = update.get_field_changes(&user_group);
-
-            if update_field_changes.has_changes() || previous_tags.is_some() {
-                let updated_user_group = diesel::update(user_group::table)
-                    .filter(user_group::pk.eq(user_group.pk))
-                    .set(&update)
-                    .get_result::<UserGroup>(connection)
                     .await?;
-
-                let user_group_edit_history = diesel::insert_into(user_group_edit_history::table)
-                    .values(NewUserGroupEditHistory {
-                        fk_user_group: user_group.pk,
-                        fk_edit_user: user_group.fk_edit_user,
-                        edit_timestamp: user_group.edit_timestamp,
-                        name: user_group.name,
-                        name_changed: update_field_changes.name_changed,
-                        public: user_group.public,
-                        public_changed: update_field_changes.public_changed,
-                        description: user_group.description,
-                        description_changed: update_field_changes.description_changed,
-                        allow_member_invite: user_group.allow_member_invite,
-                        allow_member_invite_changed: update_field_changes
-                            .allow_member_invite_changed,
-                        tags_changed: previous_tags.is_some(),
-                    })
-                    .get_result::<UserGroupEditHistory>(connection)
-                    .await?;
-
-                diesel::insert_into(user_group_audit_log::table)
-                    .values(NewUserGroupAuditLog {
-                        fk_user_group: user_group.pk,
-                        fk_user: user.pk,
-                        action: UserGroupAuditAction::Edit,
-                        fk_target_user: None,
-                        invite_code: None,
-                        reason: None,
-                        creation_timestamp: now,
-                    })
-                    .execute(connection)
-                    .await?;
-
-                if let Some(previous_tags) = previous_tags
-                    && !previous_tags.is_empty()
-                {
-                    diesel::insert_into(user_group_edit_history_tag::table)
-                        .values(
-                            previous_tags
-                                .iter()
-                                .map(|tag_usage| UserGroupEditHistoryTag {
-                                    fk_user_group_edit_history: user_group_edit_history.pk,
-                                    fk_tag: tag_usage.tag.pk,
-                                    auto_matched: tag_usage.auto_matched,
-                                })
-                                .collect::<Vec<_>>(),
-                        )
-                        .execute(connection)
-                        .await?;
-                }
-
-                Ok(updated_user_group)
-            } else {
-                Ok(user_group.clone())
             }
+
+            Ok(updated_user_group)
+        } else {
+            Ok(user_group.clone())
         }
-        .scope_boxed()
     })
     .await?;
 
@@ -364,68 +356,65 @@ pub async fn get_user_group_audit_logs_handler(
     })?;
 
     let mut connection = acquire_db_connection().await?;
-    let response = run_repeatable_read_transaction(&mut connection, |connection| {
-        async {
-            // only allow group admins / owner to view audit logs
-            if !perms::is_user_group_editable(user_group_pk, Some(&user), connection).await? {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(user_group_pk),
-                ));
-            }
-
-            let total_count = user_group_audit_log::table
-                .filter(user_group_audit_log::fk_user_group.eq(user_group_pk))
-                .count()
-                .get_result::<i64>(connection)
-                .await?;
-
-            let limit = pagination.limit.unwrap_or(50);
-            let offset = limit * pagination.page.unwrap_or(0);
-            let (audit_log_user, audit_log_target_user) = diesel::alias!(
-                registered_user as audit_log_user,
-                registered_user as audit_log_target_user,
-            );
-
-            let logs = user_group_audit_log::table
-                .inner_join(
-                    audit_log_user.on(audit_log_user
-                        .field(registered_user::pk)
-                        .eq(user_group_audit_log::fk_user)),
-                )
-                .left_join(
-                    audit_log_target_user.on(audit_log_target_user
-                        .field(registered_user::pk)
-                        .nullable()
-                        .eq(user_group_audit_log::fk_target_user)),
-                )
-                .filter(user_group_audit_log::fk_user_group.eq(user_group_pk))
-                .order(user_group_audit_log::pk.desc())
-                .limit(limit.into())
-                .offset(offset.into())
-                .load::<(UserGroupAuditLog, UserPublic, Option<UserPublic>)>(connection)
-                .await?;
-
-            let audit_logs = logs
-                .into_iter()
-                .map(|(audit_log, audit_log_user, audit_log_target_user)| {
-                    UserGroupAuditLogInnerJoined {
-                        pk: audit_log.pk,
-                        user: audit_log_user,
-                        action: audit_log.action,
-                        target_user: audit_log_target_user,
-                        invite_code: audit_log.invite_code,
-                        reason: audit_log.reason,
-                        creation_timestamp: audit_log.creation_timestamp,
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            Ok(GetUserGroupAuditLogsResponse {
-                total_count,
-                audit_logs,
-            })
+    let response = run_repeatable_read_transaction(&mut connection, async |connection| {
+        // only allow group admins / owner to view audit logs
+        if !perms::is_user_group_editable(user_group_pk, Some(&user), connection).await? {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(user_group_pk),
+            ));
         }
-        .scope_boxed()
+
+        let total_count = user_group_audit_log::table
+            .filter(user_group_audit_log::fk_user_group.eq(user_group_pk))
+            .count()
+            .get_result::<i64>(connection)
+            .await?;
+
+        let limit = pagination.limit.unwrap_or(50);
+        let offset = limit * pagination.page.unwrap_or(0);
+        let (audit_log_user, audit_log_target_user) = diesel::alias!(
+            registered_user as audit_log_user,
+            registered_user as audit_log_target_user,
+        );
+
+        let logs = user_group_audit_log::table
+            .inner_join(
+                audit_log_user.on(audit_log_user
+                    .field(registered_user::pk)
+                    .eq(user_group_audit_log::fk_user)),
+            )
+            .left_join(
+                audit_log_target_user.on(audit_log_target_user
+                    .field(registered_user::pk)
+                    .nullable()
+                    .eq(user_group_audit_log::fk_target_user)),
+            )
+            .filter(user_group_audit_log::fk_user_group.eq(user_group_pk))
+            .order(user_group_audit_log::pk.desc())
+            .limit(limit.into())
+            .offset(offset.into())
+            .load::<(UserGroupAuditLog, UserPublic, Option<UserPublic>)>(connection)
+            .await?;
+
+        let audit_logs = logs
+            .into_iter()
+            .map(|(audit_log, audit_log_user, audit_log_target_user)| {
+                UserGroupAuditLogInnerJoined {
+                    pk: audit_log.pk,
+                    user: audit_log_user,
+                    action: audit_log.action,
+                    target_user: audit_log_target_user,
+                    invite_code: audit_log.invite_code,
+                    reason: audit_log.reason,
+                    creation_timestamp: audit_log.creation_timestamp,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        Ok(GetUserGroupAuditLogsResponse {
+            total_count,
+            audit_logs,
+        })
     })
     .await?;
 

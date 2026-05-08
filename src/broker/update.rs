@@ -19,7 +19,6 @@ use diesel::{
     BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, OptionalExtension, QueryDsl,
 };
 use diesel_async::RunQueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 use warp::{Rejection, Reply};
@@ -119,96 +118,93 @@ pub async fn edit_broker_handler(
     }
 
     let mut connection = acquire_db_connection().await?;
-    let broker = run_serializable_transaction(&mut connection, |connection| {
-        async move {
-            let BrokerJoined { broker, owner } =
-                get_broker_joined(broker_pk, &user, connection).await?;
-            if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(broker_pk),
-                ));
-            }
-
-            if is_system_bucket {
-                diesel::update(broker::table)
-                    .filter(broker::is_system_bucket.eq(true))
-                    .set(broker::is_system_bucket.eq(false))
-                    .execute(connection)
-                    .await?;
-            }
-
-            let update = BrokerUpdateOptional {
-                name: request.name,
-                description: request.description,
-                remove_duplicate_files: request.remove_duplicate_files,
-                enable_presigned_get: request.enable_presigned_get,
-                is_system_bucket: request.is_system_bucket,
-                total_quota: request.total_quota,
-            };
-
-            let update_field_changes = update.get_field_changes(&broker);
-
-            let now = Utc::now();
-
-            let updated_broker = if update_field_changes.has_changes() {
-                diesel::insert_into(broker_audit_log::table)
-                    .values(NewBrokerAuditLog {
-                        fk_broker: broker.pk,
-                        fk_user: user.pk,
-                        action: BrokerAuditAction::Edit,
-                        fk_target_group: None,
-                        new_quota: if update_field_changes.total_quota_changed {
-                            update.total_quota.flatten()
-                        } else {
-                            broker.total_quota
-                        },
-                        creation_timestamp: now,
-                        fk_target_user: None,
-                    })
-                    .execute(connection)
-                    .await?;
-
-                diesel::update(broker::table)
-                    .filter(broker::pk.eq(broker.pk))
-                    .set(update)
-                    .get_result::<Broker>(connection)
-                    .await?
-            } else {
-                broker
-            };
-
-            if let Some(disable_uploads) = request.disable_uploads
-                && disable_uploads != updated_broker.disable_uploads
-            {
-                diesel::insert_into(broker_audit_log::table)
-                    .values(NewBrokerAuditLog {
-                        fk_broker: updated_broker.pk,
-                        fk_user: user.pk,
-                        action: if disable_uploads {
-                            BrokerAuditAction::DisableUploads
-                        } else {
-                            BrokerAuditAction::EnableUploads
-                        },
-                        fk_target_group: None,
-                        new_quota: None,
-                        creation_timestamp: now,
-                        fk_target_user: None,
-                    })
-                    .execute(connection)
-                    .await?;
-
-                let updated_broker = diesel::update(broker::table)
-                    .filter(broker::pk.eq(updated_broker.pk))
-                    .set(broker::disable_uploads.eq(disable_uploads))
-                    .get_result::<Broker>(connection)
-                    .await?;
-
-                Ok(updated_broker)
-            } else {
-                Ok(updated_broker)
-            }
+    let broker = run_serializable_transaction(&mut connection, async |connection| {
+        let BrokerJoined { broker, owner } =
+            get_broker_joined(broker_pk, &user, connection).await?;
+        if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(broker_pk),
+            ));
         }
-        .scope_boxed()
+
+        if is_system_bucket {
+            diesel::update(broker::table)
+                .filter(broker::is_system_bucket.eq(true))
+                .set(broker::is_system_bucket.eq(false))
+                .execute(connection)
+                .await?;
+        }
+
+        let update = BrokerUpdateOptional {
+            name: request.name,
+            description: request.description,
+            remove_duplicate_files: request.remove_duplicate_files,
+            enable_presigned_get: request.enable_presigned_get,
+            is_system_bucket: request.is_system_bucket,
+            total_quota: request.total_quota,
+        };
+
+        let update_field_changes = update.get_field_changes(&broker);
+
+        let now = Utc::now();
+
+        let updated_broker = if update_field_changes.has_changes() {
+            diesel::insert_into(broker_audit_log::table)
+                .values(NewBrokerAuditLog {
+                    fk_broker: broker.pk,
+                    fk_user: user.pk,
+                    action: BrokerAuditAction::Edit,
+                    fk_target_group: None,
+                    new_quota: if update_field_changes.total_quota_changed {
+                        update.total_quota.flatten()
+                    } else {
+                        broker.total_quota
+                    },
+                    creation_timestamp: now,
+                    fk_target_user: None,
+                })
+                .execute(connection)
+                .await?;
+
+            diesel::update(broker::table)
+                .filter(broker::pk.eq(broker.pk))
+                .set(update)
+                .get_result::<Broker>(connection)
+                .await?
+        } else {
+            broker
+        };
+
+        if let Some(disable_uploads) = request.disable_uploads
+            && disable_uploads != updated_broker.disable_uploads
+        {
+            diesel::insert_into(broker_audit_log::table)
+                .values(NewBrokerAuditLog {
+                    fk_broker: updated_broker.pk,
+                    fk_user: user.pk,
+                    action: if disable_uploads {
+                        BrokerAuditAction::DisableUploads
+                    } else {
+                        BrokerAuditAction::EnableUploads
+                    },
+                    fk_target_group: None,
+                    new_quota: None,
+                    creation_timestamp: now,
+                    fk_target_user: None,
+                })
+                .execute(connection)
+                .await?;
+
+            let updated_broker = diesel::update(broker::table)
+                .filter(broker::pk.eq(updated_broker.pk))
+                .set(broker::disable_uploads.eq(disable_uploads))
+                .get_result::<Broker>(connection)
+                .await?;
+
+            Ok(updated_broker)
+        } else {
+            Ok(updated_broker)
+        }
     })
     .await?;
 
@@ -328,30 +324,27 @@ pub async fn edit_broket_bucket_handler(
     verify_bucket_connection(&bucket).await?;
 
     let mut connection = acquire_db_connection().await?;
-    let broker = run_retryable_transaction(&mut connection, |connection| {
-        async {
-            diesel::insert_into(broker_audit_log::table)
-                .values(NewBrokerAuditLog {
-                    fk_broker: broker.pk,
-                    fk_user: user.pk,
-                    action: BrokerAuditAction::BucketConnectionEdit,
-                    fk_target_group: None,
-                    new_quota: None,
-                    creation_timestamp: Utc::now(),
-                    fk_target_user: None,
-                })
-                .execute(connection)
-                .await?;
+    let broker = run_retryable_transaction(&mut connection, async |connection| {
+        diesel::insert_into(broker_audit_log::table)
+            .values(NewBrokerAuditLog {
+                fk_broker: broker.pk,
+                fk_user: user.pk,
+                action: BrokerAuditAction::BucketConnectionEdit,
+                fk_target_group: None,
+                new_quota: None,
+                creation_timestamp: Utc::now(),
+                fk_target_user: None,
+            })
+            .execute(connection)
+            .await?;
 
-            let updated_broker = diesel::update(broker::table)
-                .filter(broker::pk.eq(broker.pk))
-                .set(update)
-                .get_result::<Broker>(connection)
-                .await?;
+        let updated_broker = diesel::update(broker::table)
+            .filter(broker::pk.eq(broker.pk))
+            .set(update)
+            .get_result::<Broker>(connection)
+            .await?;
 
-            Ok(updated_broker)
-        }
-        .scope_boxed()
+        Ok(updated_broker)
     })
     .await?;
 
@@ -378,64 +371,59 @@ pub async fn change_broker_access_quota_handler(
     })?;
 
     let mut connection = acquire_db_connection().await?;
-    let updated_broker_access = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let BrokerJoined { broker, owner } =
-                get_broker_joined(broker_pk, &user, connection).await?;
-            if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(broker_pk),
-                ));
-            }
-
-            let curr_broker_access = broker_access::table
-                .filter(
-                    broker_access::pk
-                        .eq(broker_access_pk)
-                        .and(broker_access::fk_broker.eq(broker.pk)),
-                )
-                .get_result::<BrokerAccess>(connection)
-                .await?;
-
-            if curr_broker_access.quota == request.quota {
-                return Ok(curr_broker_access);
-            }
-
-            // don't allow public access to have unlimited quota
-            if request.quota.is_none() && curr_broker_access.public {
-                return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                    String::from("Cannot grant unlimited quota to public access"),
-                )));
-            }
-
-            let broker_access = diesel::update(broker_access::table)
-                .filter(broker_access::pk.eq(curr_broker_access.pk))
-                .set(broker_access::quota.eq(request.quota))
-                .get_result::<BrokerAccess>(connection)
-                .await
-                .optional()?
-                .ok_or_else(|| {
-                    TransactionRuntimeError::Rollback(Error::InaccessibleObjectError(
-                        broker_access_pk,
-                    ))
-                })?;
-
-            diesel::insert_into(broker_audit_log::table)
-                .values(NewBrokerAuditLog {
-                    fk_broker: broker.pk,
-                    fk_user: user.pk,
-                    action: BrokerAuditAction::AccessQuotaEdit,
-                    fk_target_group: broker_access.fk_granted_group,
-                    new_quota: request.quota,
-                    creation_timestamp: Utc::now(),
-                    fk_target_user: broker_access.fk_granted_user,
-                })
-                .execute(connection)
-                .await?;
-
-            Ok(broker_access)
+    let updated_broker_access = run_serializable_transaction(&mut connection, async |connection| {
+        let BrokerJoined { broker, owner } =
+            get_broker_joined(broker_pk, &user, connection).await?;
+        if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(broker_pk),
+            ));
         }
-        .scope_boxed()
+
+        let curr_broker_access = broker_access::table
+            .filter(
+                broker_access::pk
+                    .eq(broker_access_pk)
+                    .and(broker_access::fk_broker.eq(broker.pk)),
+            )
+            .get_result::<BrokerAccess>(connection)
+            .await?;
+
+        if curr_broker_access.quota == request.quota {
+            return Ok(curr_broker_access);
+        }
+
+        // don't allow public access to have unlimited quota
+        if request.quota.is_none() && curr_broker_access.public {
+            return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                String::from("Cannot grant unlimited quota to public access"),
+            )));
+        }
+
+        let broker_access = diesel::update(broker_access::table)
+            .filter(broker_access::pk.eq(curr_broker_access.pk))
+            .set(broker_access::quota.eq(request.quota))
+            .get_result::<BrokerAccess>(connection)
+            .await
+            .optional()?
+            .ok_or_else(|| {
+                TransactionRuntimeError::Rollback(Error::InaccessibleObjectError(broker_access_pk))
+            })?;
+
+        diesel::insert_into(broker_audit_log::table)
+            .values(NewBrokerAuditLog {
+                fk_broker: broker.pk,
+                fk_user: user.pk,
+                action: BrokerAuditAction::AccessQuotaEdit,
+                fk_target_group: broker_access.fk_granted_group,
+                new_quota: request.quota,
+                creation_timestamp: Utc::now(),
+                fk_target_user: broker_access.fk_granted_user,
+            })
+            .execute(connection)
+            .await?;
+
+        Ok(broker_access)
     })
     .await?;
 
@@ -454,62 +442,59 @@ pub async fn change_broker_access_admin_handler(
     user: User,
 ) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
-    let updated_broker_access = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let BrokerJoined { broker, owner } =
-                get_broker_joined(broker_pk, &user, connection).await?;
-            if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(broker_pk),
-                ));
-            }
-
-            let curr_broker_access = broker_access::table
-                .filter(
-                    broker_access::pk
-                        .eq(broker_access_pk)
-                        .and(broker_access::fk_broker.eq(broker.pk)),
-                )
-                .get_result::<BrokerAccess>(connection)
-                .await?;
-
-            if curr_broker_access.write == request.is_admin {
-                return Ok(curr_broker_access);
-            }
-
-            // don't allow giving admin privileges to public access
-            if request.is_admin && curr_broker_access.public {
-                return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                    String::from("Cannot grant admin privileges to public access"),
-                )));
-            }
-
-            let broker_access = diesel::update(broker_access::table)
-                .filter(broker_access::pk.eq(curr_broker_access.pk))
-                .set(broker_access::write.eq(request.is_admin))
-                .get_result::<BrokerAccess>(connection)
-                .await?;
-
-            diesel::insert_into(broker_audit_log::table)
-                .values(NewBrokerAuditLog {
-                    fk_broker: broker.pk,
-                    fk_user: user.pk,
-                    action: if request.is_admin {
-                        BrokerAuditAction::AccessAdminPromote
-                    } else {
-                        BrokerAuditAction::AccessAdminDemote
-                    },
-                    fk_target_group: broker_access.fk_granted_group,
-                    new_quota: None,
-                    creation_timestamp: Utc::now(),
-                    fk_target_user: broker_access.fk_granted_user,
-                })
-                .execute(connection)
-                .await?;
-
-            Ok(broker_access)
+    let updated_broker_access = run_serializable_transaction(&mut connection, async |connection| {
+        let BrokerJoined { broker, owner } =
+            get_broker_joined(broker_pk, &user, connection).await?;
+        if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(broker_pk),
+            ));
         }
-        .scope_boxed()
+
+        let curr_broker_access = broker_access::table
+            .filter(
+                broker_access::pk
+                    .eq(broker_access_pk)
+                    .and(broker_access::fk_broker.eq(broker.pk)),
+            )
+            .get_result::<BrokerAccess>(connection)
+            .await?;
+
+        if curr_broker_access.write == request.is_admin {
+            return Ok(curr_broker_access);
+        }
+
+        // don't allow giving admin privileges to public access
+        if request.is_admin && curr_broker_access.public {
+            return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                String::from("Cannot grant admin privileges to public access"),
+            )));
+        }
+
+        let broker_access = diesel::update(broker_access::table)
+            .filter(broker_access::pk.eq(curr_broker_access.pk))
+            .set(broker_access::write.eq(request.is_admin))
+            .get_result::<BrokerAccess>(connection)
+            .await?;
+
+        diesel::insert_into(broker_audit_log::table)
+            .values(NewBrokerAuditLog {
+                fk_broker: broker.pk,
+                fk_user: user.pk,
+                action: if request.is_admin {
+                    BrokerAuditAction::AccessAdminPromote
+                } else {
+                    BrokerAuditAction::AccessAdminDemote
+                },
+                fk_target_group: broker_access.fk_granted_group,
+                new_quota: None,
+                creation_timestamp: Utc::now(),
+                fk_target_user: broker_access.fk_granted_user,
+            })
+            .execute(connection)
+            .await?;
+
+        Ok(broker_access)
     })
     .await?;
 
@@ -522,47 +507,42 @@ pub async fn delete_broker_access_handler(
     user: User,
 ) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
-    let deleted_broker_access = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let BrokerJoined { broker, owner } =
-                get_broker_joined(broker_pk, &user, connection).await?;
-            if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(broker_pk),
-                ));
-            }
-
-            let broker_access = diesel::delete(broker_access::table)
-                .filter(
-                    broker_access::pk
-                        .eq(broker_access_pk)
-                        .and(broker_access::fk_broker.eq(broker.pk)),
-                )
-                .get_result::<BrokerAccess>(connection)
-                .await
-                .optional()?
-                .ok_or_else(|| {
-                    TransactionRuntimeError::Rollback(Error::InaccessibleObjectError(
-                        broker_access_pk,
-                    ))
-                })?;
-
-            diesel::insert_into(broker_audit_log::table)
-                .values(NewBrokerAuditLog {
-                    fk_broker: broker.pk,
-                    fk_user: user.pk,
-                    action: BrokerAuditAction::AccessRevoked,
-                    fk_target_group: broker_access.fk_granted_group,
-                    new_quota: None,
-                    creation_timestamp: Utc::now(),
-                    fk_target_user: broker_access.fk_granted_user,
-                })
-                .execute(connection)
-                .await?;
-
-            Ok(broker_access)
+    let deleted_broker_access = run_serializable_transaction(&mut connection, async |connection| {
+        let BrokerJoined { broker, owner } =
+            get_broker_joined(broker_pk, &user, connection).await?;
+        if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(broker_pk),
+            ));
         }
-        .scope_boxed()
+
+        let broker_access = diesel::delete(broker_access::table)
+            .filter(
+                broker_access::pk
+                    .eq(broker_access_pk)
+                    .and(broker_access::fk_broker.eq(broker.pk)),
+            )
+            .get_result::<BrokerAccess>(connection)
+            .await
+            .optional()?
+            .ok_or_else(|| {
+                TransactionRuntimeError::Rollback(Error::InaccessibleObjectError(broker_access_pk))
+            })?;
+
+        diesel::insert_into(broker_audit_log::table)
+            .values(NewBrokerAuditLog {
+                fk_broker: broker.pk,
+                fk_user: user.pk,
+                action: BrokerAuditAction::AccessRevoked,
+                fk_target_group: broker_access.fk_granted_group,
+                new_quota: None,
+                creation_timestamp: Utc::now(),
+                fk_target_user: broker_access.fk_granted_user,
+            })
+            .execute(connection)
+            .await?;
+
+        Ok(broker_access)
     })
     .await?;
 
@@ -606,73 +586,70 @@ pub async fn get_broker_audit_logs_handler(
     })?;
 
     let mut connection = acquire_db_connection().await?;
-    let response = run_repeatable_read_transaction(&mut connection, |connection| {
-        async {
-            let BrokerJoined { broker, owner } =
-                get_broker_joined(broker_pk, &user, connection).await?;
-            // only allow broker admins to view audit logs
-            if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(broker_pk),
-                ));
-            }
-
-            let total_count = broker_audit_log::table
-                .filter(broker_audit_log::fk_broker.eq(broker.pk))
-                .count()
-                .get_result::<i64>(connection)
-                .await?;
-
-            let limit = params.limit.unwrap_or(50);
-            let offset = limit * params.page.unwrap_or(0);
-
-            let (source_user, target_user) = diesel::alias!(
-                registered_user as source_user,
-                registered_user as target_user
-            );
-            let logs = broker_audit_log::table
-                .inner_join(
-                    source_user
-                        .on(broker_audit_log::fk_user.eq(source_user.field(registered_user::pk))),
-                )
-                .left_join(user_group::table)
-                .left_join(
-                    target_user.on(broker_audit_log::fk_target_user
-                        .eq(target_user.field(registered_user::pk).nullable())),
-                )
-                .filter(broker_audit_log::fk_broker.eq(broker.pk))
-                .order(broker_audit_log::pk.desc())
-                .limit(limit.into())
-                .offset(offset.into())
-                .load::<(
-                    BrokerAuditLog,
-                    UserPublic,
-                    Option<UserGroup>,
-                    Option<UserPublic>,
-                )>(connection)
-                .await?;
-
-            let audit_logs = logs
-                .into_iter()
-                .map(
-                    |(audit_log, user, target_group, target_user)| BrokerAuditLogInnerJoined {
-                        pk: audit_log.pk,
-                        user,
-                        action: audit_log.action,
-                        target_group,
-                        new_quota: audit_log.new_quota,
-                        creation_timestamp: audit_log.creation_timestamp,
-                        target_user,
-                    },
-                )
-                .collect::<Vec<_>>();
-
-            Ok(GetBrokerAuditLogsResponse {
-                total_count,
-                audit_logs,
-            })
+    let response = run_repeatable_read_transaction(&mut connection, async |connection| {
+        let BrokerJoined { broker, owner } =
+            get_broker_joined(broker_pk, &user, connection).await?;
+        // only allow broker admins to view audit logs
+        if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(broker_pk),
+            ));
         }
-        .scope_boxed()
+
+        let total_count = broker_audit_log::table
+            .filter(broker_audit_log::fk_broker.eq(broker.pk))
+            .count()
+            .get_result::<i64>(connection)
+            .await?;
+
+        let limit = params.limit.unwrap_or(50);
+        let offset = limit * params.page.unwrap_or(0);
+
+        let (source_user, target_user) = diesel::alias!(
+            registered_user as source_user,
+            registered_user as target_user
+        );
+        let logs = broker_audit_log::table
+            .inner_join(
+                source_user
+                    .on(broker_audit_log::fk_user.eq(source_user.field(registered_user::pk))),
+            )
+            .left_join(user_group::table)
+            .left_join(
+                target_user.on(broker_audit_log::fk_target_user
+                    .eq(target_user.field(registered_user::pk).nullable())),
+            )
+            .filter(broker_audit_log::fk_broker.eq(broker.pk))
+            .order(broker_audit_log::pk.desc())
+            .limit(limit.into())
+            .offset(offset.into())
+            .load::<(
+                BrokerAuditLog,
+                UserPublic,
+                Option<UserGroup>,
+                Option<UserPublic>,
+            )>(connection)
+            .await?;
+
+        let audit_logs = logs
+            .into_iter()
+            .map(
+                |(audit_log, user, target_group, target_user)| BrokerAuditLogInnerJoined {
+                    pk: audit_log.pk,
+                    user,
+                    action: audit_log.action,
+                    target_group,
+                    new_quota: audit_log.new_quota,
+                    creation_timestamp: audit_log.creation_timestamp,
+                    target_user,
+                },
+            )
+            .collect::<Vec<_>>();
+
+        Ok(GetBrokerAuditLogsResponse {
+            total_count,
+            audit_logs,
+        })
     })
     .await?;
 

@@ -11,7 +11,6 @@ use diesel_async::{
         AsyncDieselConnectionManager, ManagerConfig,
         deadpool::{Object, Pool},
     },
-    scoped_futures::ScopedBoxFuture,
 };
 use dotenvy::dotenv;
 use error::{Error, TransactionRuntimeError};
@@ -176,70 +175,88 @@ pub async fn acquire_db_connection() -> Result<DbConnection, Error> {
         .map_err(|e| Error::DatabaseConnectionError(e.to_string()))
 }
 
-pub async fn run_retryable_transaction<'b, 'c, T: 'b, F>(
+pub trait AsyncFunc<T, R>:
+    AsyncFnOnce(T) -> R + FnOnce(T) -> <Self as AsyncFunc<T, R>>::Fut
+{
+    type Fut: Future<Output = R>;
+}
+
+impl<F, T, Fut, R> AsyncFunc<T, R> for F
+where
+    F: AsyncFnOnce(T) -> R + FnOnce(T) -> Fut,
+    Fut: Future<Output = R>,
+{
+    type Fut = Fut;
+}
+
+pub async fn run_retryable_transaction<'a, T, F>(
     connection: &mut AsyncPgConnection,
     function: F,
 ) -> Result<T, Error>
 where
-    F: for<'r> FnOnce(
-            &'r mut AsyncPgConnection,
-        ) -> ScopedBoxFuture<'b, 'r, Result<T, TransactionRuntimeError>>
-        + Clone
-        + Send
-        + 'c,
+    T: Send + 'a,
+    F: Clone + Send + 'a,
+    for<'r> F: AsyncFnOnce(&'r mut AsyncPgConnection) -> Result<T, TransactionRuntimeError>
+        + AsyncFunc<&'r mut AsyncPgConnection, Result<T, TransactionRuntimeError>>,
+    for<'r> <F as AsyncFunc<&'r mut AsyncPgConnection, Result<T, TransactionRuntimeError>>>::Fut:
+        Send,
+    TransactionRuntimeError: From<diesel::result::Error>,
 {
     run_retryable_transaction_with_level(connection.build_transaction().read_committed(), function)
         .await
 }
 
-pub async fn run_serializable_transaction<'b, 'c, T: 'b, F>(
+pub async fn run_serializable_transaction<'a, T, F>(
     connection: &mut AsyncPgConnection,
     function: F,
 ) -> Result<T, Error>
 where
-    F: for<'r> FnOnce(
-            &'r mut AsyncPgConnection,
-        ) -> ScopedBoxFuture<'b, 'r, Result<T, TransactionRuntimeError>>
-        + Clone
-        + Send
-        + 'c,
+    T: Send + 'a,
+    F: Clone + Send + 'a,
+    for<'r> F: AsyncFnOnce(&'r mut AsyncPgConnection) -> Result<T, TransactionRuntimeError>
+        + AsyncFunc<&'r mut AsyncPgConnection, Result<T, TransactionRuntimeError>>,
+    for<'r> <F as AsyncFunc<&'r mut AsyncPgConnection, Result<T, TransactionRuntimeError>>>::Fut:
+        Send,
+    TransactionRuntimeError: From<diesel::result::Error>,
 {
     run_retryable_transaction_with_level(connection.build_transaction().serializable(), function)
         .await
 }
 
-pub async fn run_repeatable_read_transaction<'b, 'c, T: 'b, F>(
+pub async fn run_repeatable_read_transaction<'a, T, F>(
     connection: &mut AsyncPgConnection,
     function: F,
 ) -> Result<T, Error>
 where
-    F: for<'r> FnOnce(
-            &'r mut AsyncPgConnection,
-        ) -> ScopedBoxFuture<'b, 'r, Result<T, TransactionRuntimeError>>
-        + Clone
-        + Send
-        + 'c,
+    T: Send + 'a,
+    F: Clone + Send + 'a,
+    for<'r> F: AsyncFnOnce(&'r mut AsyncPgConnection) -> Result<T, TransactionRuntimeError>
+        + AsyncFunc<&'r mut AsyncPgConnection, Result<T, TransactionRuntimeError>>,
+    for<'r> <F as AsyncFunc<&'r mut AsyncPgConnection, Result<T, TransactionRuntimeError>>>::Fut:
+        Send,
+    TransactionRuntimeError: From<diesel::result::Error>,
 {
     run_retryable_transaction_with_level(connection.build_transaction().repeatable_read(), function)
         .await
 }
 
-async fn run_retryable_transaction_with_level<'b, 'c, T, F>(
-    mut transaction_builder: TransactionBuilder<'c, AsyncPgConnection>,
+async fn run_retryable_transaction_with_level<'a, T, F>(
+    mut transaction_builder: TransactionBuilder<'a, AsyncPgConnection>,
     function: F,
 ) -> Result<T, Error>
 where
-    T: 'b,
-    F: for<'r> FnOnce(
-            &'r mut AsyncPgConnection,
-        ) -> ScopedBoxFuture<'b, 'r, Result<T, TransactionRuntimeError>>
-        + Clone
-        + Send
-        + 'c,
+    T: Send + 'a,
+    F: Clone + Send + 'a,
+    for<'r> F: AsyncFnOnce(&'r mut AsyncPgConnection) -> Result<T, TransactionRuntimeError>
+        + AsyncFunc<&'r mut AsyncPgConnection, Result<T, TransactionRuntimeError>>,
+    for<'r> <F as AsyncFunc<&'r mut AsyncPgConnection, Result<T, TransactionRuntimeError>>>::Fut:
+        Send,
+    TransactionRuntimeError: From<diesel::result::Error>,
 {
     let mut retry_count: usize = 0;
     loop {
         retry_count += 1;
+
         let transaction_result = transaction_builder
             .run::<_, TransactionRuntimeError, _>(function.clone())
             .await;
@@ -296,69 +313,62 @@ async fn recompile_tag_auto_match_conditions() -> Result<(), Error> {
     use crate::model::{Tag, TagCategory};
     use crate::tag::auto_matching::{AutoMatchTarget, compile_tag_auto_match_condition};
     use diesel::{BoolExpressionMethods, ExpressionMethods, QueryDsl};
-    use diesel_async::{RunQueryDsl, scoped_futures::ScopedFutureExt};
+    use diesel_async::RunQueryDsl;
 
     let mut connection = acquire_db_connection().await?;
-    run_serializable_transaction(&mut connection, |connection| {
-        async {
-            diesel::update(schema::tag::table)
-                .filter(
-                    schema::tag::compiled_auto_match_condition_post
-                        .is_not_null()
-                        .or(schema::tag::compiled_auto_match_condition_collection.is_not_null()),
-                )
-                .set((
-                    schema::tag::compiled_auto_match_condition_post.eq(None::<String>),
-                    schema::tag::compiled_auto_match_condition_collection.eq(None::<String>),
-                ))
-                .execute(connection)
-                .await?;
+    run_serializable_transaction(&mut connection, |connection| async {
+        diesel::update(schema::tag::table)
+            .filter(
+                schema::tag::compiled_auto_match_condition_post
+                    .is_not_null()
+                    .or(schema::tag::compiled_auto_match_condition_collection.is_not_null()),
+            )
+            .set((
+                schema::tag::compiled_auto_match_condition_post.eq(None::<String>),
+                schema::tag::compiled_auto_match_condition_collection.eq(None::<String>),
+            ))
+            .execute(connection)
+            .await?;
 
-            let tags_with_conditions = schema::tag::table
-                .left_join(schema::tag_category::table)
-                .filter(
-                    schema::tag::auto_match_condition_post
-                        .is_not_null()
-                        .or(schema::tag::auto_match_condition_collection.is_not_null())
-                        .or(schema::tag_category::auto_match_condition_post.is_not_null())
-                        .or(schema::tag_category::auto_match_condition_collection.is_not_null()),
-                )
-                .load::<(Tag, Option<TagCategory>)>(connection)
-                .await?;
+        let tags_with_conditions = schema::tag::table
+            .left_join(schema::tag_category::table)
+            .filter(
+                schema::tag::auto_match_condition_post
+                    .is_not_null()
+                    .or(schema::tag::auto_match_condition_collection.is_not_null())
+                    .or(schema::tag_category::auto_match_condition_post.is_not_null())
+                    .or(schema::tag_category::auto_match_condition_collection.is_not_null()),
+            )
+            .load::<(Tag, Option<TagCategory>)>(connection)
+            .await?;
 
-            for (tag, tag_category) in tags_with_conditions {
-                let tag_pk = tag.pk;
-                let compiled_tag_auto_match_condition_post = compile_tag_auto_match_condition(
-                    tag.clone(),
-                    tag_category.clone(),
-                    AutoMatchTarget::Post,
-                )?;
-                let compiled_tag_auto_match_condition_collection =
-                    compile_tag_auto_match_condition(
-                        tag,
-                        tag_category,
-                        AutoMatchTarget::Collection,
-                    )?;
+        for (tag, tag_category) in tags_with_conditions {
+            let tag_pk = tag.pk;
+            let compiled_tag_auto_match_condition_post = compile_tag_auto_match_condition(
+                tag.clone(),
+                tag_category.clone(),
+                AutoMatchTarget::Post,
+            )?;
+            let compiled_tag_auto_match_condition_collection =
+                compile_tag_auto_match_condition(tag, tag_category, AutoMatchTarget::Collection)?;
 
-                if compiled_tag_auto_match_condition_post.is_some()
-                    || compiled_tag_auto_match_condition_collection.is_some()
-                {
-                    diesel::update(schema::tag::table)
-                        .filter(schema::tag::pk.eq(tag_pk))
-                        .set((
-                            schema::tag::compiled_auto_match_condition_post
-                                .eq(compiled_tag_auto_match_condition_post),
-                            schema::tag::compiled_auto_match_condition_collection
-                                .eq(compiled_tag_auto_match_condition_collection),
-                        ))
-                        .execute(connection)
-                        .await?;
-                }
+            if compiled_tag_auto_match_condition_post.is_some()
+                || compiled_tag_auto_match_condition_collection.is_some()
+            {
+                diesel::update(schema::tag::table)
+                    .filter(schema::tag::pk.eq(tag_pk))
+                    .set((
+                        schema::tag::compiled_auto_match_condition_post
+                            .eq(compiled_tag_auto_match_condition_post),
+                        schema::tag::compiled_auto_match_condition_collection
+                            .eq(compiled_tag_auto_match_condition_collection),
+                    ))
+                    .execute(connection)
+                    .await?;
             }
-
-            Ok(())
         }
-        .scope_boxed()
+
+        Ok(())
     })
     .await
 }

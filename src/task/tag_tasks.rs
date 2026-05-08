@@ -6,7 +6,6 @@ use crate::task::{IS_SHUTDOWN, LockedObjectsTaskSentinel};
 use crate::{acquire_db_connection, retry_on_serialization_failure, run_serializable_transaction};
 use diesel::ExpressionMethods;
 use diesel_async::RunQueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::runtime::Handle;
 
@@ -21,7 +20,7 @@ pub fn run_apply_auto_tags_tasks(tokio_handle: Handle) -> Result<(), Error> {
             }
 
             let mut connection = acquire_db_connection().await?;
-            let tasks = run_serializable_transaction(&mut connection, |connection| async move {
+            let tasks = run_serializable_transaction(&mut connection, async |connection| {
                 diesel::sql_query("
                     WITH relevant_apply_auto_tags_tasks AS(
                         SELECT * FROM apply_auto_tags_task
@@ -36,7 +35,7 @@ pub fn run_apply_auto_tags_tasks(tokio_handle: Handle) -> Result<(), Error> {
                 .load::<ApplyAutoTagsTask>(connection)
                 .await
                 .map_err(retry_on_serialization_failure)
-            }.scope_boxed()).await?;
+            }).await?;
 
             if tasks.is_empty() {
                 break;
@@ -59,9 +58,9 @@ pub fn run_apply_auto_tags_tasks(tokio_handle: Handle) -> Result<(), Error> {
                 }
 
                 let task_to_run = task.clone();
-                let res = run_serializable_transaction(&mut connection, |connection| async move{
+                let res = run_serializable_transaction(&mut connection, async |connection| {
                     run_apply_auto_tags_task(&task_to_run, connection).await
-                }.scope_boxed()).await;
+                }).await;
 
                 if let Err(e) = res {
                     log::error!(

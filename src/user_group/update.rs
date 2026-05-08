@@ -23,7 +23,6 @@ use crate::{acquire_db_connection, perms, run_serializable_transaction};
 use chrono::{DateTime, Utc};
 use diesel::OptionalExtension;
 use diesel_async::RunQueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 use warp::{Rejection, Reply};
@@ -115,8 +114,8 @@ pub async fn edit_user_group_handler(
     dedup_vecs_optional(&mut request.added_tags, &request.tags_overwrite);
 
     let mut connection = acquire_db_connection().await?;
-    let user_group_detailed = run_serializable_transaction(&mut connection, |connection| {
-        async move {
+    let user_group_detailed =
+        run_serializable_transaction(&mut connection, async move |connection| {
             let user_group =
                 perms::load_user_group_secured(user_group_pk, Some(&user), connection).await?;
             if !perms::is_user_group_editable(user_group_pk, Some(&user), connection).await? {
@@ -212,10 +211,8 @@ pub async fn edit_user_group_handler(
             } else {
                 Ok(load_user_group_detailed(user_group, Some(&user), connection).await?)
             }
-        }
-        .scope_boxed()
-    })
-    .await?;
+        })
+        .await?;
 
     Ok(warp::reply::json(&user_group_detailed))
 }
@@ -261,201 +258,199 @@ pub async fn change_user_group_membership_handler(
     }
 
     let mut connection = acquire_db_connection().await?;
-    let response = run_serializable_transaction(&mut connection, |connection| {
-        async move {
-            let UserGroupJoined { group, membership } =
-                get_user_group_joined(user_group_pk, Some(&user), connection).await?;
-            match action {
-                MembershipChangeAction::Promote | MembershipChangeAction::Demote => {
-                    // only owner can promote/demote admins
-                    if group.owner.pk != user.pk {
-                        return Err(TransactionRuntimeError::Rollback(
-                            Error::InaccessibleObjectError(user_group_pk),
-                        ));
-                    }
-                }
-                MembershipChangeAction::Kick { .. }
-                | MembershipChangeAction::Ban { .. }
-                | MembershipChangeAction::Unban => {
-                    // owner / admins can kick/ban
-                    if !is_user_group_detailed_editable(&group, &user, membership.as_ref()) {
-                        return Err(TransactionRuntimeError::Rollback(
-                            Error::InaccessibleObjectError(user_group_pk),
-                        ));
-                    }
+    let response = run_serializable_transaction(&mut connection, async |connection| {
+        let UserGroupJoined { group, membership } =
+            get_user_group_joined(user_group_pk, Some(&user), connection).await?;
+        match action {
+            MembershipChangeAction::Promote | MembershipChangeAction::Demote => {
+                // only owner can promote/demote admins
+                if group.owner.pk != user.pk {
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InaccessibleObjectError(user_group_pk),
+                    ));
                 }
             }
-
-            let prev = user_group_membership::table
-                .filter(
-                    user_group_membership::fk_user
-                        .eq(member_user_pk)
-                        .and(user_group_membership::fk_group.eq(group.pk)),
-                )
-                .get_result::<UserGroupMembership>(connection)
-                .await
-                .optional()?
-                .ok_or(Error::NotFoundError)?;
-
-            let updated = match action {
-                MembershipChangeAction::Promote => {
-                    if prev.revoked {
-                        return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                            format!(
-                                "Cannot promote banned user {} from group {}",
-                                member_user_pk, user_group_pk
-                            ),
-                        )));
-                    }
-                    if prev.administrator {
-                        return Ok(ChangeUserGroupMembershipResponse {
-                            prev,
-                            updated: None,
-                            changed: false,
-                        });
-                    }
-
-                    Some(
-                        diesel::update(user_group_membership::table)
-                            .filter(
-                                user_group_membership::fk_user
-                                    .eq(member_user_pk)
-                                    .and(user_group_membership::fk_group.eq(group.pk)),
-                            )
-                            .set(user_group_membership::administrator.eq(true))
-                            .get_result::<UserGroupMembership>(connection)
-                            .await?,
-                    )
+            MembershipChangeAction::Kick { .. }
+            | MembershipChangeAction::Ban { .. }
+            | MembershipChangeAction::Unban => {
+                // owner / admins can kick/ban
+                if !is_user_group_detailed_editable(&group, &user, membership.as_ref()) {
+                    return Err(TransactionRuntimeError::Rollback(
+                        Error::InaccessibleObjectError(user_group_pk),
+                    ));
                 }
-                MembershipChangeAction::Demote => {
-                    if prev.revoked {
-                        return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                            format!(
-                                "Cannot demote banned user {} from group {}",
-                                member_user_pk, user_group_pk
-                            ),
-                        )));
-                    }
-                    if !prev.administrator {
-                        return Ok(ChangeUserGroupMembershipResponse {
-                            prev,
-                            updated: None,
-                            changed: false,
-                        });
-                    }
-
-                    Some(
-                        diesel::update(user_group_membership::table)
-                            .filter(
-                                user_group_membership::fk_user
-                                    .eq(member_user_pk)
-                                    .and(user_group_membership::fk_group.eq(group.pk)),
-                            )
-                            .set(user_group_membership::administrator.eq(false))
-                            .get_result::<UserGroupMembership>(connection)
-                            .await?,
-                    )
-                }
-                MembershipChangeAction::Kick { .. } => {
-                    if prev.revoked {
-                        return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                            format!(
-                                "Cannot kick banned user {} from group {}",
-                                member_user_pk, user_group_pk
-                            ),
-                        )));
-                    }
-
-                    diesel::delete(user_group_membership::table)
-                        .filter(
-                            user_group_membership::fk_user
-                                .eq(member_user_pk)
-                                .and(user_group_membership::fk_group.eq(group.pk)),
-                        )
-                        .execute(connection)
-                        .await?;
-
-                    None
-                }
-                MembershipChangeAction::Ban { .. } => {
-                    if prev.revoked {
-                        return Ok(ChangeUserGroupMembershipResponse {
-                            prev,
-                            updated: None,
-                            changed: false,
-                        });
-                    }
-
-                    Some(
-                        diesel::update(user_group_membership::table)
-                            .filter(
-                                user_group_membership::fk_user
-                                    .eq(member_user_pk)
-                                    .and(user_group_membership::fk_group.eq(group.pk)),
-                            )
-                            .set(user_group_membership::revoked.eq(true))
-                            .get_result::<UserGroupMembership>(connection)
-                            .await?,
-                    )
-                }
-                MembershipChangeAction::Unban => {
-                    if !prev.revoked {
-                        return Ok(ChangeUserGroupMembershipResponse {
-                            prev,
-                            updated: None,
-                            changed: false,
-                        });
-                    }
-
-                    diesel::delete(user_group_membership::table)
-                        .filter(
-                            user_group_membership::fk_user
-                                .eq(member_user_pk)
-                                .and(user_group_membership::fk_group.eq(group.pk)),
-                        )
-                        .execute(connection)
-                        .await?;
-
-                    None
-                }
-            };
-
-            let audit_action = match action {
-                MembershipChangeAction::Promote => UserGroupAuditAction::AdminPromote,
-                MembershipChangeAction::Demote => UserGroupAuditAction::AdminDemote,
-                MembershipChangeAction::Kick { .. } => UserGroupAuditAction::Kick,
-                MembershipChangeAction::Ban { .. } => UserGroupAuditAction::Ban,
-                MembershipChangeAction::Unban => UserGroupAuditAction::Unban,
-            };
-
-            let reason = match action {
-                MembershipChangeAction::Promote
-                | MembershipChangeAction::Demote
-                | MembershipChangeAction::Unban => None,
-                MembershipChangeAction::Kick { reason }
-                | MembershipChangeAction::Ban { reason } => reason,
-            };
-
-            diesel::insert_into(user_group_audit_log::table)
-                .values(NewUserGroupAuditLog {
-                    fk_user_group: group.pk,
-                    fk_user: user.pk,
-                    action: audit_action,
-                    fk_target_user: Some(member_user_pk),
-                    invite_code: None,
-                    reason,
-                    creation_timestamp: Utc::now(),
-                })
-                .execute(connection)
-                .await?;
-
-            Ok(ChangeUserGroupMembershipResponse {
-                prev,
-                updated,
-                changed: true,
-            })
+            }
         }
-        .scope_boxed()
+
+        let prev = user_group_membership::table
+            .filter(
+                user_group_membership::fk_user
+                    .eq(member_user_pk)
+                    .and(user_group_membership::fk_group.eq(group.pk)),
+            )
+            .get_result::<UserGroupMembership>(connection)
+            .await
+            .optional()?
+            .ok_or(Error::NotFoundError)?;
+
+        let updated = match action {
+            MembershipChangeAction::Promote => {
+                if prev.revoked {
+                    return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                        format!(
+                            "Cannot promote banned user {} from group {}",
+                            member_user_pk, user_group_pk
+                        ),
+                    )));
+                }
+                if prev.administrator {
+                    return Ok(ChangeUserGroupMembershipResponse {
+                        prev,
+                        updated: None,
+                        changed: false,
+                    });
+                }
+
+                Some(
+                    diesel::update(user_group_membership::table)
+                        .filter(
+                            user_group_membership::fk_user
+                                .eq(member_user_pk)
+                                .and(user_group_membership::fk_group.eq(group.pk)),
+                        )
+                        .set(user_group_membership::administrator.eq(true))
+                        .get_result::<UserGroupMembership>(connection)
+                        .await?,
+                )
+            }
+            MembershipChangeAction::Demote => {
+                if prev.revoked {
+                    return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                        format!(
+                            "Cannot demote banned user {} from group {}",
+                            member_user_pk, user_group_pk
+                        ),
+                    )));
+                }
+                if !prev.administrator {
+                    return Ok(ChangeUserGroupMembershipResponse {
+                        prev,
+                        updated: None,
+                        changed: false,
+                    });
+                }
+
+                Some(
+                    diesel::update(user_group_membership::table)
+                        .filter(
+                            user_group_membership::fk_user
+                                .eq(member_user_pk)
+                                .and(user_group_membership::fk_group.eq(group.pk)),
+                        )
+                        .set(user_group_membership::administrator.eq(false))
+                        .get_result::<UserGroupMembership>(connection)
+                        .await?,
+                )
+            }
+            MembershipChangeAction::Kick { .. } => {
+                if prev.revoked {
+                    return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                        format!(
+                            "Cannot kick banned user {} from group {}",
+                            member_user_pk, user_group_pk
+                        ),
+                    )));
+                }
+
+                diesel::delete(user_group_membership::table)
+                    .filter(
+                        user_group_membership::fk_user
+                            .eq(member_user_pk)
+                            .and(user_group_membership::fk_group.eq(group.pk)),
+                    )
+                    .execute(connection)
+                    .await?;
+
+                None
+            }
+            MembershipChangeAction::Ban { .. } => {
+                if prev.revoked {
+                    return Ok(ChangeUserGroupMembershipResponse {
+                        prev,
+                        updated: None,
+                        changed: false,
+                    });
+                }
+
+                Some(
+                    diesel::update(user_group_membership::table)
+                        .filter(
+                            user_group_membership::fk_user
+                                .eq(member_user_pk)
+                                .and(user_group_membership::fk_group.eq(group.pk)),
+                        )
+                        .set(user_group_membership::revoked.eq(true))
+                        .get_result::<UserGroupMembership>(connection)
+                        .await?,
+                )
+            }
+            MembershipChangeAction::Unban => {
+                if !prev.revoked {
+                    return Ok(ChangeUserGroupMembershipResponse {
+                        prev,
+                        updated: None,
+                        changed: false,
+                    });
+                }
+
+                diesel::delete(user_group_membership::table)
+                    .filter(
+                        user_group_membership::fk_user
+                            .eq(member_user_pk)
+                            .and(user_group_membership::fk_group.eq(group.pk)),
+                    )
+                    .execute(connection)
+                    .await?;
+
+                None
+            }
+        };
+
+        let audit_action = match action {
+            MembershipChangeAction::Promote => UserGroupAuditAction::AdminPromote,
+            MembershipChangeAction::Demote => UserGroupAuditAction::AdminDemote,
+            MembershipChangeAction::Kick { .. } => UserGroupAuditAction::Kick,
+            MembershipChangeAction::Ban { .. } => UserGroupAuditAction::Ban,
+            MembershipChangeAction::Unban => UserGroupAuditAction::Unban,
+        };
+
+        let reason = match action {
+            MembershipChangeAction::Promote
+            | MembershipChangeAction::Demote
+            | MembershipChangeAction::Unban => None,
+            MembershipChangeAction::Kick { reason } | MembershipChangeAction::Ban { reason } => {
+                reason
+            }
+        };
+
+        diesel::insert_into(user_group_audit_log::table)
+            .values(NewUserGroupAuditLog {
+                fk_user_group: group.pk,
+                fk_user: user.pk,
+                action: audit_action,
+                fk_target_user: Some(member_user_pk),
+                invite_code: None,
+                reason,
+                creation_timestamp: Utc::now(),
+            })
+            .execute(connection)
+            .await?;
+
+        Ok(ChangeUserGroupMembershipResponse {
+            prev,
+            updated,
+            changed: true,
+        })
     })
     .await?;
 

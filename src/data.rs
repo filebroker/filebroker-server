@@ -18,7 +18,6 @@ use crate::{
 use bytes::Bytes;
 use chrono::Utc;
 use diesel::QueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{Stream, TryStreamExt};
 use lazy_static::lazy_static;
@@ -455,30 +454,27 @@ pub async fn create_user_avatar_handler(
     .await?;
 
     let mut connection = acquire_db_connection().await?;
-    run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let user = registered_user::table
-                .filter(registered_user::pk.eq(user_pk))
-                .get_result::<User>(connection)
-                .await?;
+    run_serializable_transaction(&mut connection, async |connection| {
+        let user = registered_user::table
+            .filter(registered_user::pk.eq(user_pk))
+            .get_result::<User>(connection)
+            .await?;
 
-            let s3_object = diesel::insert_into(s3_object::table)
-                .values(&avatar_object)
-                .get_result::<S3Object>(connection)
-                .await?;
+        let s3_object = diesel::insert_into(s3_object::table)
+            .values(&avatar_object)
+            .get_result::<S3Object>(connection)
+            .await?;
 
-            diesel::update(registered_user::table.filter(registered_user::pk.eq(user_pk)))
-                .set(registered_user::avatar_object_key.eq(&s3_object.object_key))
-                .execute(connection)
-                .await?;
+        diesel::update(registered_user::table.filter(registered_user::pk.eq(user_pk)))
+            .set(registered_user::avatar_object_key.eq(&s3_object.object_key))
+            .execute(connection)
+            .await?;
 
-            if let Some(avatar_object_key) = user.avatar_object_key {
-                delete_s3_objects(&[avatar_object_key], &get_system_user(), connection).await?;
-            }
-
-            Ok(())
+        if let Some(avatar_object_key) = user.avatar_object_key {
+            delete_s3_objects(&[avatar_object_key], &get_system_user(), connection).await?;
         }
-        .scope_boxed()
+
+        Ok(())
     })
     .await?;
 
@@ -521,44 +517,41 @@ pub async fn create_user_group_avatar_handler(
     .await?;
 
     let mut connection = acquire_db_connection().await?;
-    let updated_user_group = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let user_group = user_group::table
-                .filter(user_group::pk.eq(user_group_pk))
+    let updated_user_group = run_serializable_transaction(&mut connection, async |connection| {
+        let user_group = user_group::table
+            .filter(user_group::pk.eq(user_group_pk))
+            .get_result::<UserGroup>(connection)
+            .await?;
+
+        let s3_object = diesel::insert_into(s3_object::table)
+            .values(&avatar_object)
+            .get_result::<S3Object>(connection)
+            .await?;
+
+        let updated_user_group =
+            diesel::update(user_group::table.filter(user_group::pk.eq(user_group_pk)))
+                .set(user_group::avatar_object_key.eq(&s3_object.object_key))
                 .get_result::<UserGroup>(connection)
                 .await?;
 
-            let s3_object = diesel::insert_into(s3_object::table)
-                .values(&avatar_object)
-                .get_result::<S3Object>(connection)
-                .await?;
+        diesel::insert_into(user_group_audit_log::table)
+            .values(NewUserGroupAuditLog {
+                fk_user_group: user_group.pk,
+                fk_user: user.pk,
+                action: UserGroupAuditAction::AvatarChange,
+                fk_target_user: None,
+                invite_code: None,
+                reason: None,
+                creation_timestamp: Utc::now(),
+            })
+            .execute(connection)
+            .await?;
 
-            let updated_user_group =
-                diesel::update(user_group::table.filter(user_group::pk.eq(user_group_pk)))
-                    .set(user_group::avatar_object_key.eq(&s3_object.object_key))
-                    .get_result::<UserGroup>(connection)
-                    .await?;
-
-            diesel::insert_into(user_group_audit_log::table)
-                .values(NewUserGroupAuditLog {
-                    fk_user_group: user_group.pk,
-                    fk_user: user.pk,
-                    action: UserGroupAuditAction::AvatarChange,
-                    fk_target_user: None,
-                    invite_code: None,
-                    reason: None,
-                    creation_timestamp: Utc::now(),
-                })
-                .execute(connection)
-                .await?;
-
-            if let Some(avatar_object_key) = user_group.avatar_object_key {
-                delete_s3_objects(&[avatar_object_key], &get_system_user(), connection).await?;
-            }
-
-            Ok(updated_user_group)
+        if let Some(avatar_object_key) = user_group.avatar_object_key {
+            delete_s3_objects(&[avatar_object_key], &get_system_user(), connection).await?;
         }
-        .scope_boxed()
+
+        Ok(updated_user_group)
     })
     .await?;
 

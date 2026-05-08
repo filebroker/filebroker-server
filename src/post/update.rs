@@ -7,7 +7,7 @@ use diesel::{
     sql_types::BigInt,
     upsert::excluded,
 };
-use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::Deserialize;
 use validator::Validate;
 use warp::{reject::Rejection, reply::Reply};
@@ -438,16 +438,13 @@ pub async fn edit_post_handler(
     let mut connection = acquire_db_connection().await?;
 
     let (post_detailed, apply_auto_tags_task) =
-        run_serializable_transaction(&mut connection, |connection| {
-            async {
-                let (updated_post, apply_auto_tags_task) =
-                    update_post(post_pk, &user, request.clone(), connection).await?;
-                Ok((
-                    load_post_detailed(updated_post, Some(&user), connection).await?,
-                    apply_auto_tags_task,
-                ))
-            }
-            .scope_boxed()
+        run_serializable_transaction(&mut connection, async |connection| {
+            let (updated_post, apply_auto_tags_task) =
+                update_post(post_pk, &user, request.clone(), connection).await?;
+            Ok((
+                load_post_detailed(updated_post, Some(&user), connection).await?,
+                apply_auto_tags_task,
+            ))
         })
         .await?;
 
@@ -677,18 +674,15 @@ pub async fn edit_post_collection_handler(
     let mut connection = acquire_db_connection().await?;
 
     let (post_collection_detailed, apply_auto_tags_task) =
-        run_serializable_transaction(&mut connection, |connection| {
-            async {
-                let (updated_post_collection, apply_auto_tags_task) =
-                    update_post_collection(post_collection_pk, &user, request.clone(), connection)
-                        .await?;
-                Ok((
-                    load_post_collection_detailed(updated_post_collection, Some(&user), connection)
-                        .await?,
-                    apply_auto_tags_task,
-                ))
-            }
-            .scope_boxed()
+        run_serializable_transaction(&mut connection, async |connection| {
+            let (updated_post_collection, apply_auto_tags_task) =
+                update_post_collection(post_collection_pk, &user, request.clone(), connection)
+                    .await?;
+            Ok((
+                load_post_collection_detailed(updated_post_collection, Some(&user), connection)
+                    .await?,
+                apply_auto_tags_task,
+            ))
         })
         .await?;
 

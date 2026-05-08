@@ -11,7 +11,6 @@ use crate::{acquire_db_connection, retry_on_serialization_failure, run_serializa
 use chrono::Utc;
 use diesel::ExpressionMethods;
 use diesel_async::RunQueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use s3::Bucket;
 use std::process::{Command, Stdio};
 use uuid::Uuid;
@@ -173,55 +172,51 @@ pub async fn generate_thumbnail(
             .await?;
 
         let mut connection = acquire_db_connection().await?;
-        let persist_result = run_serializable_transaction(&mut connection, |connection| {
-            async {
-                let s3_object = diesel::insert_into(s3_object::table)
-                    .values(&S3Object {
-                        object_key: thumb_path.clone(),
-                        sha256_hash: None,
-                        size_bytes: thumb_bytes.len() as i64,
-                        mime_type: thumbnail_content_type.clone(),
-                        fk_broker: broker.pk,
-                        fk_uploader: user.pk,
-                        thumbnail_object_key: None,
-                        creation_timestamp: Utc::now(),
-                        filename: None,
-                        hls_master_playlist: None,
-                        hls_disabled: true,
-                        hls_locked_at: None,
-                        thumbnail_locked_at: None,
-                        hls_fail_count: None,
-                        thumbnail_fail_count: None,
-                        thumbnail_disabled: true,
-                        metadata_locked_at: None,
-                        metadata_fail_count: None,
-                        derived_from: Some(source_object_key.clone()),
-                        object_type: ObjectType::Thumbnail,
-                    })
-                    .get_result::<S3Object>(connection)
-                    .await
-                    .map_err(retry_on_serialization_failure)?;
+        let persist_result = run_serializable_transaction(&mut connection, async |connection| {
+            let s3_object = diesel::insert_into(s3_object::table)
+                .values(&S3Object {
+                    object_key: thumb_path.clone(),
+                    sha256_hash: None,
+                    size_bytes: thumb_bytes.len() as i64,
+                    mime_type: thumbnail_content_type.clone(),
+                    fk_broker: broker.pk,
+                    fk_uploader: user.pk,
+                    thumbnail_object_key: None,
+                    creation_timestamp: Utc::now(),
+                    filename: None,
+                    hls_master_playlist: None,
+                    hls_disabled: true,
+                    hls_locked_at: None,
+                    thumbnail_locked_at: None,
+                    hls_fail_count: None,
+                    thumbnail_fail_count: None,
+                    thumbnail_disabled: true,
+                    metadata_locked_at: None,
+                    metadata_fail_count: None,
+                    derived_from: Some(source_object_key.clone()),
+                    object_type: ObjectType::Thumbnail,
+                })
+                .get_result::<S3Object>(connection)
+                .await
+                .map_err(retry_on_serialization_failure)?;
 
-                let update_count = diesel::update(s3_object::table)
-                    .filter(s3_object::object_key.eq(&source_object_key))
-                    .set(s3_object::thumbnail_object_key.eq(&s3_object.object_key))
-                    .execute(connection)
-                    .await
-                    .map_err(retry_on_serialization_failure)?;
+            let update_count = diesel::update(s3_object::table)
+                .filter(s3_object::object_key.eq(&source_object_key))
+                .set(s3_object::thumbnail_object_key.eq(&s3_object.object_key))
+                .execute(connection)
+                .await
+                .map_err(retry_on_serialization_failure)?;
 
-                if update_count == 0 {
-                    // object no longer exists, delete thumb
-                    log::info!("Created thumbnail for object {source_object_key} that no longer exists, deleting created thumbnail {thumb_path}");
-                    return Err(TransactionRuntimeError::Rollback(Error::QueryError(
-                        format!("Source object {source_object_key} for thumbnail no longer exists"),
-                    )));
-                }
-
-                Ok(())
+            if update_count == 0 {
+                // object no longer exists, delete thumb
+                log::info!("Created thumbnail for object {source_object_key} that no longer exists, deleting created thumbnail {thumb_path}");
+                return Err(TransactionRuntimeError::Rollback(Error::QueryError(
+                    format!("Source object {source_object_key} for thumbnail no longer exists"),
+                )));
             }
-            .scope_boxed()
-        })
-            .await;
+
+            Ok(())
+        }).await;
         drop(connection);
 
         if let Err(e) = persist_result {

@@ -17,7 +17,6 @@ use crate::{acquire_db_connection, run_serializable_transaction};
 use diesel::dsl::not;
 use diesel::sql_types::BigInt;
 use diesel::{BelongingToDsl, BoolExpressionMethods, ExpressionMethods, QueryDsl};
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use lazy_static::lazy_static;
 use serde::Serialize;
@@ -152,8 +151,8 @@ pub fn spawn_apply_auto_tags_task(task: ApplyAutoTagsTask) {
                     }
                 };
 
-                let res = run_serializable_transaction(&mut connection, |connection| {
-                    async { run_apply_auto_tags_task(&task, connection).await }.scope_boxed()
+                let res = run_serializable_transaction(&mut connection, async |connection| {
+                    run_apply_auto_tags_task(&task, connection).await
                 })
                 .await;
                 if let Err(e) = res {

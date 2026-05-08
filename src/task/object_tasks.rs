@@ -15,7 +15,6 @@ use crate::task::{
 use crate::{acquire_db_connection, retry_on_serialization_failure, run_serializable_transaction};
 use diesel::sql_types::{Array, VarChar};
 use diesel::{ExpressionMethods, QueryDsl};
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use s3::Bucket;
 use std::path::Path;
@@ -45,7 +44,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
 
             let submitted_hls_transcodings_guard = SUBMITTED_HLS_TRANSCODINGS.lock();
             let submitted_hls_transcodings = submitted_hls_transcodings_guard.iter().collect::<Vec<_>>();
-            let relevant_objects = run_serializable_transaction(&mut connection, |connection| async move {
+            let relevant_objects = run_serializable_transaction(&mut connection, async |connection| {
                 diesel::sql_query("
                     WITH relevant_s3objects AS(
                         SELECT * FROM s3_object AS obj
@@ -69,7 +68,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                 .load::<S3Object>(connection)
                 .await
                 .map_err(retry_on_serialization_failure)
-            }.scope_boxed()).await?;
+            }).await?;
             drop(submitted_hls_transcodings_guard);
             drop(connection);
 
@@ -176,7 +175,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
         loop {
             let mut connection = acquire_db_connection().await?;
 
-            let relevant_objects = run_serializable_transaction(&mut connection, |connection| async move {
+            let relevant_objects = run_serializable_transaction(&mut connection, async |connection| {
                 diesel::sql_query("
                     WITH relevant_s3objects AS(
                         SELECT * FROM s3_object AS obj
@@ -198,7 +197,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                 .load::<S3Object>(connection)
                 .await
                 .map_err(retry_on_serialization_failure)
-            }.scope_boxed()).await?;
+            }).await?;
             drop(connection);
 
             if relevant_objects.is_empty() {
@@ -305,7 +304,7 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
     tokio_handle.block_on(async {
         loop {
             let mut connection = acquire_db_connection().await?;
-            let relevant_objects = run_serializable_transaction(&mut connection, |connection| async {
+            let relevant_objects = run_serializable_transaction(&mut connection, async |connection| {
                 diesel::sql_query("
                     WITH relevant_s3objects AS(
                         SELECT * FROM s3_object AS obj
@@ -325,7 +324,7 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
                 .load::<S3Object>(connection)
                 .await
                 .map_err(retry_on_serialization_failure)
-            }.scope_boxed()).await?;
+            }).await?;
             drop(connection);
 
             if relevant_objects.is_empty() {
@@ -400,7 +399,7 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
     tokio_handle.block_on(async {
         loop {
             let mut connection = acquire_db_connection().await?;
-            let deferred_deletions = run_serializable_transaction(&mut connection, |connection| async move {
+            let deferred_deletions = run_serializable_transaction(&mut connection, async |connection| {
                 diesel::sql_query("
                     WITH relevant_s3_object_deletions AS(
                         SELECT * FROM deferred_s3_object_deletion
@@ -414,7 +413,7 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
                 .load::<DeferredS3ObjectDeletion>(connection)
                 .await
                 .map_err(retry_on_serialization_failure)
-            }.scope_boxed()).await?;
+            }).await?;
             drop(connection);
 
             if deferred_deletions.is_empty() {

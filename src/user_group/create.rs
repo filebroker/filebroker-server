@@ -9,7 +9,6 @@ use crate::util::dedup_vec_optional;
 use crate::{acquire_db_connection, run_retryable_transaction};
 use chrono::Utc;
 use diesel_async::RunQueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use serde::Deserialize;
 use validator::Validate;
 use warp::{Rejection, Reply};
@@ -41,59 +40,56 @@ pub async fn create_user_group_handler(
     dedup_vec_optional(&mut request.selected_tags);
 
     let mut connection = acquire_db_connection().await?;
-    let user_group_detailed = run_retryable_transaction(&mut connection, |connection| {
-        async move {
-            let current_groups = get_current_user_groups(connection, &user).await?;
-            if current_groups.len() >= 250 {
-                return Err(TransactionRuntimeError::from(Error::BadRequestError(
-                    String::from("Cannot be a member of more than 250 groups"),
-                )));
-            }
+    let user_group_detailed = run_retryable_transaction(&mut connection, async |connection| {
+        let current_groups = get_current_user_groups(connection, &user).await?;
+        if current_groups.len() >= 250 {
+            return Err(TransactionRuntimeError::from(Error::BadRequestError(
+                String::from("Cannot be a member of more than 250 groups"),
+            )));
+        }
 
-            let user_group = diesel::insert_into(user_group::table)
-                .values(&NewUserGroup {
-                    name: request.name,
-                    public: request.public.unwrap_or(false),
-                    fk_owner: user.pk,
-                    creation_timestamp: Utc::now(),
-                    description: request.description,
-                    allow_member_invite: request.allow_member_invite.unwrap_or(false),
-                    avatar_object_key: None,
-                    fk_create_user: user.pk,
-                })
-                .get_result::<UserGroup>(connection)
-                .await?;
-
-            let set_tags = handle_entered_and_selected_tags(
-                &request.selected_tags,
-                request.entered_tags,
-                &user,
-                connection,
-            )
+        let user_group = diesel::insert_into(user_group::table)
+            .values(&NewUserGroup {
+                name: request.name,
+                public: request.public.unwrap_or(false),
+                fk_owner: user.pk,
+                creation_timestamp: Utc::now(),
+                description: request.description,
+                allow_member_invite: request.allow_member_invite.unwrap_or(false),
+                avatar_object_key: None,
+                fk_create_user: user.pk,
+            })
+            .get_result::<UserGroup>(connection)
             .await?;
 
-            let user_group_tags = set_tags
-                .iter()
-                .map(|tag| UserGroupTag {
-                    fk_user_group: user_group.pk,
-                    fk_tag: tag.pk,
-                    auto_matched: false,
-                })
-                .collect::<Vec<_>>();
+        let set_tags = handle_entered_and_selected_tags(
+            &request.selected_tags,
+            request.entered_tags,
+            &user,
+            connection,
+        )
+        .await?;
 
-            if !user_group_tags.is_empty() {
-                diesel::insert_into(user_group_tag::table)
-                    .values(&user_group_tags)
-                    .execute(connection)
-                    .await?;
-            }
+        let user_group_tags = set_tags
+            .iter()
+            .map(|tag| UserGroupTag {
+                fk_user_group: user_group.pk,
+                fk_tag: tag.pk,
+                auto_matched: false,
+            })
+            .collect::<Vec<_>>();
 
-            let user_group_detailed =
-                load_user_group_detailed(user_group, Some(&user), connection).await?;
-
-            Ok(user_group_detailed)
+        if !user_group_tags.is_empty() {
+            diesel::insert_into(user_group_tag::table)
+                .values(&user_group_tags)
+                .execute(connection)
+                .await?;
         }
-        .scope_boxed()
+
+        let user_group_detailed =
+            load_user_group_detailed(user_group, Some(&user), connection).await?;
+
+        Ok(user_group_detailed)
     })
     .await?;
 

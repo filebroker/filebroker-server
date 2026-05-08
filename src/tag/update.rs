@@ -21,7 +21,6 @@ use crate::util::{dedup_vec_optional, dedup_vecs_optional, string_value_updated}
 use crate::{acquire_db_connection, retry_on_constraint_violation, run_serializable_transaction};
 use chrono::{DateTime, Utc};
 use diesel::{BelongingToDsl, BoolExpressionMethods, ExpressionMethods, QueryDsl};
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -85,137 +84,132 @@ pub async fn upsert_tag_handler(
     }
 
     let (inserted, tag_detailed, apply_auto_tags_task) =
-        run_serializable_transaction(&mut connection, |connection| {
-            async move {
-                let (inserted, tag) = get_or_create_tag(&tag_name, &user, connection).await?;
+        run_serializable_transaction(&mut connection, async |connection| {
+            let (inserted, tag) = get_or_create_tag(&tag_name, &user, connection).await?;
 
-                let (tag, _, apply_auto_tags_task) = if inserted {
-                    if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
-                        if parent_pks.contains(&tag.pk) {
-                            return Err(TransactionRuntimeError::Rollback(
-                                Error::InvalidRequestInputError(format!(
-                                    "Cannot set tag {} as its own parent",
-                                    tag.pk
-                                )),
-                            ));
-                        }
-
-                        if !parent_pks.is_empty() {
-                            if parent_pks.len() > 25 {
-                                return Err(TransactionRuntimeError::Rollback(
-                                    Error::BadRequestError(String::from(
-                                        "Cannot set more than 25 parents",
-                                    )),
-                                ));
-                            }
-                            add_tag_parents(tag.pk, parent_pks, connection).await?;
-                        }
+            let (tag, _, apply_auto_tags_task) = if inserted {
+                if let Some(ref parent_pks) = upsert_tag_request.parent_pks {
+                    if parent_pks.contains(&tag.pk) {
+                        return Err(TransactionRuntimeError::Rollback(
+                            Error::InvalidRequestInputError(format!(
+                                "Cannot set tag {} as its own parent",
+                                tag.pk
+                            )),
+                        ));
                     }
 
-                    if let Some(ref alias_pks) = upsert_tag_request.alias_pks
-                        && !alias_pks.is_empty()
-                    {
-                        if alias_pks.contains(&tag.pk) {
-                            return Err(TransactionRuntimeError::Rollback(
-                                Error::InvalidRequestInputError(format!(
-                                    "Cannot set tag {} as an alias of itself",
-                                    tag.pk
-                                )),
-                            ));
-                        }
-
-                        if alias_pks.len() > 25 {
+                    if !parent_pks.is_empty() {
+                        if parent_pks.len() > 25 {
                             return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                                String::from("Cannot set more than 25 aliases"),
+                                String::from("Cannot set more than 25 parents"),
                             )));
                         }
+                        add_tag_parents(tag.pk, parent_pks, connection).await?;
+                    }
+                }
 
-                        add_tag_aliases(&tag, alias_pks, connection).await?;
+                if let Some(ref alias_pks) = upsert_tag_request.alias_pks
+                    && !alias_pks.is_empty()
+                {
+                    if alias_pks.contains(&tag.pk) {
+                        return Err(TransactionRuntimeError::Rollback(
+                            Error::InvalidRequestInputError(format!(
+                                "Cannot set tag {} as an alias of itself",
+                                tag.pk
+                            )),
+                        ));
                     }
 
-                    let tag_category = match upsert_tag_request.tag_category {
-                        Some(tag_category) if !tag_category.is_empty() => {
-                            let found_tag_category = tag_category::table
-                                .filter(tag_category::id.eq(&tag_category))
-                                .get_result::<TagCategory>(connection)
-                                .await
-                                .optional()?;
-                            if let Some(found_tag_category) = found_tag_category {
-                                Some(found_tag_category)
-                            } else {
-                                return Err(TransactionRuntimeError::Rollback(
-                                    Error::InvalidEntityReferenceError(tag_category),
-                                ));
-                            }
+                    if alias_pks.len() > 25 {
+                        return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                            String::from("Cannot set more than 25 aliases"),
+                        )));
+                    }
+
+                    add_tag_aliases(&tag, alias_pks, connection).await?;
+                }
+
+                let tag_category = match upsert_tag_request.tag_category {
+                    Some(tag_category) if !tag_category.is_empty() => {
+                        let found_tag_category = tag_category::table
+                            .filter(tag_category::id.eq(&tag_category))
+                            .get_result::<TagCategory>(connection)
+                            .await
+                            .optional()?;
+                        if let Some(found_tag_category) = found_tag_category {
+                            Some(found_tag_category)
+                        } else {
+                            return Err(TransactionRuntimeError::Rollback(
+                                Error::InvalidEntityReferenceError(tag_category),
+                            ));
                         }
-                        _ => None,
-                    };
-
-                    let compiled_auto_match_condition_post = compile_auto_match_condition(
-                        tag.tag_name.clone(),
-                        upsert_tag_request.auto_match_condition_post.clone(),
-                        tag_category
-                            .as_ref()
-                            .and_then(|tc| tc.auto_match_condition_post.clone()),
-                        Scope::TagAutoMatchPost,
-                    )?;
-                    let compiled_auto_match_condition_collection = compile_auto_match_condition(
-                        tag.tag_name.clone(),
-                        upsert_tag_request.auto_match_condition_collection.clone(),
-                        tag_category
-                            .as_ref()
-                            .and_then(|tc| tc.auto_match_condition_collection.clone()),
-                        Scope::TagAutoMatchCollection,
-                    )?;
-
-                    let tag = diesel::update(tag::table)
-                        .filter(tag::pk.eq(tag.pk))
-                        .set((
-                            tag::tag_category.eq(tag_category.as_ref().map(|tc| &tc.id)),
-                            tag::auto_match_condition_post
-                                .eq(&upsert_tag_request.auto_match_condition_post),
-                            tag::auto_match_condition_collection
-                                .eq(&upsert_tag_request.auto_match_condition_collection),
-                            tag::compiled_auto_match_condition_post
-                                .eq(&compiled_auto_match_condition_post),
-                            tag::compiled_auto_match_condition_collection
-                                .eq(&compiled_auto_match_condition_collection),
-                        ))
-                        .get_result::<Tag>(connection)
-                        .await?;
-
-                    let apply_auto_tag_task = if tag.compiled_auto_match_condition_post.is_some()
-                        || tag.compiled_auto_match_condition_collection.is_some()
-                    {
-                        Some(create_apply_auto_tag_task(tag.pk, connection).await?)
-                    } else {
-                        None
-                    };
-
-                    (tag, tag_category, apply_auto_tag_task)
-                } else {
-                    update_tag(
-                        tag.pk,
-                        &user,
-                        upsert_tag_request.parent_pks,
-                        None,
-                        None,
-                        upsert_tag_request.alias_pks,
-                        None,
-                        None,
-                        upsert_tag_request.tag_category,
-                        upsert_tag_request.auto_match_condition_post,
-                        upsert_tag_request.auto_match_condition_collection,
-                        connection,
-                    )
-                    .await?
+                    }
+                    _ => None,
                 };
 
-                let tag_detailed = load_tag_detailed(tag, connection).await?;
+                let compiled_auto_match_condition_post = compile_auto_match_condition(
+                    tag.tag_name.clone(),
+                    upsert_tag_request.auto_match_condition_post.clone(),
+                    tag_category
+                        .as_ref()
+                        .and_then(|tc| tc.auto_match_condition_post.clone()),
+                    Scope::TagAutoMatchPost,
+                )?;
+                let compiled_auto_match_condition_collection = compile_auto_match_condition(
+                    tag.tag_name.clone(),
+                    upsert_tag_request.auto_match_condition_collection.clone(),
+                    tag_category
+                        .as_ref()
+                        .and_then(|tc| tc.auto_match_condition_collection.clone()),
+                    Scope::TagAutoMatchCollection,
+                )?;
 
-                Ok((inserted, tag_detailed, apply_auto_tags_task))
-            }
-            .scope_boxed()
+                let tag = diesel::update(tag::table)
+                    .filter(tag::pk.eq(tag.pk))
+                    .set((
+                        tag::tag_category.eq(tag_category.as_ref().map(|tc| &tc.id)),
+                        tag::auto_match_condition_post
+                            .eq(&upsert_tag_request.auto_match_condition_post),
+                        tag::auto_match_condition_collection
+                            .eq(&upsert_tag_request.auto_match_condition_collection),
+                        tag::compiled_auto_match_condition_post
+                            .eq(&compiled_auto_match_condition_post),
+                        tag::compiled_auto_match_condition_collection
+                            .eq(&compiled_auto_match_condition_collection),
+                    ))
+                    .get_result::<Tag>(connection)
+                    .await?;
+
+                let apply_auto_tag_task = if tag.compiled_auto_match_condition_post.is_some()
+                    || tag.compiled_auto_match_condition_collection.is_some()
+                {
+                    Some(create_apply_auto_tag_task(tag.pk, connection).await?)
+                } else {
+                    None
+                };
+
+                (tag, tag_category, apply_auto_tag_task)
+            } else {
+                update_tag(
+                    tag.pk,
+                    &user,
+                    upsert_tag_request.parent_pks,
+                    None,
+                    None,
+                    upsert_tag_request.alias_pks,
+                    None,
+                    None,
+                    upsert_tag_request.tag_category,
+                    upsert_tag_request.auto_match_condition_post,
+                    upsert_tag_request.auto_match_condition_collection,
+                    connection,
+                )
+                .await?
+            };
+
+            let tag_detailed = load_tag_detailed(tag, connection).await?;
+
+            Ok((inserted, tag_detailed, apply_auto_tags_task))
         })
         .await?;
 
@@ -322,30 +316,27 @@ pub async fn update_tag_handler(
 
     let mut connection = acquire_db_connection().await?;
     let (tag_joined, apply_auto_tags_task) =
-        run_serializable_transaction(&mut connection, |connection| {
-            async move {
-                let (tag, _, apply_auto_tags_task) = update_tag(
-                    tag_pk,
-                    &user,
-                    request.added_parent_pks,
-                    request.parent_pks_overwrite,
-                    request.removed_parent_pks,
-                    request.added_alias_pks,
-                    request.alias_pks_overwrite,
-                    request.removed_alias_pks,
-                    request.tag_category,
-                    request.auto_match_condition_post,
-                    request.auto_match_condition_collection,
-                    connection,
-                )
-                .await?;
+        run_serializable_transaction(&mut connection, async |connection| {
+            let (tag, _, apply_auto_tags_task) = update_tag(
+                tag_pk,
+                &user,
+                request.added_parent_pks,
+                request.parent_pks_overwrite,
+                request.removed_parent_pks,
+                request.added_alias_pks,
+                request.alias_pks_overwrite,
+                request.removed_alias_pks,
+                request.tag_category,
+                request.auto_match_condition_post,
+                request.auto_match_condition_collection,
+                connection,
+            )
+            .await?;
 
-                Ok((
-                    load_tag_detailed(tag, connection).await?,
-                    apply_auto_tags_task,
-                ))
-            }
-            .scope_boxed()
+            Ok((
+                load_tag_detailed(tag, connection).await?,
+                apply_auto_tags_task,
+            ))
         })
         .await?;
 
@@ -795,88 +786,85 @@ pub async fn update_tag_category_handler(
 
     let mut connection = acquire_db_connection().await?;
     let (updated_tag_category, apply_auto_tags_task) =
-        run_serializable_transaction(&mut connection, |connection| {
-            async {
-                let tag_category = tag_category::table
-                    .filter(tag_category::id.eq(&request.id))
+        run_serializable_transaction(&mut connection, async |connection| {
+            let tag_category = tag_category::table
+                .filter(tag_category::id.eq(&request.id))
+                .get_result::<TagCategory>(connection)
+                .await
+                .optional()?
+                .ok_or(Error::NotFoundError)?;
+
+            let field_changes = request.get_field_changes(&tag_category);
+
+            if field_changes.has_changes() {
+                let updated_tag_category = diesel::update(tag_category::table)
+                    .filter(tag_category::id.eq(&tag_category.id))
+                    .set(&request)
                     .get_result::<TagCategory>(connection)
-                    .await
-                    .optional()?
-                    .ok_or(Error::NotFoundError)?;
+                    .await?;
 
-                let field_changes = request.get_field_changes(&tag_category);
-
-                if field_changes.has_changes() {
-                    let updated_tag_category = diesel::update(tag_category::table)
-                        .filter(tag_category::id.eq(&tag_category.id))
-                        .set(&request)
-                        .get_result::<TagCategory>(connection)
+                let apply_auto_tags_task = if field_changes.auto_match_condition_post_changed
+                    || field_changes.auto_match_condition_collection_changed
+                {
+                    let tags = Tag::belonging_to(&updated_tag_category)
+                        .load::<Tag>(connection)
                         .await?;
 
-                    let apply_auto_tags_task = if field_changes.auto_match_condition_post_changed
-                        || field_changes.auto_match_condition_collection_changed
-                    {
-                        let tags = Tag::belonging_to(&updated_tag_category)
-                            .load::<Tag>(connection)
-                            .await?;
+                    if field_changes.auto_match_condition_post_changed {
+                        for tag in tags.iter() {
+                            let compiled_tag_auto_match_condition_post =
+                                compile_tag_auto_match_condition(
+                                    tag.clone(),
+                                    Some(updated_tag_category.clone()),
+                                    AutoMatchTarget::Post,
+                                )?;
 
-                        if field_changes.auto_match_condition_post_changed {
-                            for tag in tags.iter() {
-                                let compiled_tag_auto_match_condition_post =
-                                    compile_tag_auto_match_condition(
-                                        tag.clone(),
-                                        Some(updated_tag_category.clone()),
-                                        AutoMatchTarget::Post,
-                                    )?;
-
-                                diesel::update(tag::table)
-                                    .filter(tag::pk.eq(tag.pk))
-                                    .set(
-                                        tag::compiled_auto_match_condition_post
-                                            .eq(compiled_tag_auto_match_condition_post
-                                                .unwrap_or_else(|| String::from(""))),
-                                    )
-                                    .execute(connection)
-                                    .await?;
-                            }
+                            diesel::update(tag::table)
+                                .filter(tag::pk.eq(tag.pk))
+                                .set(
+                                    tag::compiled_auto_match_condition_post
+                                        .eq(compiled_tag_auto_match_condition_post
+                                            .unwrap_or_else(|| String::from(""))),
+                                )
+                                .execute(connection)
+                                .await?;
                         }
-                        if field_changes.auto_match_condition_collection_changed {
-                            for tag in tags.iter() {
-                                let compiled_tag_auto_match_condition_collection =
-                                    compile_tag_auto_match_condition(
-                                        tag.clone(),
-                                        Some(updated_tag_category.clone()),
-                                        AutoMatchTarget::Collection,
-                                    )?;
+                    }
+                    if field_changes.auto_match_condition_collection_changed {
+                        for tag in tags.iter() {
+                            let compiled_tag_auto_match_condition_collection =
+                                compile_tag_auto_match_condition(
+                                    tag.clone(),
+                                    Some(updated_tag_category.clone()),
+                                    AutoMatchTarget::Collection,
+                                )?;
 
-                                diesel::update(tag::table)
-                                    .filter(tag::pk.eq(tag.pk))
-                                    .set(
-                                        tag::auto_match_condition_collection
-                                            .eq(compiled_tag_auto_match_condition_collection
-                                                .unwrap_or_else(|| String::from(""))),
-                                    )
-                                    .execute(connection)
-                                    .await?;
-                            }
+                            diesel::update(tag::table)
+                                .filter(tag::pk.eq(tag.pk))
+                                .set(
+                                    tag::auto_match_condition_collection
+                                        .eq(compiled_tag_auto_match_condition_collection
+                                            .unwrap_or_else(|| String::from(""))),
+                                )
+                                .execute(connection)
+                                .await?;
                         }
+                    }
 
-                        let apply_auto_tags_task = create_apply_tag_category_auto_tags_task(
-                            tag_category.id.clone(),
-                            connection,
-                        )
-                        .await?;
-                        Some(apply_auto_tags_task)
-                    } else {
-                        None
-                    };
-
-                    Ok((updated_tag_category, apply_auto_tags_task))
+                    let apply_auto_tags_task = create_apply_tag_category_auto_tags_task(
+                        tag_category.id.clone(),
+                        connection,
+                    )
+                    .await?;
+                    Some(apply_auto_tags_task)
                 } else {
-                    Ok((tag_category, None))
-                }
+                    None
+                };
+
+                Ok((updated_tag_category, apply_auto_tags_task))
+            } else {
+                Ok((tag_category, None))
             }
-            .scope_boxed()
         })
         .await?;
 

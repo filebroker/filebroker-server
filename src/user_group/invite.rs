@@ -24,7 +24,6 @@ use diesel::query_builder::BoxedSelectStatement;
 use diesel::sql_types::Bool;
 use diesel::{IntoSql, JoinOnDsl, NullableExpressionMethods, OptionalExtension, Table};
 use diesel_async::RunQueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use rand::distr::{Alphanumeric, SampleString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -79,8 +78,8 @@ pub async fn create_user_group_invite_handler(
     } else {
         None
     };
-    let user_group_invite_detailed = run_serializable_transaction(&mut connection, |connection| {
-        async move {
+    let user_group_invite_detailed =
+        run_serializable_transaction(&mut connection, async |connection| {
             let UserGroupJoined { group, membership } =
                 get_user_group_joined(user_group_pk, Some(&user), connection).await?;
             if !(group.owner.pk == user.pk
@@ -203,10 +202,8 @@ pub async fn create_user_group_invite_handler(
                 uses_count: user_group_invite.uses_count,
                 revoked: user_group_invite.revoked,
             })
-        }
-        .scope_boxed()
-    })
-    .await?;
+        })
+        .await?;
 
     Ok(warp::reply::json(&user_group_invite_detailed))
 }
@@ -222,113 +219,107 @@ pub async fn redeem_user_group_invite_handler(
 ) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
 
-    let user_group_joined = run_serializable_transaction(&mut connection, |connection| {
-        async move {
-            let now = Utc::now();
-            let invite = user_group_invite::table
-                .filter(
-                    user_group_invite::code
-                        .eq(&invite_code)
-                        .and(
-                            user_group_invite::fk_invited_user
-                                .is_null()
-                                .or(user_group_invite::fk_invited_user.eq(user.pk)),
-                        )
-                        .and(
-                            user_group_invite::expiration_timestamp
-                                .is_null()
-                                .or(user_group_invite::expiration_timestamp.gt(&now)),
-                        )
-                        .and(
-                            user_group_invite::max_uses
-                                .is_null()
-                                .or(user_group_invite::max_uses
-                                    .gt(user_group_invite::uses_count.nullable())),
-                        )
-                        .and(user_group_invite::revoked.eq(false)),
-                )
-                .get_result::<UserGroupInvite>(connection)
-                .await
-                .optional()?
-                .ok_or_else(|| Error::InvalidUserGroupInviteCodeError(invite_code.clone()))?;
+    let user_group_joined = run_serializable_transaction(&mut connection, async |connection| {
+        let now = Utc::now();
+        let invite = user_group_invite::table
+            .filter(
+                user_group_invite::code
+                    .eq(&invite_code)
+                    .and(
+                        user_group_invite::fk_invited_user
+                            .is_null()
+                            .or(user_group_invite::fk_invited_user.eq(user.pk)),
+                    )
+                    .and(
+                        user_group_invite::expiration_timestamp
+                            .is_null()
+                            .or(user_group_invite::expiration_timestamp.gt(&now)),
+                    )
+                    .and(user_group_invite::max_uses.is_null().or(
+                        user_group_invite::max_uses.gt(user_group_invite::uses_count.nullable()),
+                    ))
+                    .and(user_group_invite::revoked.eq(false)),
+            )
+            .get_result::<UserGroupInvite>(connection)
+            .await
+            .optional()?
+            .ok_or_else(|| Error::InvalidUserGroupInviteCodeError(invite_code.clone()))?;
 
-            let (group, membership) = user_group::table
-                .left_join(
-                    user_group_membership::table.on(user_group_membership::fk_group
-                        .eq(user_group::pk)
-                        .and(user_group_membership::fk_user.eq(user.pk))),
-                )
-                .filter(user_group::pk.eq(invite.fk_user_group))
-                .get_result::<(UserGroup, Option<UserGroupMembership>)>(connection)
-                .await?;
+        let (group, membership) = user_group::table
+            .left_join(
+                user_group_membership::table.on(user_group_membership::fk_group
+                    .eq(user_group::pk)
+                    .and(user_group_membership::fk_user.eq(user.pk))),
+            )
+            .filter(user_group::pk.eq(invite.fk_user_group))
+            .get_result::<(UserGroup, Option<UserGroupMembership>)>(connection)
+            .await?;
 
-            if group.fk_owner == user.pk {
+        if group.fk_owner == user.pk {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::UserAlreadyMemberOfGroupError(invite.fk_user_group),
+            ));
+        }
+
+        if let Some(membership) = membership {
+            if membership.revoked {
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::UserBannedFromGroupError(invite.fk_user_group),
+                ));
+            } else {
                 return Err(TransactionRuntimeError::Rollback(
                     Error::UserAlreadyMemberOfGroupError(invite.fk_user_group),
                 ));
             }
-
-            if let Some(membership) = membership {
-                if membership.revoked {
-                    return Err(TransactionRuntimeError::Rollback(
-                        Error::UserBannedFromGroupError(invite.fk_user_group),
-                    ));
-                } else {
-                    return Err(TransactionRuntimeError::Rollback(
-                        Error::UserAlreadyMemberOfGroupError(invite.fk_user_group),
-                    ));
-                }
-            }
-
-            diesel::insert_into(user_group_membership::table)
-                .values(UserGroupMembership {
-                    fk_group: invite.fk_user_group,
-                    fk_user: user.pk,
-                    administrator: false,
-                    revoked: false,
-                    fk_granted_by: invite.fk_create_user,
-                    creation_timestamp: now,
-                })
-                .get_result::<UserGroupMembership>(connection)
-                .await?;
-
-            diesel::update(user_group_invite::table)
-                .filter(user_group_invite::code.eq(&invite_code))
-                .set((
-                    user_group_invite::last_used_timestamp.eq(&now),
-                    user_group_invite::uses_count.eq(user_group_invite::uses_count + 1),
-                ))
-                .execute(connection)
-                .await?;
-
-            // if the invite is a targeted invite for a specific user, delete after use (including duplicate invites for same group)
-            diesel::delete(user_group_invite::table)
-                .filter(
-                    user_group_invite::fk_user_group
-                        .eq(invite.fk_user_group)
-                        .and(user_group_invite::fk_invited_user.eq(user.pk)),
-                )
-                .execute(connection)
-                .await?;
-
-            diesel::insert_into(user_group_audit_log::table)
-                .values(NewUserGroupAuditLog {
-                    fk_user_group: invite.fk_user_group,
-                    fk_user: user.pk,
-                    action: UserGroupAuditAction::Join,
-                    fk_target_user: None,
-                    invite_code: Some(invite_code.clone()),
-                    reason: None,
-                    creation_timestamp: now,
-                })
-                .execute(connection)
-                .await?;
-
-            let user_group_joined =
-                get_user_group_joined(invite.fk_user_group, Some(&user), connection).await?;
-            Ok(user_group_joined)
         }
-        .scope_boxed()
+
+        diesel::insert_into(user_group_membership::table)
+            .values(UserGroupMembership {
+                fk_group: invite.fk_user_group,
+                fk_user: user.pk,
+                administrator: false,
+                revoked: false,
+                fk_granted_by: invite.fk_create_user,
+                creation_timestamp: now,
+            })
+            .get_result::<UserGroupMembership>(connection)
+            .await?;
+
+        diesel::update(user_group_invite::table)
+            .filter(user_group_invite::code.eq(&invite_code))
+            .set((
+                user_group_invite::last_used_timestamp.eq(&now),
+                user_group_invite::uses_count.eq(user_group_invite::uses_count + 1),
+            ))
+            .execute(connection)
+            .await?;
+
+        // if the invite is a targeted invite for a specific user, delete after use (including duplicate invites for same group)
+        diesel::delete(user_group_invite::table)
+            .filter(
+                user_group_invite::fk_user_group
+                    .eq(invite.fk_user_group)
+                    .and(user_group_invite::fk_invited_user.eq(user.pk)),
+            )
+            .execute(connection)
+            .await?;
+
+        diesel::insert_into(user_group_audit_log::table)
+            .values(NewUserGroupAuditLog {
+                fk_user_group: invite.fk_user_group,
+                fk_user: user.pk,
+                action: UserGroupAuditAction::Join,
+                fk_target_user: None,
+                invite_code: Some(invite_code.clone()),
+                reason: None,
+                creation_timestamp: now,
+            })
+            .execute(connection)
+            .await?;
+
+        let user_group_joined =
+            get_user_group_joined(invite.fk_user_group, Some(&user), connection).await?;
+        Ok(user_group_joined)
     })
     .await?;
 
@@ -340,76 +331,72 @@ pub async fn join_user_group_handler(
     user: User,
 ) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
-    let user_group_joined = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let membership = diesel::alias!(user_group_membership as membership,);
-            let (group, membership) = user_group::table
-                .left_join(
-                    membership.on(membership
-                        .field(user_group_membership::fk_group)
-                        .eq(user_group::pk)
-                        .and(membership.field(user_group_membership::fk_user).eq(user.pk))),
-                )
-                .filter(
-                    user_group::pk.eq(user_group_pk).and(
-                        user.is_admin
-                            .into_sql::<Bool>()
-                            .or(user_group::public)
-                            .or(get_group_membership_condition!(user.pk)),
-                    ),
-                )
-                .get_result::<(UserGroup, Option<UserGroupMembership>)>(connection)
-                .await?;
+    let user_group_joined = run_serializable_transaction(&mut connection, async |connection| {
+        let membership = diesel::alias!(user_group_membership as membership,);
+        let (group, membership) = user_group::table
+            .left_join(
+                membership.on(membership
+                    .field(user_group_membership::fk_group)
+                    .eq(user_group::pk)
+                    .and(membership.field(user_group_membership::fk_user).eq(user.pk))),
+            )
+            .filter(
+                user_group::pk.eq(user_group_pk).and(
+                    user.is_admin
+                        .into_sql::<Bool>()
+                        .or(user_group::public)
+                        .or(get_group_membership_condition!(user.pk)),
+                ),
+            )
+            .get_result::<(UserGroup, Option<UserGroupMembership>)>(connection)
+            .await?;
 
-            if group.fk_owner == user.pk {
+        if group.fk_owner == user.pk {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::UserAlreadyMemberOfGroupError(user_group_pk),
+            ));
+        }
+
+        if let Some(membership) = membership {
+            if membership.revoked {
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::UserBannedFromGroupError(user_group_pk),
+                ));
+            } else {
                 return Err(TransactionRuntimeError::Rollback(
                     Error::UserAlreadyMemberOfGroupError(user_group_pk),
                 ));
             }
-
-            if let Some(membership) = membership {
-                if membership.revoked {
-                    return Err(TransactionRuntimeError::Rollback(
-                        Error::UserBannedFromGroupError(user_group_pk),
-                    ));
-                } else {
-                    return Err(TransactionRuntimeError::Rollback(
-                        Error::UserAlreadyMemberOfGroupError(user_group_pk),
-                    ));
-                }
-            }
-
-            let now = Utc::now();
-            diesel::insert_into(user_group_membership::table)
-                .values(UserGroupMembership {
-                    fk_group: group.pk,
-                    fk_user: user.pk,
-                    administrator: false,
-                    revoked: false,
-                    fk_granted_by: user.pk,
-                    creation_timestamp: now,
-                })
-                .get_result::<UserGroupMembership>(connection)
-                .await?;
-
-            diesel::insert_into(user_group_audit_log::table)
-                .values(NewUserGroupAuditLog {
-                    fk_user_group: group.pk,
-                    fk_user: user.pk,
-                    action: UserGroupAuditAction::Join,
-                    fk_target_user: None,
-                    invite_code: None,
-                    reason: None,
-                    creation_timestamp: now,
-                })
-                .execute(connection)
-                .await?;
-
-            let user_group_joined =
-                get_user_group_joined(group.pk, Some(&user), connection).await?;
-            Ok(user_group_joined)
         }
-        .scope_boxed()
+
+        let now = Utc::now();
+        diesel::insert_into(user_group_membership::table)
+            .values(UserGroupMembership {
+                fk_group: group.pk,
+                fk_user: user.pk,
+                administrator: false,
+                revoked: false,
+                fk_granted_by: user.pk,
+                creation_timestamp: now,
+            })
+            .get_result::<UserGroupMembership>(connection)
+            .await?;
+
+        diesel::insert_into(user_group_audit_log::table)
+            .values(NewUserGroupAuditLog {
+                fk_user_group: group.pk,
+                fk_user: user.pk,
+                action: UserGroupAuditAction::Join,
+                fk_target_user: None,
+                invite_code: None,
+                reason: None,
+                creation_timestamp: now,
+            })
+            .execute(connection)
+            .await?;
+
+        let user_group_joined = get_user_group_joined(group.pk, Some(&user), connection).await?;
+        Ok(user_group_joined)
     })
     .await?;
 
@@ -459,17 +446,17 @@ pub async fn get_user_group_invites_handler(
     let active_only = params.active_only.unwrap_or(false);
 
     let mut connection = acquire_db_connection().await?;
-    let response = run_repeatable_read_transaction(&mut connection, |connection| {
-        async {
-            // only allow group admins / owner to view invites
-            if !perms::is_user_group_editable(user_group_pk, Some(&user), connection).await? {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(user_group_pk),
-                ));
-            }
+    let response = run_repeatable_read_transaction(&mut connection, async |connection| {
+        // only allow group admins / owner to view invites
+        if !perms::is_user_group_editable(user_group_pk, Some(&user), connection).await? {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(user_group_pk),
+            ));
+        }
 
-            let now = Utc::now();
-            let filter = user_group_invite::fk_user_group.eq(user_group_pk).and(
+        let now = Utc::now();
+        let filter =
+            user_group_invite::fk_user_group.eq(user_group_pk).and(
                 not(active_only.into_sql::<Bool>()).or(not(user_group_invite::revoked)
                     .and(
                         user_group_invite::expiration_timestamp
@@ -481,119 +468,117 @@ pub async fn get_user_group_invites_handler(
                     ))),
             );
 
-            let total_count = user_group_invite::table
-                .filter(filter)
-                .count()
-                .get_result::<i64>(connection)
-                .await?;
+        let total_count = user_group_invite::table
+            .filter(filter)
+            .count()
+            .get_result::<i64>(connection)
+            .await?;
 
-            let (create_user, invited_user) = diesel::alias!(
-                registered_user as create_user,
-                registered_user as invited_user,
-            );
+        let (create_user, invited_user) = diesel::alias!(
+            registered_user as create_user,
+            registered_user as invited_user,
+        );
 
-            let invite_query = user_group_invite::table
-                .inner_join(
-                    create_user.on(create_user
-                        .field(registered_user::pk)
-                        .eq(user_group_invite::fk_create_user)),
-                )
-                .left_join(
-                    invited_user.on(invited_user
-                        .field(registered_user::pk)
-                        .nullable()
-                        .eq(user_group_invite::fk_invited_user)),
-                )
-                .filter(filter);
+        let invite_query = user_group_invite::table
+            .inner_join(
+                create_user.on(create_user
+                    .field(registered_user::pk)
+                    .eq(user_group_invite::fk_create_user)),
+            )
+            .left_join(
+                invited_user.on(invited_user
+                    .field(registered_user::pk)
+                    .nullable()
+                    .eq(user_group_invite::fk_invited_user)),
+            )
+            .filter(filter);
 
-            let mut order_map: HashMap<&'static str, Box<ApplyOrderFn<_, _, _>>> = HashMap::new();
-            order_map.insert(
-                "create_user",
-                Box::new(move |desc, q: BoxedSelectStatement<'_, _, _, _>| {
-                    if desc {
-                        q.order((
-                            create_user.field(registered_user::pk).desc(),
-                            user_group_invite::creation_timestamp.desc(),
-                            user_group_invite::code,
-                        ))
-                    } else {
-                        q.order((
-                            create_user.field(registered_user::pk),
-                            user_group_invite::creation_timestamp.desc(),
-                            user_group_invite::code,
-                        ))
-                    }
-                }),
-            );
-            order_map.insert(
-                "creation_timestamp",
-                order_by_col_with_tie_fn(
-                    user_group_invite::creation_timestamp,
-                    user_group_invite::code,
-                ),
-            );
-            order_map.insert(
-                "expiration_timestamp",
-                order_by_col_with_tie_fn(
-                    user_group_invite::expiration_timestamp,
-                    user_group_invite::code,
-                ),
-            );
-            order_map.insert(
-                "last_used_timestamp",
-                order_by_col_with_tie_fn(
-                    user_group_invite::last_used_timestamp,
-                    user_group_invite::code,
-                ),
-            );
-            order_map.insert("code", order_by_col_fn(user_group_invite::code));
+        let mut order_map: HashMap<&'static str, Box<ApplyOrderFn<_, _, _>>> = HashMap::new();
+        order_map.insert(
+            "create_user",
+            Box::new(move |desc, q: BoxedSelectStatement<'_, _, _, _>| {
+                if desc {
+                    q.order((
+                        create_user.field(registered_user::pk).desc(),
+                        user_group_invite::creation_timestamp.desc(),
+                        user_group_invite::code,
+                    ))
+                } else {
+                    q.order((
+                        create_user.field(registered_user::pk),
+                        user_group_invite::creation_timestamp.desc(),
+                        user_group_invite::code,
+                    ))
+                }
+            }),
+        );
+        order_map.insert(
+            "creation_timestamp",
+            order_by_col_with_tie_fn(
+                user_group_invite::creation_timestamp,
+                user_group_invite::code,
+            ),
+        );
+        order_map.insert(
+            "expiration_timestamp",
+            order_by_col_with_tie_fn(
+                user_group_invite::expiration_timestamp,
+                user_group_invite::code,
+            ),
+        );
+        order_map.insert(
+            "last_used_timestamp",
+            order_by_col_with_tie_fn(
+                user_group_invite::last_used_timestamp,
+                user_group_invite::code,
+            ),
+        );
+        order_map.insert("code", order_by_col_fn(user_group_invite::code));
 
-            let invite_query_ordered = apply_key_ordering(
-                params.ordering,
-                ("creation_timestamp", true),
-                invite_query.into_boxed(),
-                order_map,
-            )?;
+        let invite_query_ordered = apply_key_ordering(
+            params.ordering,
+            ("creation_timestamp", true),
+            invite_query.into_boxed(),
+            order_map,
+        )?;
 
-            let limit = params.limit.unwrap_or(50);
-            let records = invite_query_ordered
-                .limit(limit as i64)
-                .offset((params.page.unwrap_or(0) * limit) as i64)
-                .load::<(UserGroupInvite, UserPublic, Option<UserPublic>)>(connection)
-                .await?;
+        let limit = params.limit.unwrap_or(50);
+        let records = invite_query_ordered
+            .limit(limit as i64)
+            .offset((params.page.unwrap_or(0) * limit) as i64)
+            .load::<(UserGroupInvite, UserPublic, Option<UserPublic>)>(connection)
+            .await?;
 
-            let invites = records
-                .into_iter()
-                .map(
-                    |(invite, create_user, invited_user)| UserGroupInviteInnerJoined {
-                        code: invite.code,
-                        create_user,
-                        invited_user,
-                        creation_timestamp: invite.creation_timestamp,
-                        expiration_timestamp: invite.expiration_timestamp,
-                        last_used_timestamp: invite.last_used_timestamp,
-                        max_uses: invite.max_uses,
-                        uses_count: invite.uses_count,
-                        revoked: invite.revoked,
-                        active: !invite.revoked
-                            && invite
-                                .expiration_timestamp
-                                .map(|exp| exp > now)
-                                .unwrap_or(true)
-                            && invite
-                                .max_uses
-                                .map(|max_uses| max_uses > invite.uses_count)
-                                .unwrap_or(true),
-                    },
-                )
-                .collect::<Vec<_>>();
+        let invites = records
+            .into_iter()
+            .map(
+                |(invite, create_user, invited_user)| UserGroupInviteInnerJoined {
+                    code: invite.code,
+                    create_user,
+                    invited_user,
+                    creation_timestamp: invite.creation_timestamp,
+                    expiration_timestamp: invite.expiration_timestamp,
+                    last_used_timestamp: invite.last_used_timestamp,
+                    max_uses: invite.max_uses,
+                    uses_count: invite.uses_count,
+                    revoked: invite.revoked,
+                    active: !invite.revoked
+                        && invite
+                            .expiration_timestamp
+                            .map(|exp| exp > now)
+                            .unwrap_or(true)
+                        && invite
+                            .max_uses
+                            .map(|max_uses| max_uses > invite.uses_count)
+                            .unwrap_or(true),
+                },
+            )
+            .collect::<Vec<_>>();
 
-            Ok(GetUserGroupInvitesResponse {
-                total_count,
-                invites,
-            })
-        }
-        .scope_boxed()
+        Ok(GetUserGroupInvitesResponse {
+            total_count,
+            invites,
+        })
     })
     .await?;
 
@@ -626,10 +611,10 @@ pub async fn get_current_user_group_invites_handler(
     })?;
 
     let mut connection = acquire_db_connection().await?;
-    let response = run_repeatable_read_transaction(&mut connection, |connection| {
-        async {
-            let now = Utc::now();
-            let filter = user_group_invite::fk_invited_user.eq(user.pk).and(
+    let response = run_repeatable_read_transaction(&mut connection, async |connection| {
+        let now = Utc::now();
+        let filter =
+            user_group_invite::fk_invited_user.eq(user.pk).and(
                 not(user_group_invite::revoked)
                     .and(
                         user_group_invite::expiration_timestamp
@@ -641,173 +626,171 @@ pub async fn get_current_user_group_invites_handler(
                     )),
             );
 
-            let total_count = user_group_invite::table
-                .filter(filter)
-                .count()
-                .get_result::<i64>(connection)
-                .await?;
+        let total_count = user_group_invite::table
+            .filter(filter)
+            .count()
+            .get_result::<i64>(connection)
+            .await?;
 
-            let (
-                invite_create_user,
-                invited_user,
-                group,
-                group_create_user,
-                group_edit_user,
-                group_owner,
-            ) = diesel::alias!(
-                registered_user as invite_create_user,
-                registered_user as invited_user,
-                user_group as group,
-                registered_user as group_create_user,
-                registered_user as group_edit_user,
-                registered_user as group_owner,
-            );
+        let (
+            invite_create_user,
+            invited_user,
+            group,
+            group_create_user,
+            group_edit_user,
+            group_owner,
+        ) = diesel::alias!(
+            registered_user as invite_create_user,
+            registered_user as invited_user,
+            user_group as group,
+            registered_user as group_create_user,
+            registered_user as group_edit_user,
+            registered_user as group_owner,
+        );
 
-            let invite_query = user_group_invite::table
-                .inner_join(
-                    invite_create_user.on(invite_create_user
-                        .field(registered_user::pk)
-                        .eq(user_group_invite::fk_create_user)),
-                )
-                .left_join(
-                    invited_user.on(invited_user
-                        .field(registered_user::pk)
-                        .nullable()
-                        .eq(user_group_invite::fk_invited_user)),
-                )
-                .inner_join(
-                    group.on(group
-                        .field(user_group::pk)
-                        .eq(user_group_invite::fk_user_group)),
-                )
-                .inner_join(
-                    group_create_user.on(group_create_user
-                        .field(registered_user::pk)
-                        .eq(group.field(user_group::fk_create_user))),
-                )
-                .inner_join(
-                    group_edit_user.on(group_edit_user
-                        .field(registered_user::pk)
-                        .eq(group.field(user_group::fk_edit_user))),
-                )
-                .inner_join(
-                    group_owner.on(group_owner
-                        .field(registered_user::pk)
-                        .eq(group.field(user_group::fk_owner))),
-                )
-                .filter(filter);
+        let invite_query = user_group_invite::table
+            .inner_join(
+                invite_create_user.on(invite_create_user
+                    .field(registered_user::pk)
+                    .eq(user_group_invite::fk_create_user)),
+            )
+            .left_join(
+                invited_user.on(invited_user
+                    .field(registered_user::pk)
+                    .nullable()
+                    .eq(user_group_invite::fk_invited_user)),
+            )
+            .inner_join(
+                group.on(group
+                    .field(user_group::pk)
+                    .eq(user_group_invite::fk_user_group)),
+            )
+            .inner_join(
+                group_create_user.on(group_create_user
+                    .field(registered_user::pk)
+                    .eq(group.field(user_group::fk_create_user))),
+            )
+            .inner_join(
+                group_edit_user.on(group_edit_user
+                    .field(registered_user::pk)
+                    .eq(group.field(user_group::fk_edit_user))),
+            )
+            .inner_join(
+                group_owner.on(group_owner
+                    .field(registered_user::pk)
+                    .eq(group.field(user_group::fk_owner))),
+            )
+            .filter(filter);
 
-            let mut order_map: HashMap<&'static str, Box<ApplyOrderFn<_, _, _>>> = HashMap::new();
-            order_map.insert(
-                "group.name",
-                Box::new(move |desc, q: BoxedSelectStatement<'_, _, _, _>| {
-                    if desc {
-                        q.order((
-                            group.field(user_group::name).desc(),
-                            user_group_invite::creation_timestamp.desc(),
-                            user_group_invite::code,
-                        ))
-                    } else {
-                        q.order((
-                            group.field(user_group::name),
-                            user_group_invite::creation_timestamp.desc(),
-                            user_group_invite::code,
-                        ))
-                    }
-                }),
-            );
-            order_map.insert(
-                "creation_timestamp",
-                order_by_col_with_tie_fn(
-                    user_group_invite::creation_timestamp,
-                    user_group_invite::code,
-                ),
-            );
-            order_map.insert(
-                "expiration_timestamp",
-                order_by_col_with_tie_fn(
-                    user_group_invite::expiration_timestamp,
-                    user_group_invite::code,
-                ),
-            );
-            order_map.insert(
-                "last_used_timestamp",
-                order_by_col_with_tie_fn(
-                    user_group_invite::last_used_timestamp,
-                    user_group_invite::code,
-                ),
-            );
-            order_map.insert("code", order_by_col_fn(user_group_invite::code));
+        let mut order_map: HashMap<&'static str, Box<ApplyOrderFn<_, _, _>>> = HashMap::new();
+        order_map.insert(
+            "group.name",
+            Box::new(move |desc, q: BoxedSelectStatement<'_, _, _, _>| {
+                if desc {
+                    q.order((
+                        group.field(user_group::name).desc(),
+                        user_group_invite::creation_timestamp.desc(),
+                        user_group_invite::code,
+                    ))
+                } else {
+                    q.order((
+                        group.field(user_group::name),
+                        user_group_invite::creation_timestamp.desc(),
+                        user_group_invite::code,
+                    ))
+                }
+            }),
+        );
+        order_map.insert(
+            "creation_timestamp",
+            order_by_col_with_tie_fn(
+                user_group_invite::creation_timestamp,
+                user_group_invite::code,
+            ),
+        );
+        order_map.insert(
+            "expiration_timestamp",
+            order_by_col_with_tie_fn(
+                user_group_invite::expiration_timestamp,
+                user_group_invite::code,
+            ),
+        );
+        order_map.insert(
+            "last_used_timestamp",
+            order_by_col_with_tie_fn(
+                user_group_invite::last_used_timestamp,
+                user_group_invite::code,
+            ),
+        );
+        order_map.insert("code", order_by_col_fn(user_group_invite::code));
 
-            let invite_query_ordered = apply_key_ordering(
-                params.ordering,
-                ("creation_timestamp", true),
-                invite_query.into_boxed(),
-                order_map,
-            )?;
+        let invite_query_ordered = apply_key_ordering(
+            params.ordering,
+            ("creation_timestamp", true),
+            invite_query.into_boxed(),
+            order_map,
+        )?;
 
-            let limit = params.limit.unwrap_or(50);
-            let records = invite_query_ordered
-                .limit(limit as i64)
-                .offset((params.page.unwrap_or(0) * limit) as i64)
-                .load::<(
-                    UserGroupInvite,
-                    UserPublic,
-                    Option<UserPublic>,
-                    UserGroup,
-                    UserPublic,
-                    UserPublic,
-                    UserPublic,
-                )>(connection)
-                .await?;
+        let limit = params.limit.unwrap_or(50);
+        let records = invite_query_ordered
+            .limit(limit as i64)
+            .offset((params.page.unwrap_or(0) * limit) as i64)
+            .load::<(
+                UserGroupInvite,
+                UserPublic,
+                Option<UserPublic>,
+                UserGroup,
+                UserPublic,
+                UserPublic,
+                UserPublic,
+            )>(connection)
+            .await?;
 
-            let invites = records
-                .into_iter()
-                .map(
-                    |(
-                        invite,
-                        invite_create_user,
-                        invited_user,
-                        group,
-                        group_create_user,
-                        group_edit_user,
-                        group_owner,
-                    )| UserGroupInviteDetailed {
-                        code: invite.code,
-                        user_group: UserGroupDetailed {
-                            pk: group.pk,
-                            name: group.name,
-                            public: group.public,
-                            owner: group_owner,
-                            creation_timestamp: group.creation_timestamp,
-                            description: group.description,
-                            allow_member_invite: group.allow_member_invite,
-                            avatar_object_key: group.avatar_object_key,
-                            create_user: group_create_user,
-                            edit_timestamp: group.edit_timestamp,
-                            edit_user: group_edit_user,
-                            tags: None,
-                            is_editable: false,
-                            user_can_invite: false,
-                        },
-                        create_user: invite_create_user,
-                        invited_user,
-                        creation_timestamp: invite.creation_timestamp,
-                        expiration_timestamp: invite.expiration_timestamp,
-                        last_used_timestamp: invite.last_used_timestamp,
-                        max_uses: invite.max_uses,
-                        uses_count: invite.uses_count,
-                        revoked: invite.revoked,
+        let invites = records
+            .into_iter()
+            .map(
+                |(
+                    invite,
+                    invite_create_user,
+                    invited_user,
+                    group,
+                    group_create_user,
+                    group_edit_user,
+                    group_owner,
+                )| UserGroupInviteDetailed {
+                    code: invite.code,
+                    user_group: UserGroupDetailed {
+                        pk: group.pk,
+                        name: group.name,
+                        public: group.public,
+                        owner: group_owner,
+                        creation_timestamp: group.creation_timestamp,
+                        description: group.description,
+                        allow_member_invite: group.allow_member_invite,
+                        avatar_object_key: group.avatar_object_key,
+                        create_user: group_create_user,
+                        edit_timestamp: group.edit_timestamp,
+                        edit_user: group_edit_user,
+                        tags: None,
+                        is_editable: false,
+                        user_can_invite: false,
                     },
-                )
-                .collect::<Vec<_>>();
+                    create_user: invite_create_user,
+                    invited_user,
+                    creation_timestamp: invite.creation_timestamp,
+                    expiration_timestamp: invite.expiration_timestamp,
+                    last_used_timestamp: invite.last_used_timestamp,
+                    max_uses: invite.max_uses,
+                    uses_count: invite.uses_count,
+                    revoked: invite.revoked,
+                },
+            )
+            .collect::<Vec<_>>();
 
-            Ok(GetCurrentUserGroupInvitesResponse {
-                total_count,
-                invites,
-            })
-        }
-        .scope_boxed()
+        Ok(GetCurrentUserGroupInvitesResponse {
+            total_count,
+            invites,
+        })
     })
     .await?;
 
@@ -825,70 +808,67 @@ pub async fn revoke_user_group_invite_handler(
     user: User,
 ) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
-    let response = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let invite = user_group_invite::table
-                .filter(user_group_invite::code.eq(&invite_code))
-                .get_result::<UserGroupInvite>(connection)
-                .await
-                .optional()?
-                .ok_or_else(|| {
-                    TransactionRuntimeError::Rollback(Error::InaccessibleObjectKeyError(
-                        invite_code.clone(),
-                    ))
-                })?;
+    let response = run_serializable_transaction(&mut connection, async |connection| {
+        let invite = user_group_invite::table
+            .filter(user_group_invite::code.eq(&invite_code))
+            .get_result::<UserGroupInvite>(connection)
+            .await
+            .optional()?
+            .ok_or_else(|| {
+                TransactionRuntimeError::Rollback(Error::InaccessibleObjectKeyError(
+                    invite_code.clone(),
+                ))
+            })?;
 
-            let (group, membership) = user_group::table
-                .left_join(
-                    user_group_membership::table.on(user_group_membership::fk_group
-                        .eq(user_group::pk)
-                        .and(user_group_membership::fk_user.eq(user.pk))),
-                )
-                .filter(user_group::pk.eq(invite.fk_user_group))
-                .get_result::<(UserGroup, Option<UserGroupMembership>)>(connection)
-                .await?;
+        let (group, membership) = user_group::table
+            .left_join(
+                user_group_membership::table.on(user_group_membership::fk_group
+                    .eq(user_group::pk)
+                    .and(user_group_membership::fk_user.eq(user.pk))),
+            )
+            .filter(user_group::pk.eq(invite.fk_user_group))
+            .get_result::<(UserGroup, Option<UserGroupMembership>)>(connection)
+            .await?;
 
-            if !(is_user_group_editable(&group, &user, membership.as_ref())
-                || invite.fk_create_user == user.pk
-                || invite.fk_invited_user == Some(user.pk))
-            {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectKeyError(invite_code),
-                ));
-            }
-
-            if invite.revoked {
-                return Ok(RevokeUserGroupInviteResponse {
-                    prev: invite,
-                    updated: None,
-                });
-            }
-
-            let updated = diesel::update(user_group_invite::table)
-                .filter(user_group_invite::code.eq(&invite_code))
-                .set(user_group_invite::revoked.eq(true))
-                .get_result::<UserGroupInvite>(connection)
-                .await?;
-
-            diesel::insert_into(user_group_audit_log::table)
-                .values(NewUserGroupAuditLog {
-                    fk_user_group: invite.fk_user_group,
-                    fk_user: user.pk,
-                    action: UserGroupAuditAction::RevokeInvite,
-                    fk_target_user: invite.fk_invited_user,
-                    invite_code: Some(invite_code),
-                    reason: None,
-                    creation_timestamp: Utc::now(),
-                })
-                .execute(connection)
-                .await?;
-
-            Ok(RevokeUserGroupInviteResponse {
-                prev: invite,
-                updated: Some(updated),
-            })
+        if !(is_user_group_editable(&group, &user, membership.as_ref())
+            || invite.fk_create_user == user.pk
+            || invite.fk_invited_user == Some(user.pk))
+        {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectKeyError(invite_code),
+            ));
         }
-        .scope_boxed()
+
+        if invite.revoked {
+            return Ok(RevokeUserGroupInviteResponse {
+                prev: invite,
+                updated: None,
+            });
+        }
+
+        let updated = diesel::update(user_group_invite::table)
+            .filter(user_group_invite::code.eq(&invite_code))
+            .set(user_group_invite::revoked.eq(true))
+            .get_result::<UserGroupInvite>(connection)
+            .await?;
+
+        diesel::insert_into(user_group_audit_log::table)
+            .values(NewUserGroupAuditLog {
+                fk_user_group: invite.fk_user_group,
+                fk_user: user.pk,
+                action: UserGroupAuditAction::RevokeInvite,
+                fk_target_user: invite.fk_invited_user,
+                invite_code: Some(invite_code),
+                reason: None,
+                creation_timestamp: Utc::now(),
+            })
+            .execute(connection)
+            .await?;
+
+        Ok(RevokeUserGroupInviteResponse {
+            prev: invite,
+            updated: Some(updated),
+        })
     })
     .await?;
 

@@ -11,7 +11,6 @@ use crate::{
     acquire_db_connection, retry_on_constraint_violation, run_retryable_transaction, util,
 };
 use diesel::{ExpressionMethods, QueryDsl};
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,16 +42,13 @@ pub async fn create_tags_handler(
     let mut tag_names = sanitize_request_tags(&create_tags_request.tag_names);
     util::dedup_vec(&mut tag_names);
     let mut connection = acquire_db_connection().await?;
-    run_retryable_transaction(&mut connection, |connection| {
-        async move {
-            let (existing_tags, inserted_tags) =
-                get_or_create_tags(connection, &tag_names, &user).await?;
-            Ok(warp::reply::json(&CreateTagsResponse {
-                existing_tags,
-                inserted_tags,
-            }))
-        }
-        .scope_boxed()
+    run_retryable_transaction(&mut connection, async |connection| {
+        let (existing_tags, inserted_tags) =
+            get_or_create_tags(connection, &tag_names, &user).await?;
+        Ok(warp::reply::json(&CreateTagsResponse {
+            existing_tags,
+            inserted_tags,
+        }))
     })
     .await
     .map_err(warp::reject::custom)

@@ -16,7 +16,7 @@ use diesel::{
     BoolExpressionMethods, ExpressionMethods, JoinOnDsl, NullableExpressionMethods,
     OptionalExtension, QueryDsl,
 };
-use diesel_async::{RunQueryDsl, scoped_futures::ScopedFutureExt};
+use diesel_async::RunQueryDsl;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::runtime::Handle;
 
@@ -33,7 +33,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
             let grace_period = RECONCILE_QUOTA_GRACE_PERIOD.to_postgres();
 
             let mut connection = acquire_db_connection().await?;
-            let tasks = run_serializable_transaction(&mut connection, |connection| async {
+            let tasks = run_serializable_transaction(&mut connection, async |connection| {
                 diesel::sql_query("
                     WITH relevant_reconcile_broker_quota_usage_tasks AS(
                         SELECT * FROM reconcile_broker_quota_usage_task
@@ -50,7 +50,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                 .load::<ReconcileBrokerQuotaUsageTask>(connection)
                 .await
                 .map_err(retry_on_serialization_failure)
-            }.scope_boxed()).await?;
+            }).await?;
 
             if tasks.is_empty() {
                 break;
@@ -73,7 +73,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                     return Ok(());
                 }
 
-                let res = run_serializable_transaction(&mut connection, |connection| async move {
+                let res = run_serializable_transaction(&mut connection, async |connection| {
                     let user = registered_user::table.filter(registered_user::pk.eq(task.fk_user)).get_result::<User>(connection).await?;
                     let broker = broker::table.filter(broker::pk.eq(task.fk_broker)).get_result::<Broker>(connection).await?;
                     let system_user = get_system_user();
@@ -148,7 +148,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                     }
 
                     Ok(())
-                }.scope_boxed()).await;
+                }).await;
 
                 if let Err(e) = res {
                     log::error!(
@@ -181,7 +181,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
             sentinel.release_manually(async move {
                 let res: Result<(), Error> = async {
                     let mut connection = acquire_db_connection().await?;
-                    run_serializable_transaction(&mut connection, |connection| async {
+                    run_serializable_transaction(&mut connection, async |connection| {
                         // first delete tasks that have become obsolete because a new task for the same user/broker combination has been created while this task was locked
                         diesel::sql_query(r#"
                             DELETE FROM reconcile_broker_quota_usage_task task
@@ -207,7 +207,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                             .map_err(retry_on_constraint_violation)?;
 
                         Ok(())
-                    }.scope_boxed()).await?;
+                    }).await?;
                     Ok(())
                 }.await;
 
@@ -234,7 +234,7 @@ pub fn run_broker_quota_usage_audits(tokio_handle: Handle) -> Result<(), Error> 
             }
 
             let mut connection = acquire_db_connection().await?;
-            let broker_to_check = run_serializable_transaction(&mut connection, |connection| async {
+            let broker_to_check = run_serializable_transaction(&mut connection, async |connection| {
                 diesel::sql_query("
                     WITH broker_to_update AS(
                         SELECT * FROM broker
@@ -250,7 +250,7 @@ pub fn run_broker_quota_usage_audits(tokio_handle: Handle) -> Result<(), Error> 
                 .await
                 .optional()
                 .map_err(retry_on_serialization_failure)
-            }.scope_boxed()).await?;
+            }).await?;
 
             let broker_to_check = match broker_to_check {
                 Some(broker) => broker,
@@ -267,7 +267,7 @@ pub fn run_broker_quota_usage_audits(tokio_handle: Handle) -> Result<(), Error> 
                 &tokio_handle,
             ).await;
 
-            let res = run_serializable_transaction(&mut connection, |connection| async {
+            let res = run_serializable_transaction(&mut connection, async |connection| {
                 let broker_to_check = broker_to_check.clone();
                 let mut violations_found = 0;
 
@@ -370,7 +370,7 @@ pub fn run_broker_quota_usage_audits(tokio_handle: Handle) -> Result<(), Error> 
                 }
 
                 Ok(violations_found)
-            }.scope_boxed()).await;
+            }).await;
 
             match res {
                 Ok(violations_found) => log::info!("quota audit: Quota audit completed for broker '{}' ({}), found {} violations", &broker_to_check.name, broker_to_check.pk, violations_found),

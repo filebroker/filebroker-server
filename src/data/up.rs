@@ -3,7 +3,7 @@ use std::{ffi::OsStr, io, path::Path};
 use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
 use diesel::{OptionalExtension, QueryDsl, dsl::sum};
-use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{TryStream, stream::IntoAsyncRead};
 use s3::{Bucket, error::S3Error};
 use uuid::Uuid;
@@ -129,42 +129,38 @@ where
     };
 
     let mime_type = content_type.clone();
-    let inserted_s3_object = run_serializable_transaction(&mut connection, |connection| {
-        let object_key = object_key.clone();
-        async move {
-            if broker.fk_owner != user.pk {
-                check_broker_quota_usage(broker, user, reader.file_size, connection).await?;
-            }
-
-            let inserted_object = diesel::insert_into(s3_object::table)
-                .values(&S3Object {
-                    object_key,
-                    sha256_hash: Some(hash),
-                    size_bytes: reader.file_size as i64,
-                    mime_type,
-                    fk_broker: broker.pk,
-                    fk_uploader: user.pk,
-                    thumbnail_object_key: None,
-                    creation_timestamp: Utc::now(),
-                    filename: source_filename,
-                    hls_master_playlist: None,
-                    hls_disabled: hls_transcoding_disabled,
-                    hls_locked_at: None,
-                    thumbnail_locked_at: None,
-                    hls_fail_count: None,
-                    thumbnail_fail_count: None,
-                    thumbnail_disabled: false,
-                    metadata_locked_at: None,
-                    metadata_fail_count: None,
-                    derived_from: None,
-                    object_type: ObjectType::Original,
-                })
-                .get_result::<S3Object>(connection)
-                .await?;
-
-            Ok(inserted_object)
+    let inserted_s3_object = run_serializable_transaction(&mut connection, async |connection| {
+        if broker.fk_owner != user.pk {
+            check_broker_quota_usage(broker, user, reader.file_size, connection).await?;
         }
-        .scope_boxed()
+
+        let inserted_object = diesel::insert_into(s3_object::table)
+            .values(&S3Object {
+                object_key: object_key.clone(),
+                sha256_hash: Some(hash),
+                size_bytes: reader.file_size as i64,
+                mime_type,
+                fk_broker: broker.pk,
+                fk_uploader: user.pk,
+                thumbnail_object_key: None,
+                creation_timestamp: Utc::now(),
+                filename: source_filename,
+                hls_master_playlist: None,
+                hls_disabled: hls_transcoding_disabled,
+                hls_locked_at: None,
+                thumbnail_locked_at: None,
+                hls_fail_count: None,
+                thumbnail_fail_count: None,
+                thumbnail_disabled: false,
+                metadata_locked_at: None,
+                metadata_fail_count: None,
+                derived_from: None,
+                object_type: ObjectType::Original,
+            })
+            .get_result::<S3Object>(connection)
+            .await?;
+
+        Ok(inserted_object)
     })
     .await;
 

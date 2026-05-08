@@ -28,7 +28,6 @@ use diesel::{
     BoolExpressionMethods, ExpressionMethods, IntoSql, JoinOnDsl, NullableExpressionMethods,
     OptionalExtension, QueryDsl, Table,
 };
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -110,26 +109,23 @@ pub async fn get_current_user_group_memberships_handler(
 
     let mut connection = acquire_db_connection().await?;
     let (total_count, memberships) =
-        run_repeatable_read_transaction(&mut connection, |connection| {
-            async {
-                let total_count = user_group::table
-                    .filter(get_group_membership_condition!(user.pk))
-                    .count()
-                    .get_result::<i64>(connection)
-                    .await?;
-
-                let memberships = get_user_group_memberships(
-                    user,
-                    connection,
-                    Some(params.limit.unwrap_or(50)),
-                    params.page,
-                    params.ordering,
-                )
+        run_repeatable_read_transaction(&mut connection, async |connection| {
+            let total_count = user_group::table
+                .filter(get_group_membership_condition!(user.pk))
+                .count()
+                .get_result::<i64>(connection)
                 .await?;
 
-                Ok((total_count, memberships))
-            }
-            .scope_boxed()
+            let memberships = get_user_group_memberships(
+                user,
+                connection,
+                Some(params.limit.unwrap_or(50)),
+                params.page,
+                params.ordering,
+            )
+            .await?;
+
+            Ok((total_count, memberships))
         })
         .await?;
 
@@ -376,45 +372,42 @@ pub async fn leave_user_group_handler(
     let mut connection = acquire_db_connection().await?;
     let now = Utc::now();
 
-    run_retryable_transaction(&mut connection, |connection| {
-        async move {
-            let deleted_membership = diesel::delete(user_group_membership::table)
-                .filter(
-                    user_group_membership::fk_group
-                        .eq(user_group_pk)
-                        .and(user_group_membership::fk_user.eq(user.pk)),
-                )
-                .get_result::<UserGroupMembership>(connection)
-                .await
-                .optional()?;
+    run_retryable_transaction(&mut connection, async |connection| {
+        let deleted_membership = diesel::delete(user_group_membership::table)
+            .filter(
+                user_group_membership::fk_group
+                    .eq(user_group_pk)
+                    .and(user_group_membership::fk_user.eq(user.pk)),
+            )
+            .get_result::<UserGroupMembership>(connection)
+            .await
+            .optional()?;
 
-            if let Some(deleted_membership) = deleted_membership {
-                // don't allow banned users to leave, which would delete their banned membership and allow them to rejoin / be reinvited
-                if deleted_membership.revoked {
-                    return Err(TransactionRuntimeError::Rollback(
-                        Error::UserBannedFromGroupError(user_group_pk),
-                    ));
-                }
-            } else {
-                return Err(TransactionRuntimeError::Rollback(Error::NotFoundError));
+        if let Some(deleted_membership) = deleted_membership {
+            // don't allow banned users to leave, which would delete their banned membership and allow them to rejoin / be reinvited
+            if deleted_membership.revoked {
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::UserBannedFromGroupError(user_group_pk),
+                ));
             }
-
-            diesel::insert_into(user_group_audit_log::table)
-                .values(NewUserGroupAuditLog {
-                    fk_user_group: user_group_pk,
-                    fk_user: user.pk,
-                    action: UserGroupAuditAction::Leave,
-                    fk_target_user: None,
-                    invite_code: None,
-                    reason: None,
-                    creation_timestamp: now,
-                })
-                .execute(connection)
-                .await?;
-
-            Ok(())
+        } else {
+            return Err(TransactionRuntimeError::Rollback(Error::NotFoundError));
         }
-        .scope_boxed()
+
+        diesel::insert_into(user_group_audit_log::table)
+            .values(NewUserGroupAuditLog {
+                fk_user_group: user_group_pk,
+                fk_user: user.pk,
+                action: UserGroupAuditAction::Leave,
+                fk_target_user: None,
+                invite_code: None,
+                reason: None,
+                creation_timestamp: now,
+            })
+            .execute(connection)
+            .await?;
+
+        Ok(())
     })
     .await?;
 
@@ -645,130 +638,124 @@ pub async fn get_user_group_members_handler(
     let revoked_only = params.revoked_only.unwrap_or(false);
 
     let mut connection = acquire_db_connection().await?;
-    let response = run_repeatable_read_transaction(&mut connection, |connection| {
-        async {
-            let user_group = get_user_group_joined(user_group_pk, Some(&user), connection).await?;
-            if !(user.is_admin
-                || user_group.group.owner.pk == user.pk
-                || user_group.membership.is_some_and(|m| !m.revoked))
-            {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(user_group_pk),
-                ));
-            }
-
-            let filter = user_group_membership::fk_group
-                .eq(user_group_pk)
-                .and(not(admins_only.into_sql::<Bool>()).or(user_group_membership::administrator))
-                .and(
-                    revoked_only
-                        .into_sql::<Bool>()
-                        .and(user_group_membership::revoked)
-                        .or(not(revoked_only.into_sql::<Bool>())
-                            .and(not(user_group_membership::revoked))),
-                );
-
-            let total_count = user_group_membership::table
-                .filter(filter)
-                .count()
-                .get_result::<i64>(connection)
-                .await?;
-
-            let (user, granted_by_user) = diesel::alias!(
-                schema::registered_user as user,
-                schema::registered_user as granted_by_user,
-            );
-
-            let member_query = user_group_membership::table
-                .inner_join(
-                    user.on(user_group_membership::fk_user.eq(user.field(registered_user::pk))),
-                )
-                .inner_join(
-                    granted_by_user.on(user_group_membership::fk_granted_by
-                        .eq(granted_by_user.field(registered_user::pk))),
-                )
-                .filter(filter);
-
-            let mut order_map: HashMap<&'static str, Box<ApplyOrderFn<_, _, _>>> = HashMap::new();
-
-            order_map.insert(
-                "user",
-                Box::new(move |desc, q: BoxedSelectStatement<'_, _, _, _>| {
-                    if desc {
-                        q.order((
-                            user.field(registered_user::pk).desc(),
-                            user_group_membership::creation_timestamp.desc(),
-                            user_group_membership::fk_user.desc(),
-                        ))
-                    } else {
-                        q.order((
-                            user.field(registered_user::pk),
-                            user_group_membership::creation_timestamp.desc(),
-                            user_group_membership::fk_user.desc(),
-                        ))
-                    }
-                }),
-            );
-            order_map.insert(
-                "granted_by",
-                Box::new(move |desc, q| {
-                    if desc {
-                        q.order((
-                            granted_by_user.field(registered_user::pk).desc(),
-                            user_group_membership::creation_timestamp.desc(),
-                            user_group_membership::fk_user.desc(),
-                        ))
-                    } else {
-                        q.order((
-                            granted_by_user.field(registered_user::pk),
-                            user_group_membership::creation_timestamp.desc(),
-                            user_group_membership::fk_user.desc(),
-                        ))
-                    }
-                }),
-            );
-            order_map.insert(
-                "creation_timestamp",
-                order_by_col_with_tie_fn(
-                    user_group_membership::creation_timestamp,
-                    user_group_membership::fk_user.desc(),
-                ),
-            );
-
-            let member_query_ordered = apply_key_ordering(
-                params.ordering,
-                ("creation_timestamp", true),
-                member_query.into_boxed(),
-                order_map,
-            )?;
-
-            let limit = params.limit.unwrap_or(50);
-            let records = member_query_ordered
-                .limit(limit as i64)
-                .offset((params.page.unwrap_or(0) * limit) as i64)
-                .load::<(UserGroupMembership, UserPublic, UserPublic)>(connection)
-                .await?;
-
-            let members = records
-                .into_iter()
-                .map(
-                    |(membership, user, granted_by)| UserGroupMembershipInnerJoined {
-                        user,
-                        administrator: membership.administrator,
-                        is_owner: false,
-                        revoked: membership.revoked,
-                        granted_by,
-                        creation_timestamp: membership.creation_timestamp,
-                    },
-                )
-                .collect::<Vec<_>>();
-
-            Ok(GetUserGroupMembersResponse {
-                total_count,
-                members,
-            })
+    let response = run_repeatable_read_transaction(&mut connection, async |connection| {
+        let user_group = get_user_group_joined(user_group_pk, Some(&user), connection).await?;
+        if !(user.is_admin
+            || user_group.group.owner.pk == user.pk
+            || user_group.membership.is_some_and(|m| !m.revoked))
+        {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(user_group_pk),
+            ));
         }
-        .scope_boxed()
+
+        let filter = user_group_membership::fk_group
+            .eq(user_group_pk)
+            .and(not(admins_only.into_sql::<Bool>()).or(user_group_membership::administrator))
+            .and(
+                revoked_only
+                    .into_sql::<Bool>()
+                    .and(user_group_membership::revoked)
+                    .or(not(revoked_only.into_sql::<Bool>())
+                        .and(not(user_group_membership::revoked))),
+            );
+
+        let total_count = user_group_membership::table
+            .filter(filter)
+            .count()
+            .get_result::<i64>(connection)
+            .await?;
+
+        let (user, granted_by_user) = diesel::alias!(
+            schema::registered_user as user,
+            schema::registered_user as granted_by_user,
+        );
+
+        let member_query = user_group_membership::table
+            .inner_join(user.on(user_group_membership::fk_user.eq(user.field(registered_user::pk))))
+            .inner_join(granted_by_user.on(
+                user_group_membership::fk_granted_by.eq(granted_by_user.field(registered_user::pk)),
+            ))
+            .filter(filter);
+
+        let mut order_map: HashMap<&'static str, Box<ApplyOrderFn<_, _, _>>> = HashMap::new();
+
+        order_map.insert(
+            "user",
+            Box::new(move |desc, q: BoxedSelectStatement<'_, _, _, _>| {
+                if desc {
+                    q.order((
+                        user.field(registered_user::pk).desc(),
+                        user_group_membership::creation_timestamp.desc(),
+                        user_group_membership::fk_user.desc(),
+                    ))
+                } else {
+                    q.order((
+                        user.field(registered_user::pk),
+                        user_group_membership::creation_timestamp.desc(),
+                        user_group_membership::fk_user.desc(),
+                    ))
+                }
+            }),
+        );
+        order_map.insert(
+            "granted_by",
+            Box::new(move |desc, q| {
+                if desc {
+                    q.order((
+                        granted_by_user.field(registered_user::pk).desc(),
+                        user_group_membership::creation_timestamp.desc(),
+                        user_group_membership::fk_user.desc(),
+                    ))
+                } else {
+                    q.order((
+                        granted_by_user.field(registered_user::pk),
+                        user_group_membership::creation_timestamp.desc(),
+                        user_group_membership::fk_user.desc(),
+                    ))
+                }
+            }),
+        );
+        order_map.insert(
+            "creation_timestamp",
+            order_by_col_with_tie_fn(
+                user_group_membership::creation_timestamp,
+                user_group_membership::fk_user.desc(),
+            ),
+        );
+
+        let member_query_ordered = apply_key_ordering(
+            params.ordering,
+            ("creation_timestamp", true),
+            member_query.into_boxed(),
+            order_map,
+        )?;
+
+        let limit = params.limit.unwrap_or(50);
+        let records = member_query_ordered
+            .limit(limit as i64)
+            .offset((params.page.unwrap_or(0) * limit) as i64)
+            .load::<(UserGroupMembership, UserPublic, UserPublic)>(connection)
+            .await?;
+
+        let members = records
+            .into_iter()
+            .map(
+                |(membership, user, granted_by)| UserGroupMembershipInnerJoined {
+                    user,
+                    administrator: membership.administrator,
+                    is_owner: false,
+                    revoked: membership.revoked,
+                    granted_by,
+                    creation_timestamp: membership.creation_timestamp,
+                },
+            )
+            .collect::<Vec<_>>();
+
+        Ok(GetUserGroupMembersResponse {
+            total_count,
+            members,
+        })
     })
     .await?;
 
@@ -814,144 +801,137 @@ pub async fn get_user_group_brokers_handler(
     })?;
 
     let mut connection = acquire_db_connection().await?;
-    let response = run_repeatable_read_transaction(&mut connection, |connection| {
-        async {
-            let user_group =
-                load_user_group_secured(user_group_pk, Some(&user), connection).await?;
+    let response = run_repeatable_read_transaction(&mut connection, async |connection| {
+        let user_group = load_user_group_secured(user_group_pk, Some(&user), connection).await?;
 
-            let total_count = broker_access::table
-                .filter(broker_access::fk_granted_group.eq(user_group.pk))
-                .count()
-                .get_result::<i64>(connection)
-                .await?;
+        let total_count = broker_access::table
+            .filter(broker_access::fk_granted_group.eq(user_group.pk))
+            .count()
+            .get_result::<i64>(connection)
+            .await?;
 
-            let broker_query = broker_access::table
-                .inner_join(broker::table)
-                .inner_join(
-                    registered_user::table.on(broker_access::fk_granted_by.eq(registered_user::pk)),
+        let broker_query = broker_access::table
+            .inner_join(broker::table)
+            .inner_join(
+                registered_user::table.on(broker_access::fk_granted_by.eq(registered_user::pk)),
+            )
+            .filter(broker_access::fk_granted_group.eq(user_group.pk));
+
+        let mut order_map: HashMap<&'static str, Box<ApplyOrderFn<_, _, _>>> = HashMap::new();
+        order_map.insert(
+            "broker.name",
+            order_by_col_with_tie_fn(broker::name, broker::pk.desc()),
+        );
+        order_map.insert(
+            "creation_timestamp",
+            order_by_col_with_tie_fn(broker_access::creation_timestamp, broker_access::pk.desc()),
+        );
+        order_map.insert(
+            "granted_by",
+            order_by_col_with_tie_fn(registered_user::pk, broker_access::pk.desc()),
+        );
+        order_map.insert("broker.pk", order_by_col_fn(broker::pk));
+        order_map.insert("pk", order_by_col_fn(broker_access::pk));
+
+        let broker_query_ordered = apply_key_ordering(
+            params.ordering,
+            ("broker.name", false),
+            broker_query.into_boxed(),
+            order_map,
+        )?;
+
+        let limit = params.limit.unwrap_or(50);
+        let records = broker_query_ordered
+            .limit(limit as i64)
+            .offset((params.page.unwrap_or(0) * limit) as i64)
+            .load::<(BrokerAccess, Broker, UserPublic)>(connection)
+            .await?;
+
+        let broker_pks = records
+            .iter()
+            .map(|(_, broker, _)| broker.pk)
+            .collect::<Vec<_>>();
+        let broker_usages = broker_access::table
+            .inner_join(
+                user_group_membership::table.on(user_group_membership::fk_group
+                    .nullable()
+                    .eq(broker_access::fk_granted_group)),
+            )
+            .inner_join(
+                s3_object::table.on(s3_object::fk_uploader
+                    .eq(user_group_membership::fk_user)
+                    .and(s3_object::fk_broker.eq(broker_access::fk_broker))),
+            )
+            .inner_join(broker::table.on(broker::pk.eq(broker_access::fk_broker)))
+            .filter(broker_access::fk_granted_group.eq(user_group.pk))
+            .filter(broker_access::fk_broker.eq_any(broker_pks))
+            .filter(s3_object::fk_uploader.ne(broker::fk_owner))
+            .group_by(broker_access::pk)
+            .select((
+                broker_access::pk,
+                sum(s3_object::size_bytes),
+                sum(case_when(
+                    s3_object::object_type.eq(ObjectType::Original),
+                    s3_object::size_bytes,
                 )
-                .filter(broker_access::fk_granted_group.eq(user_group.pk));
-
-            let mut order_map: HashMap<&'static str, Box<ApplyOrderFn<_, _, _>>> = HashMap::new();
-            order_map.insert(
-                "broker.name",
-                order_by_col_with_tie_fn(broker::name, broker::pk.desc()),
-            );
-            order_map.insert(
-                "creation_timestamp",
-                order_by_col_with_tie_fn(
-                    broker_access::creation_timestamp,
-                    broker_access::pk.desc(),
-                ),
-            );
-            order_map.insert(
-                "granted_by",
-                order_by_col_with_tie_fn(registered_user::pk, broker_access::pk.desc()),
-            );
-            order_map.insert("broker.pk", order_by_col_fn(broker::pk));
-            order_map.insert("pk", order_by_col_fn(broker_access::pk));
-
-            let broker_query_ordered = apply_key_ordering(
-                params.ordering,
-                ("broker.name", false),
-                broker_query.into_boxed(),
-                order_map,
-            )?;
-
-            let limit = params.limit.unwrap_or(50);
-            let records = broker_query_ordered
-                .limit(limit as i64)
-                .offset((params.page.unwrap_or(0) * limit) as i64)
-                .load::<(BrokerAccess, Broker, UserPublic)>(connection)
-                .await?;
-
-            let broker_pks = records
-                .iter()
-                .map(|(_, broker, _)| broker.pk)
-                .collect::<Vec<_>>();
-            let broker_usages = broker_access::table
-                .inner_join(
-                    user_group_membership::table.on(user_group_membership::fk_group
-                        .nullable()
-                        .eq(broker_access::fk_granted_group)),
-                )
-                .inner_join(
-                    s3_object::table.on(s3_object::fk_uploader
-                        .eq(user_group_membership::fk_user)
-                        .and(s3_object::fk_broker.eq(broker_access::fk_broker))),
-                )
-                .inner_join(broker::table.on(broker::pk.eq(broker_access::fk_broker)))
-                .filter(broker_access::fk_granted_group.eq(user_group.pk))
-                .filter(broker_access::fk_broker.eq_any(broker_pks))
-                .filter(s3_object::fk_uploader.ne(broker::fk_owner))
-                .group_by(broker_access::pk)
-                .select((
-                    broker_access::pk,
-                    sum(s3_object::size_bytes),
-                    sum(case_when(
-                        s3_object::object_type.eq(ObjectType::Original),
-                        s3_object::size_bytes,
-                    )
-                    .otherwise(0)),
-                ))
-                .load::<(i64, Option<BigDecimal>, Option<BigDecimal>)>(connection)
-                .await?
-                .into_iter()
-                .map(|(broker_pk, size_used, quota_used)| {
-                    let size_used = size_used.unwrap_or_default();
-                    let used_bytes = size_used.to_i64().ok_or_else(|| {
-                        Error::InternalError(format!(
-                            "Could not convert broker usage bytes {size_used} to i64"
-                        ))
-                    })?;
-
-                    let quota_used = quota_used.unwrap_or_default();
-                    let used_quota = quota_used.to_i64().ok_or_else(|| {
-                        Error::InternalError(format!(
-                            "Could not convert broker quota bytes {quota_used} to i64"
-                        ))
-                    })?;
-
-                    Ok((
-                        broker_pk,
-                        BrokerQuotaUsage {
-                            used_bytes,
-                            used_quota,
-                        },
+                .otherwise(0)),
+            ))
+            .load::<(i64, Option<BigDecimal>, Option<BigDecimal>)>(connection)
+            .await?
+            .into_iter()
+            .map(|(broker_pk, size_used, quota_used)| {
+                let size_used = size_used.unwrap_or_default();
+                let used_bytes = size_used.to_i64().ok_or_else(|| {
+                    Error::InternalError(format!(
+                        "Could not convert broker usage bytes {size_used} to i64"
                     ))
-                })
-                .collect::<Result<HashMap<i64, BrokerQuotaUsage>, Error>>()?;
+                })?;
 
-            let brokers = records
-                .into_iter()
-                .map(|(broker_access, broker, granted_by)| {
-                    let BrokerQuotaUsage {
+                let quota_used = quota_used.unwrap_or_default();
+                let used_quota = quota_used.to_i64().ok_or_else(|| {
+                    Error::InternalError(format!(
+                        "Could not convert broker quota bytes {quota_used} to i64"
+                    ))
+                })?;
+
+                Ok((
+                    broker_pk,
+                    BrokerQuotaUsage {
                         used_bytes,
                         used_quota,
-                    } = broker_usages
-                        .get(&broker_access.pk)
-                        .copied()
-                        .unwrap_or_default();
-
-                    Ok(BrokerAccessInnerJoined {
-                        pk: broker_access.pk,
-                        broker,
-                        write: broker_access.write,
-                        quota: broker_access.quota,
-                        used_bytes,
-                        used_quota,
-                        granted_by,
-                        creation_timestamp: broker_access.creation_timestamp,
-                    })
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-
-            Ok(GetUserGroupBrokersResponse {
-                total_count,
-                brokers,
+                    },
+                ))
             })
-        }
-        .scope_boxed()
+            .collect::<Result<HashMap<i64, BrokerQuotaUsage>, Error>>()?;
+
+        let brokers = records
+            .into_iter()
+            .map(|(broker_access, broker, granted_by)| {
+                let BrokerQuotaUsage {
+                    used_bytes,
+                    used_quota,
+                } = broker_usages
+                    .get(&broker_access.pk)
+                    .copied()
+                    .unwrap_or_default();
+
+                Ok(BrokerAccessInnerJoined {
+                    pk: broker_access.pk,
+                    broker,
+                    write: broker_access.write,
+                    quota: broker_access.quota,
+                    used_bytes,
+                    used_quota,
+                    granted_by,
+                    creation_timestamp: broker_access.creation_timestamp,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        Ok(GetUserGroupBrokersResponse {
+            total_count,
+            brokers,
+        })
     })
     .await?;
 

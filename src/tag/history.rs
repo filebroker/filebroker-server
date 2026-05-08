@@ -10,7 +10,6 @@ use crate::tag::{get_tag_aliases, get_tag_parents, load_tag_detailed};
 use crate::{acquire_db_connection, run_repeatable_read_transaction, run_serializable_transaction};
 use chrono::{DateTime, Utc};
 use diesel::{BelongingToDsl, ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl, Table};
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::Serialize;
 use validator::Validate;
@@ -49,67 +48,62 @@ pub async fn get_tag_edit_history_handler(
     })?;
 
     let mut connection = acquire_db_connection().await?;
-    let response = run_repeatable_read_transaction(&mut connection, |connection| {
-        async {
-            let (tag, edit_user) = tag::table
-                .inner_join(registered_user::table.on(tag::fk_edit_user.eq(registered_user::pk)))
-                .filter(tag::pk.eq(tag_pk))
-                .get_result::<(Tag, UserPublic)>(connection)
-                .await
-                .optional()
-                .map_err(Error::from)?
-                .ok_or(Error::NotFoundError)?;
+    let response = run_repeatable_read_transaction(&mut connection, async |connection| {
+        let (tag, edit_user) = tag::table
+            .inner_join(registered_user::table.on(tag::fk_edit_user.eq(registered_user::pk)))
+            .filter(tag::pk.eq(tag_pk))
+            .get_result::<(Tag, UserPublic)>(connection)
+            .await
+            .optional()
+            .map_err(Error::from)?
+            .ok_or(Error::NotFoundError)?;
 
-            let total_snapshot_count = tag_edit_history::table
-                .filter(tag_edit_history::fk_tag.eq(tag_pk))
-                .count()
-                .get_result::<i64>(connection)
-                .await
-                .map_err(Error::from)?;
+        let total_snapshot_count = tag_edit_history::table
+            .filter(tag_edit_history::fk_tag.eq(tag_pk))
+            .count()
+            .get_result::<i64>(connection)
+            .await
+            .map_err(Error::from)?;
 
-            let limit = pagination.limit.unwrap_or(10);
-            let offset = limit * pagination.page.unwrap_or(0);
+        let limit = pagination.limit.unwrap_or(10);
+        let offset = limit * pagination.page.unwrap_or(0);
 
-            let tag_edit_history_snapshots = tag_edit_history::table
-                .left_join(tag_category::table)
-                .inner_join(registered_user::table)
-                .filter(tag_edit_history::fk_tag.eq(tag_pk))
-                .order(tag_edit_history::pk.desc())
-                .limit(limit.into())
-                .offset(offset.into())
-                .load::<(TagEditHistory, Option<TagCategory>, UserPublic)>(connection)
-                .await
-                .map_err(Error::from)?;
+        let tag_edit_history_snapshots = tag_edit_history::table
+            .left_join(tag_category::table)
+            .inner_join(registered_user::table)
+            .filter(tag_edit_history::fk_tag.eq(tag_pk))
+            .order(tag_edit_history::pk.desc())
+            .limit(limit.into())
+            .offset(offset.into())
+            .load::<(TagEditHistory, Option<TagCategory>, UserPublic)>(connection)
+            .await
+            .map_err(Error::from)?;
 
-            let mut snapshots = Vec::new();
-            for (tag_edit_history_snapshot, tag_category, edit_user) in tag_edit_history_snapshots {
-                let parents =
-                    get_tag_snapshot_parents(&tag_edit_history_snapshot, connection).await?;
-                let aliases =
-                    get_tag_snapshot_aliases(&tag_edit_history_snapshot, connection).await?;
+        let mut snapshots = Vec::new();
+        for (tag_edit_history_snapshot, tag_category, edit_user) in tag_edit_history_snapshots {
+            let parents = get_tag_snapshot_parents(&tag_edit_history_snapshot, connection).await?;
+            let aliases = get_tag_snapshot_aliases(&tag_edit_history_snapshot, connection).await?;
 
-                snapshots.push(TagEditHistorySnapshot {
-                    pk: tag_edit_history_snapshot.pk,
-                    fk_tag: tag_edit_history_snapshot.fk_tag,
-                    edit_user,
-                    edit_timestamp: tag_edit_history_snapshot.edit_timestamp,
-                    tag_category,
-                    tag_category_changed: tag_edit_history_snapshot.tag_category_changed,
-                    parents_changed: tag_edit_history_snapshot.parents_changed,
-                    aliases_changed: tag_edit_history_snapshot.aliases_changed,
-                    parents,
-                    aliases,
-                });
-            }
-
-            Ok(TagEditHistoryResponse {
-                edit_timestamp: tag.edit_timestamp,
+            snapshots.push(TagEditHistorySnapshot {
+                pk: tag_edit_history_snapshot.pk,
+                fk_tag: tag_edit_history_snapshot.fk_tag,
                 edit_user,
-                total_snapshot_count,
-                snapshots,
-            })
+                edit_timestamp: tag_edit_history_snapshot.edit_timestamp,
+                tag_category,
+                tag_category_changed: tag_edit_history_snapshot.tag_category_changed,
+                parents_changed: tag_edit_history_snapshot.parents_changed,
+                aliases_changed: tag_edit_history_snapshot.aliases_changed,
+                parents,
+                aliases,
+            });
         }
-        .scope_boxed()
+
+        Ok(TagEditHistoryResponse {
+            edit_timestamp: tag.edit_timestamp,
+            edit_user,
+            total_snapshot_count,
+            snapshots,
+        })
     })
     .await?;
 
@@ -192,46 +186,43 @@ pub async fn rewind_tag_history_snapshot_handler(
 ) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
     let (tag_joined, apply_auto_tags_task) =
-        run_serializable_transaction(&mut connection, |connection| {
-            async {
-                let tag_snapshot = tag_edit_history::table
-                    .find(tag_edit_history_pk)
-                    .get_result::<TagEditHistory>(connection)
-                    .await
-                    .optional()
-                    .map_err(Error::from)?
-                    .ok_or(TransactionRuntimeError::Rollback(Error::NotFoundError))?;
+        run_serializable_transaction(&mut connection, async |connection| {
+            let tag_snapshot = tag_edit_history::table
+                .find(tag_edit_history_pk)
+                .get_result::<TagEditHistory>(connection)
+                .await
+                .optional()
+                .map_err(Error::from)?
+                .ok_or(TransactionRuntimeError::Rollback(Error::NotFoundError))?;
 
-                let tag_parents = get_tag_snapshot_parents(&tag_snapshot, connection).await?;
-                let tag_aliases = get_tag_snapshot_aliases(&tag_snapshot, connection).await?;
+            let tag_parents = get_tag_snapshot_parents(&tag_snapshot, connection).await?;
+            let tag_aliases = get_tag_snapshot_aliases(&tag_snapshot, connection).await?;
 
-                let (tag, _, apply_auto_tags_task) = update_tag(
-                    tag_snapshot.fk_tag,
-                    &user,
-                    None,
-                    Some(tag_parents.into_iter().map(|tag| tag.pk).collect()),
-                    None,
-                    None,
-                    Some(tag_aliases.into_iter().map(|tag| tag.pk).collect()),
-                    None,
-                    //
-                    Some(
-                        tag_snapshot
-                            .tag_category
-                            .unwrap_or_else(|| String::from("")),
-                    ),
-                    None,
-                    None,
-                    connection,
-                )
-                .await?;
+            let (tag, _, apply_auto_tags_task) = update_tag(
+                tag_snapshot.fk_tag,
+                &user,
+                None,
+                Some(tag_parents.into_iter().map(|tag| tag.pk).collect()),
+                None,
+                None,
+                Some(tag_aliases.into_iter().map(|tag| tag.pk).collect()),
+                None,
+                //
+                Some(
+                    tag_snapshot
+                        .tag_category
+                        .unwrap_or_else(|| String::from("")),
+                ),
+                None,
+                None,
+                connection,
+            )
+            .await?;
 
-                Ok((
-                    load_tag_detailed(tag, connection).await?,
-                    apply_auto_tags_task,
-                ))
-            }
-            .scope_boxed()
+            Ok((
+                load_tag_detailed(tag, connection).await?,
+                apply_auto_tags_task,
+            ))
         })
         .await?;
 

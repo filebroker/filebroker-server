@@ -9,7 +9,7 @@ use std::sync::{
 
 use chrono::Utc;
 use diesel::sql_types::{Array, VarChar};
-use diesel_async::{RunQueryDsl, scoped_futures::ScopedFutureExt};
+use diesel_async::RunQueryDsl;
 use rusty_pool::ThreadPool;
 use tokio::{runtime::Handle, sync::Mutex, task::JoinHandle};
 
@@ -119,7 +119,7 @@ pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
     tokio_handle.block_on(async {
         let mut connection = acquire_db_connection().await?;
 
-        run_serializable_transaction(&mut connection, |connection| async {
+        run_serializable_transaction(&mut connection, async |connection| {
             // clear locks older than 1 hour in case a task failed to release them due to unexpected termination
             // locks are refreshed every 15 minutes, so locks older than 1 hour should be considered stale
             diesel::sql_query("UPDATE s3_object SET hls_locked_at = NULL WHERE hls_locked_at < NOW() - interval '1 hour'")
@@ -204,7 +204,7 @@ pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
                 .map_err(retry_on_serialization_failure)?;
 
             Ok(())
-        }.scope_boxed()).await
+        }).await
     })
 }
 

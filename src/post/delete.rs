@@ -4,7 +4,7 @@ use diesel::{
     QueryDsl, Table,
     dsl::{exists, not},
 };
-use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 use warp::{reject::Rejection, reply::Reply};
@@ -67,10 +67,10 @@ pub async fn delete_posts_handler(
 
     let res = if !request.post_pks.is_empty() {
         let mut connection = acquire_db_connection().await?;
-        run_serializable_transaction(&mut connection, |connection| {
-            async {
-                let mut post_pks = request.post_pks.clone();
-                let inaccessible_posts = post::table
+        run_serializable_transaction(&mut connection, async |connection| {
+            let mut post_pks = request.post_pks.clone();
+            let inaccessible_posts =
+                post::table
                     .left_join(s3_object::table)
                     .left_join(broker::table.on(s3_object::fk_broker.eq(broker::pk)))
                     .select(post::pk)
@@ -88,26 +88,24 @@ pub async fn delete_posts_handler(
                     .get_results::<i64>(connection)
                     .await?;
 
-                if let Some(DeleteInaccessiblePostMode::Reject) = request.inaccessible_post_mode
-                    && !inaccessible_posts.is_empty()
-                {
-                    return Err(TransactionRuntimeError::Rollback(
-                        Error::InaccessibleObjectsError(inaccessible_posts),
-                    ));
-                }
-
-                post_pks.retain(|pk| !inaccessible_posts.contains(pk));
-
-                execute_delete_posts(
-                    &post_pks,
-                    request.delete_unreferenced_objects.unwrap_or(true),
-                    &user,
-                    connection,
-                )
-                .await
-                .map_err(TransactionRuntimeError::from)
+            if let Some(DeleteInaccessiblePostMode::Reject) = request.inaccessible_post_mode
+                && !inaccessible_posts.is_empty()
+            {
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::InaccessibleObjectsError(inaccessible_posts),
+                ));
             }
-            .scope_boxed()
+
+            post_pks.retain(|pk| !inaccessible_posts.contains(pk));
+
+            execute_delete_posts(
+                &post_pks,
+                request.delete_unreferenced_objects.unwrap_or(true),
+                &user,
+                connection,
+            )
+            .await
+            .map_err(TransactionRuntimeError::from)
         })
         .await?
     } else {
@@ -317,65 +315,61 @@ pub async fn delete_posts_collections_handler(
 
     let res = if !request.post_collection_pks.is_empty() {
         let mut connection = acquire_db_connection().await?;
-        run_serializable_transaction(&mut connection, |connection| {
-            async {
-                let mut post_collection_pks = request.post_collection_pks.clone();
-                let inaccessible_post_collections = post_collection::table
-                    .select(post_collection::pk)
-                    .filter(
-                        post_collection::pk
-                            .eq_any(&post_collection_pks)
-                            .and(not(post_collection::fk_create_user.eq(user.pk))),
-                    )
-                    .get_results::<i64>(connection)
-                    .await?;
+        run_serializable_transaction(&mut connection, async |connection| {
+            let mut post_collection_pks = request.post_collection_pks.clone();
+            let inaccessible_post_collections = post_collection::table
+                .select(post_collection::pk)
+                .filter(
+                    post_collection::pk
+                        .eq_any(&post_collection_pks)
+                        .and(not(post_collection::fk_create_user.eq(user.pk))),
+                )
+                .get_results::<i64>(connection)
+                .await?;
 
-                if let Some(DeleteInaccessiblePostMode::Reject) =
-                    request.inaccessible_post_collection_mode
-                    && !inaccessible_post_collections.is_empty()
-                {
-                    return Err(TransactionRuntimeError::Rollback(
-                        Error::InaccessibleObjectsError(inaccessible_post_collections),
-                    ));
-                }
-
-                post_collection_pks.retain(|pk| !inaccessible_post_collections.contains(pk));
-
-                diesel::delete(post_collection_item::table)
-                    .filter(post_collection_item::fk_post_collection.eq_any(&post_collection_pks))
-                    .execute(connection)
-                    .await?;
-
-                diesel::delete(post_collection_group_access::table)
-                    .filter(
-                        post_collection_group_access::fk_post_collection
-                            .eq_any(&post_collection_pks),
-                    )
-                    .execute(connection)
-                    .await?;
-
-                diesel::delete(post_collection_tag::table)
-                    .filter(post_collection_tag::fk_post_collection.eq_any(&post_collection_pks))
-                    .execute(connection)
-                    .await?;
-
-                let deleted_post_collections = diesel::delete(post_collection::table)
-                    .filter(post_collection::pk.eq_any(&post_collection_pks))
-                    .get_results::<PostCollection>(connection)
-                    .await?;
-
-                let poster_object_keys = deleted_post_collections
-                    .iter()
-                    .filter_map(|post_collection| post_collection.poster_object_key.as_ref())
-                    .collect::<Vec<_>>();
-
-                delete_unreferenced_objects(&poster_object_keys, &user, connection).await?;
-
-                Ok(DeletePostCollectionsResponse {
-                    deleted_post_collections,
-                })
+            if let Some(DeleteInaccessiblePostMode::Reject) =
+                request.inaccessible_post_collection_mode
+                && !inaccessible_post_collections.is_empty()
+            {
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::InaccessibleObjectsError(inaccessible_post_collections),
+                ));
             }
-            .scope_boxed()
+
+            post_collection_pks.retain(|pk| !inaccessible_post_collections.contains(pk));
+
+            diesel::delete(post_collection_item::table)
+                .filter(post_collection_item::fk_post_collection.eq_any(&post_collection_pks))
+                .execute(connection)
+                .await?;
+
+            diesel::delete(post_collection_group_access::table)
+                .filter(
+                    post_collection_group_access::fk_post_collection.eq_any(&post_collection_pks),
+                )
+                .execute(connection)
+                .await?;
+
+            diesel::delete(post_collection_tag::table)
+                .filter(post_collection_tag::fk_post_collection.eq_any(&post_collection_pks))
+                .execute(connection)
+                .await?;
+
+            let deleted_post_collections = diesel::delete(post_collection::table)
+                .filter(post_collection::pk.eq_any(&post_collection_pks))
+                .get_results::<PostCollection>(connection)
+                .await?;
+
+            let poster_object_keys = deleted_post_collections
+                .iter()
+                .filter_map(|post_collection| post_collection.poster_object_key.as_ref())
+                .collect::<Vec<_>>();
+
+            delete_unreferenced_objects(&poster_object_keys, &user, connection).await?;
+
+            Ok(DeletePostCollectionsResponse {
+                deleted_post_collections,
+            })
         })
         .await?
     } else {

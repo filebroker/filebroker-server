@@ -12,7 +12,6 @@ use crate::{acquire_db_connection, run_serializable_transaction};
 use chrono::Utc;
 use diesel::{BoolExpressionMethods, OptionalExtension, PgExpressionMethods, QueryDsl};
 use diesel_async::RunQueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use serde::Deserialize;
 use validator::Validate;
 use warp::{Rejection, Reply};
@@ -66,39 +65,34 @@ pub async fn create_broker_handler(
     verify_bucket_connection(&bucket).await?;
 
     let mut connection = acquire_db_connection().await?;
-    let created_broker = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            if is_system_bucket {
-                diesel::update(broker::table)
-                    .filter(broker::is_system_bucket.eq(true))
-                    .set(broker::is_system_bucket.eq(false))
-                    .execute(connection)
-                    .await?;
-            }
-            let broker = diesel::insert_into(broker::table)
-                .values(&NewBroker {
-                    name: create_broker_request.name,
-                    bucket: create_broker_request.bucket,
-                    endpoint: create_broker_request.endpoint,
-                    access_key: create_broker_request.access_key,
-                    secret_key: create_broker_request.secret_key,
-                    is_aws_region: create_broker_request.is_aws_region,
-                    remove_duplicate_files: create_broker_request.remove_duplicate_files,
-                    fk_owner: user.pk,
-                    hls_enabled: false,
-                    enable_presigned_get: create_broker_request
-                        .enable_presigned_get
-                        .unwrap_or(true),
-                    is_system_bucket,
-                    description: create_broker_request.description,
-                    total_quota: create_broker_request.total_quota,
-                })
-                .get_result::<Broker>(connection)
+    let created_broker = run_serializable_transaction(&mut connection, async |connection| {
+        if is_system_bucket {
+            diesel::update(broker::table)
+                .filter(broker::is_system_bucket.eq(true))
+                .set(broker::is_system_bucket.eq(false))
+                .execute(connection)
                 .await?;
-
-            Ok(broker)
         }
-        .scope_boxed()
+        let broker = diesel::insert_into(broker::table)
+            .values(&NewBroker {
+                name: create_broker_request.name,
+                bucket: create_broker_request.bucket,
+                endpoint: create_broker_request.endpoint,
+                access_key: create_broker_request.access_key,
+                secret_key: create_broker_request.secret_key,
+                is_aws_region: create_broker_request.is_aws_region,
+                remove_duplicate_files: create_broker_request.remove_duplicate_files,
+                fk_owner: user.pk,
+                hls_enabled: false,
+                enable_presigned_get: create_broker_request.enable_presigned_get.unwrap_or(true),
+                is_system_bucket,
+                description: create_broker_request.description,
+                total_quota: create_broker_request.total_quota,
+            })
+            .get_result::<Broker>(connection)
+            .await?;
+
+        Ok(broker)
     })
     .await?;
 
@@ -138,114 +132,110 @@ pub async fn create_broker_access_handler(
     }
 
     let mut connection = acquire_db_connection().await?;
-    let created_broker_access = run_serializable_transaction(&mut connection, |connection| {
-        async {
-            let BrokerJoined { broker, owner } =
-                get_broker_joined(broker_pk, &user, connection).await?;
-            if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InaccessibleObjectError(broker_pk),
-                ));
-            }
-
-            // check that referenced user exists
-            if let Some(granted_user_pk) = granted_user_pk {
-                registered_user::table
-                    .filter(registered_user::pk.eq(granted_user_pk))
-                    .get_result::<User>(connection)
-                    .await
-                    .optional()?
-                    .ok_or_else(|| {
-                        TransactionRuntimeError::Rollback(Error::InaccessibleObjectError(
-                            granted_user_pk,
-                        ))
-                    })?;
-            }
-
-            // only allow granting access to groups of which the user is a member
-            if let Some(user_group_pk) = user_group_pk {
-                let user_group =
-                    get_user_group_joined(user_group_pk, Some(&user), connection).await?;
-                if !(user.is_admin
-                    || user_group.group.owner.pk == user.pk
-                    || user_group.membership.is_some_and(|m| !m.revoked))
-                {
-                    return Err(TransactionRuntimeError::Rollback(
-                        Error::InaccessibleObjectError(user_group_pk),
-                    ));
-                }
-            }
-
-            // check if access already exists
-            let existing_broker_access = broker_access::table
-                .filter(
-                    broker_access::fk_broker
-                        .eq(broker.pk)
-                        .and(broker_access::fk_granted_group.is_not_distinct_from(user_group_pk))
-                        .and(broker_access::fk_granted_user.is_not_distinct_from(granted_user_pk)),
-                )
-                .get_result::<BrokerAccess>(connection)
-                .await
-                .optional()?;
-            if existing_broker_access.is_some() {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::BrokerAccessAlreadyExistsError(user_group_pk.or(granted_user_pk)),
-                ));
-            }
-
-            let public = user_group_pk.is_none() && granted_user_pk.is_none();
-
-            // don't allow giving admin privileges to public access
-            if is_admin && public {
-                return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                    String::from("Cannot grant admin privileges to public access"),
-                )));
-            }
-
-            // don't allow public access to have unlimited quota
-            if quota.is_none() && public {
-                return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
-                    String::from("Cannot grant unlimited quota to public access"),
-                )));
-            }
-
-            // only admins can create public broker access
-            if public && !user.is_admin {
-                return Err(TransactionRuntimeError::Rollback(Error::UserNotAdmin));
-            }
-
-            let now = Utc::now();
-
-            diesel::insert_into(broker_audit_log::table)
-                .values(NewBrokerAuditLog {
-                    fk_broker: broker.pk,
-                    fk_user: user.pk,
-                    action: BrokerAuditAction::AccessGranted,
-                    fk_target_group: user_group_pk,
-                    new_quota: quota,
-                    creation_timestamp: now,
-                    fk_target_user: granted_user_pk,
-                })
-                .execute(connection)
-                .await?;
-
-            let broker_access = diesel::insert_into(broker_access::table)
-                .values(NewBrokerAccess {
-                    fk_broker: broker.pk,
-                    fk_granted_group: user_group_pk,
-                    write: is_admin,
-                    quota,
-                    fk_granted_by: user.pk,
-                    creation_timestamp: now,
-                    fk_granted_user: granted_user_pk,
-                    public,
-                })
-                .get_result::<BrokerAccess>(connection)
-                .await?;
-
-            Ok(broker_access)
+    let created_broker_access = run_serializable_transaction(&mut connection, async |connection| {
+        let BrokerJoined { broker, owner } =
+            get_broker_joined(broker_pk, &user, connection).await?;
+        if !(owner.pk == user.pk || is_broker_admin(broker_pk, &user, connection).await?) {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InaccessibleObjectError(broker_pk),
+            ));
         }
-        .scope_boxed()
+
+        // check that referenced user exists
+        if let Some(granted_user_pk) = granted_user_pk {
+            registered_user::table
+                .filter(registered_user::pk.eq(granted_user_pk))
+                .get_result::<User>(connection)
+                .await
+                .optional()?
+                .ok_or_else(|| {
+                    TransactionRuntimeError::Rollback(Error::InaccessibleObjectError(
+                        granted_user_pk,
+                    ))
+                })?;
+        }
+
+        // only allow granting access to groups of which the user is a member
+        if let Some(user_group_pk) = user_group_pk {
+            let user_group = get_user_group_joined(user_group_pk, Some(&user), connection).await?;
+            if !(user.is_admin
+                || user_group.group.owner.pk == user.pk
+                || user_group.membership.is_some_and(|m| !m.revoked))
+            {
+                return Err(TransactionRuntimeError::Rollback(
+                    Error::InaccessibleObjectError(user_group_pk),
+                ));
+            }
+        }
+
+        // check if access already exists
+        let existing_broker_access = broker_access::table
+            .filter(
+                broker_access::fk_broker
+                    .eq(broker.pk)
+                    .and(broker_access::fk_granted_group.is_not_distinct_from(user_group_pk))
+                    .and(broker_access::fk_granted_user.is_not_distinct_from(granted_user_pk)),
+            )
+            .get_result::<BrokerAccess>(connection)
+            .await
+            .optional()?;
+        if existing_broker_access.is_some() {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::BrokerAccessAlreadyExistsError(user_group_pk.or(granted_user_pk)),
+            ));
+        }
+
+        let public = user_group_pk.is_none() && granted_user_pk.is_none();
+
+        // don't allow giving admin privileges to public access
+        if is_admin && public {
+            return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                String::from("Cannot grant admin privileges to public access"),
+            )));
+        }
+
+        // don't allow public access to have unlimited quota
+        if quota.is_none() && public {
+            return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
+                String::from("Cannot grant unlimited quota to public access"),
+            )));
+        }
+
+        // only admins can create public broker access
+        if public && !user.is_admin {
+            return Err(TransactionRuntimeError::Rollback(Error::UserNotAdmin));
+        }
+
+        let now = Utc::now();
+
+        diesel::insert_into(broker_audit_log::table)
+            .values(NewBrokerAuditLog {
+                fk_broker: broker.pk,
+                fk_user: user.pk,
+                action: BrokerAuditAction::AccessGranted,
+                fk_target_group: user_group_pk,
+                new_quota: quota,
+                creation_timestamp: now,
+                fk_target_user: granted_user_pk,
+            })
+            .execute(connection)
+            .await?;
+
+        let broker_access = diesel::insert_into(broker_access::table)
+            .values(NewBrokerAccess {
+                fk_broker: broker.pk,
+                fk_granted_group: user_group_pk,
+                write: is_admin,
+                quota,
+                fk_granted_by: user.pk,
+                creation_timestamp: now,
+                fk_granted_user: granted_user_pk,
+                public,
+            })
+            .get_result::<BrokerAccess>(connection)
+            .await?;
+
+        Ok(broker_access)
     })
     .await?;
 

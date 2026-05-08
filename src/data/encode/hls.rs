@@ -10,7 +10,6 @@ use crate::{acquire_db_connection, run_retryable_transaction, run_serializable_t
 use chrono::Utc;
 use diesel::ExpressionMethods;
 use diesel_async::RunQueryDsl;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use futures::future::try_join_all;
 use futures::ready;
 use itertools::Itertools;
@@ -570,35 +569,30 @@ async fn persist_hls_transcode_results(
     }
 
     let mut conn = acquire_db_connection().await?;
-    run_serializable_transaction(&mut conn, |conn| {
-        async {
-            diesel::insert_into(s3_object::table)
-                .values(&s3_objects)
-                .execute(conn)
-                .await?;
-            diesel::insert_into(hls_stream::table)
-                .values(&hls_streams)
-                .execute(conn)
-                .await?;
+    run_serializable_transaction(&mut conn, async |conn| {
+        diesel::insert_into(s3_object::table)
+            .values(&s3_objects)
+            .execute(conn)
+            .await?;
+        diesel::insert_into(hls_stream::table)
+            .values(&hls_streams)
+            .execute(conn)
+            .await?;
 
-            let update_count = diesel::update(s3_object::table)
-                .set(s3_object::hls_master_playlist.eq(&master_playlist_result.path))
-                .filter(s3_object::object_key.eq(source_object_key))
-                .execute(conn)
-                .await?;
+        let update_count = diesel::update(s3_object::table)
+            .set(s3_object::hls_master_playlist.eq(&master_playlist_result.path))
+            .filter(s3_object::object_key.eq(source_object_key))
+            .execute(conn)
+            .await?;
 
-            if update_count == 0 {
-                // source object no longer exists, delete HLS transcode
-                return Err(TransactionRuntimeError::Rollback(Error::QueryError(
-                    format!(
-                        "Source object {source_object_key} for HLS transcoding no longer exists"
-                    ),
-                )));
-            }
-
-            Ok(())
+        if update_count == 0 {
+            // source object no longer exists, delete HLS transcode
+            return Err(TransactionRuntimeError::Rollback(Error::QueryError(
+                format!("Source object {source_object_key} for HLS transcoding no longer exists"),
+            )));
         }
-        .scope_boxed()
+
+        Ok(())
     })
     .await?;
     drop(conn);
@@ -629,27 +623,26 @@ async fn persist_hls_transcode_results(
             ) -> Result<(), Error> {
                 log::debug!("Deleting created db objects for HLS transcode of {source_object_key}");
                 let mut conn = acquire_db_connection().await?;
-                run_retryable_transaction(&mut conn, |conn| {
-                    async move {
-                        diesel::update(s3_object::table)
-                            .set(s3_object::hls_master_playlist.eq(Option::<String>::None))
-                            .filter(s3_object::object_key.eq(source_object_key))
-                            .execute(conn)
-                            .await?;
-                        diesel::delete(hls_stream::table)
-                            .filter(hls_stream::master_playlist.eq(hls_master_playlist))
-                            .execute(conn)
-                            .await?;
-                        diesel::delete(s3_object::table)
-                            .filter(s3_object::object_key.eq_any(
+                run_retryable_transaction(&mut conn, async |conn| {
+                    diesel::update(s3_object::table)
+                        .set(s3_object::hls_master_playlist.eq(Option::<String>::None))
+                        .filter(s3_object::object_key.eq(source_object_key))
+                        .execute(conn)
+                        .await?;
+                    diesel::delete(hls_stream::table)
+                        .filter(hls_stream::master_playlist.eq(hls_master_playlist))
+                        .execute(conn)
+                        .await?;
+                    diesel::delete(s3_object::table)
+                        .filter(
+                            s3_object::object_key.eq_any(
                                 s3_objects.iter().map(|o| &o.object_key).collect::<Vec<_>>(),
-                            ))
-                            .execute(conn)
-                            .await?;
+                            ),
+                        )
+                        .execute(conn)
+                        .await?;
 
-                        Ok(())
-                    }
-                    .scope_boxed()
+                    Ok(())
                 })
                 .await
             }
