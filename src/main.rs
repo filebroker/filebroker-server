@@ -316,7 +316,7 @@ async fn recompile_tag_auto_match_conditions() -> Result<(), Error> {
     use diesel_async::RunQueryDsl;
 
     let mut connection = acquire_db_connection().await?;
-    run_serializable_transaction(&mut connection, |connection| async {
+    run_serializable_transaction(&mut connection, async |connection| {
         diesel::update(schema::tag::table)
             .filter(
                 schema::tag::compiled_auto_match_condition_post
