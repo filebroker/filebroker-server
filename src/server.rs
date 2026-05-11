@@ -166,7 +166,10 @@ where
                     let conn = builder.serve_connection(io, service);
 
                     if let Err(e) = watcher.watch(conn).await {
-                        log::error!("HTTP connection error: {e}");
+                        // Log connection error at debug level
+                        // Connection errors for clients disconnecting while streaming are common and expected,
+                        // and the source error will have already been logged by the warp filter
+                        log::debug!("connection watcher: HTTP connection terminated with error: {e}");
                     }
                 });
             }
