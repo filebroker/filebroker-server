@@ -859,7 +859,10 @@ fn upload_tokio_file(
             let mut reader = ByteCountingTokioFileReader::new(f);
             log::debug!("Beginning upload for HLS stream for file {s3_path}");
             let res = bucket
-                .put_object_stream_with_content_type(&mut reader, &s3_path, &content_type)
+                .put_object_stream_builder(&s3_path)
+                .with_content_type(&content_type)
+                .with_max_concurrent_chunks(1)
+                .execute_stream(&mut reader)
                 .map_err(|e| Error::S3Error(format!("Failed to upload file '{s3_path}': {e}")))
                 .await?;
 

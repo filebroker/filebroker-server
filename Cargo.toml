@@ -47,7 +47,7 @@ rand = "0.10.1"
 regex = "1.12.3"
 reqwest = { version = "0.13", features = ["form", "json"] }
 ring = "0.17.14"
-rust-s3 = "0.37.2"
+rust-s3 = { git = "https://github.com/filebroker/rust-s3.git", rev = "caa841cc4e0c843b8f00072d05a2ef8b08ece559" }
 rustls = "0.23.40"
 rustls-native-certs = "0.8.3"
 rustls-pemfile = "2.2.0"
