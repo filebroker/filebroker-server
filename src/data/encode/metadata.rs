@@ -284,7 +284,23 @@ pub async fn load_object_metadata(
                     let hour = &caps[4];
                     let minute = &caps[5];
                     let second = caps.get(6).map_or(":00", |m| m.as_str()); // Fallback to ":00" if $6 / seconds is not present
-                    let timezone = caps.get(7).map_or("Z", |m| m.as_str()); // Fallback to Z if $7 / timezone is not present
+                    // Fallback to Z if $7 / timezone is not present
+                    let timezone = caps.get(7).map_or("+00:00".to_string(), |m| {
+                        let tz = m.as_str();
+
+                        if tz == "Z" {
+                            "+00:00".to_string()
+                        } else if (tz.starts_with('+') || tz.starts_with('-'))
+                            && !tz.contains(':')
+                            && tz.len() >= 3
+                        {
+                            let sign_and_hours = &tz[..tz.len() - 2];
+                            let minutes = &tz[tz.len() - 2..];
+                            format!("{sign_and_hours}:{minutes}")
+                        } else {
+                            tz.to_string()
+                        }
+                    });
                     format!("{year}-{month}-{day} {hour}:{minute}{second}{timezone}")
                 })
                 .to_string();

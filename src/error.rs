@@ -291,7 +291,7 @@ impl From<diesel::result::Error> for Error {
 impl From<s3::error::S3Error> for Error {
     fn from(e: s3::error::S3Error) -> Self {
         match e {
-            s3::error::S3Error::Http(code, msg) => Error::S3ResponseErrorMsg(code, msg),
+            s3::error::S3Error::HttpFailWithBody(code, msg) => Error::S3ResponseErrorMsg(code, msg),
             _ => Error::S3Error(e.to_string()),
         }
     }

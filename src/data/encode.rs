@@ -30,7 +30,7 @@ lazy_static! {
     pub static ref SUBMITTED_HLS_TRANSCODINGS: parking_lot::Mutex<HashSet<String>> =
         parking_lot::Mutex::new(HashSet::new());
     pub static ref EXIF_DATE_FORMAT_REGEX: Regex =
-        Regex::new(r"(\d+):(\d+):(\d+) (\d+):(\d+)(:\d+)?(\+\d+:\d+)?")
+        Regex::new(r"(\d+):(\d+):(\d+) (\d+):(\d+)(:\d+(?:\.\d+)?)?((?:[+-]\d+:?\d+)|Z)?")
             .expect("Failed to compile EXIF date format regex");
 }
 

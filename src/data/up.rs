@@ -45,7 +45,10 @@ where
 
     log::info!("Starting S3 upload for {}", &object_key);
     let status = match bucket
-        .put_object_stream_with_content_type(&mut reader, &object_key, &content_type)
+        .put_object_stream_builder(&object_key)
+        .with_content_type(&content_type)
+        .with_max_concurrent_chunks(1)
+        .execute_stream(&mut reader)
         .await
     {
         Ok(status) => Ok(status),
@@ -58,8 +61,8 @@ where
         }
         Err(e) => Err(e.into()),
     }?;
-    if status >= 300 {
-        return Err(Error::S3ResponseError(status));
+    if status.status_code() >= 300 {
+        return Err(Error::S3ResponseError(status.status_code()));
     }
     log::info!("Finished S3 upload for {}", &object_key);
 
