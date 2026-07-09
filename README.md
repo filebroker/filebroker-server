@@ -1,5 +1,7 @@
 # filebroker
 
+Publicly hosted on [filebroker.io](https://filebroker.io).
+
 Server backend for the filebroker project featuring a warp api server and a docker-compose configuration to host
 the api server, the react fronted, the postgres server and the nginx reverse proxy.
 
