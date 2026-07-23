@@ -607,6 +607,17 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    user_preferences (fk_user) {
+        fk_user -> Int8,
+        advanced_query_mode -> Bool,
+        auto_play_audio -> Bool,
+        auto_play_video -> Bool,
+        auto_play_audio_in_collection -> Bool,
+        auto_play_video_in_collection -> Bool,
+    }
+}
+
 diesel::joinable!(apply_auto_tags_task -> post (post_to_apply));
 diesel::joinable!(apply_auto_tags_task -> post_collection (post_collection_to_apply));
 diesel::joinable!(apply_auto_tags_task -> tag (tag_to_apply));
@@ -671,6 +682,7 @@ diesel::joinable!(user_group_invite -> user_group (fk_user_group));
 diesel::joinable!(user_group_membership -> user_group (fk_group));
 diesel::joinable!(user_group_tag -> tag (fk_tag));
 diesel::joinable!(user_group_tag -> user_group (fk_user_group));
+diesel::joinable!(user_preferences -> registered_user (fk_user));
 
 diesel::allow_tables_to_appear_in_same_query!(
     apply_auto_tags_task,
@@ -714,4 +726,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     user_group_invite,
     user_group_membership,
     user_group_tag,
+    user_preferences,
 );

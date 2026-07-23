@@ -22,16 +22,21 @@ use warp::{
 };
 use zxcvbn::zxcvbn;
 
-use crate::model::UserPublic;
 use crate::{
     CERT_PATH, HOST_BASE_PATH, acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension, QueryDsl},
     error::{Error, TransactionRuntimeError},
     mail,
-    model::{EmailConfirmationToken, NewUser, OneTimePassword, RefreshToken, User},
+    model::{
+        EmailConfirmationToken, NewUser, OneTimePassword, RefreshToken, User, UserPreferences,
+        UserPublic,
+    },
     query::functions::lower,
     retry_on_constraint_violation, run_retryable_transaction,
-    schema::{email_confirmation_token, one_time_password, refresh_token, registered_user},
+    schema::{
+        email_confirmation_token, one_time_password, refresh_token, registered_user,
+        user_preferences,
+    },
 };
 
 mod captcha;
@@ -58,6 +63,8 @@ pub struct LoginResponse {
     pub refresh_token: String,
     pub expiration_secs: i64,
     pub user: UserInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferences: Option<UserPreferences>,
 }
 
 /// Struct received by the /register endpoint used to create a user.
@@ -165,11 +172,12 @@ pub async fn login_handler(
 
     let mut connection = acquire_db_connection().await?;
     let found_registered_user = registered_user::table
+        .left_join(user_preferences::table)
         .filter(lower(registered_user::user_name).eq(&request.user_name.to_lowercase()))
-        .get_result::<User>(&mut connection)
+        .get_result::<(User, Option<UserPreferences>)>(&mut connection)
         .await;
-    let registered_user = match found_registered_user {
-        Ok(registered_user) => {
+    let (registered_user, preferences) = match found_registered_user {
+        Ok((registered_user, preferences)) => {
             if registered_user.password_fail_count >= 10 && !captcha_verified {
                 return Err(warp::reject::custom(Error::InvalidCaptchaError));
             }
@@ -183,7 +191,7 @@ pub async fn login_handler(
                             .execute(&mut connection)
                             .await
                             .map_err(Error::from)?;
-                        registered_user
+                        (registered_user, preferences)
                     } else {
                         diesel::update(registered_user::table)
                             .filter(registered_user::pk.eq(&registered_user.pk))
@@ -206,7 +214,13 @@ pub async fn login_handler(
 
     let refresh_token_cookie =
         create_refresh_token_cookie(&registered_user, &mut connection).await?;
-    create_login_response(registered_user, refresh_token_cookie).map_err(warp::reject::custom)
+    let user_pk = registered_user.pk;
+    create_login_response(
+        registered_user,
+        preferences.or_else(|| Some(UserPreferences::default_for_user(user_pk))),
+        refresh_token_cookie,
+    )
+    .map_err(warp::reject::custom)
 }
 
 struct RefreshTokenCookie {
@@ -264,9 +278,11 @@ fn format_refresh_token_cookie(uuid: &str, expiry: &str) -> String {
 /// Used when a /login or /refresh-login succeeds.
 fn create_login_response(
     registered_user: User,
+    preferences: Option<UserPreferences>,
     refresh_token_cookie: RefreshTokenCookie,
 ) -> Result<impl Reply, Error> {
-    let login_response = create_login_response_struct(registered_user, refresh_token_cookie.token)?;
+    let login_response =
+        create_login_response_struct(registered_user, preferences, refresh_token_cookie.token)?;
 
     let json_response = serde_json::to_vec(&login_response)
         .map_err(|e| Error::SerialisationError(e.to_string()))?;
@@ -283,6 +299,7 @@ fn create_login_response(
 
 fn create_login_response_struct(
     registered_user: User,
+    preferences: Option<UserPreferences>,
     refresh_token: String,
 ) -> Result<LoginResponse, Error> {
     let expiration_period = *ACCESS_TOKEN_EXPIRATION;
@@ -310,6 +327,7 @@ fn create_login_response_struct(
 
     Ok(LoginResponse {
         token,
+        preferences,
         refresh_token,
         expiration_secs,
         user: registered_user.into(),
@@ -322,8 +340,9 @@ fn create_login_response_struct(
 /// Returns a [`LoginResponse`] with the new JWT if the refresh token is valid (the UUID exists and
 /// the refresh token is not expired) or else returns a InvalidRefreshTokenError which results in a 401.
 pub async fn refresh_login_handler(refresh_token: String) -> Result<impl Reply, Rejection> {
-    let (user, refresh_token_cookie) = refresh_user_login_data(refresh_token).await?;
-    create_login_response(user, refresh_token_cookie).map_err(warp::reject::custom)
+    let (user, preferences, refresh_token_cookie) = refresh_user_login_data(refresh_token).await?;
+    create_login_response(user, Some(preferences), refresh_token_cookie)
+        .map_err(warp::reject::custom)
 }
 
 pub async fn try_refresh_login_handler(
@@ -331,7 +350,7 @@ pub async fn try_refresh_login_handler(
 ) -> Result<impl Reply, Rejection> {
     let (login_response, refresh_token_cookie) = match refresh_token {
         Some(refresh_token) if !refresh_token.is_empty() => {
-            if let Some((user, refresh_token_cookie)) =
+            if let Some((user, preferences, refresh_token_cookie)) =
                 match refresh_user_login_data(refresh_token).await {
                     Ok(res) => Some(res),
                     Err(Error::InvalidRefreshTokenError) => None,
@@ -341,6 +360,7 @@ pub async fn try_refresh_login_handler(
                 (
                     Some(create_login_response_struct(
                         user,
+                        Some(preferences),
                         refresh_token_cookie.token,
                     )?),
                     Some(refresh_token_cookie.cookie),
@@ -389,7 +409,7 @@ pub async fn logout_handler(refresh_token: Option<String>) -> Result<impl Reply,
 
 async fn refresh_user_login_data(
     refresh_token: String,
-) -> Result<(User, RefreshTokenCookie), Error> {
+) -> Result<(User, UserPreferences, RefreshTokenCookie), Error> {
     let mut connection = acquire_db_connection().await?;
     run_retryable_transaction(&mut connection, async |connection| {
         let curr_token_uuid = Uuid::parse_str(&refresh_token)
@@ -415,17 +435,20 @@ async fn refresh_user_login_data(
             .optional()?
             .ok_or(Error::InvalidRefreshTokenError)?;
 
-        let user = registered_user::table
+        let (user, preferences) = registered_user::table
+            .left_join(user_preferences::table)
             .filter(registered_user::pk.eq(updated_token.fk_user))
-            .get_result::<User>(connection)
+            .get_result::<(User, Option<UserPreferences>)>(connection)
             .await?;
 
         let uuid = updated_token.uuid.to_string();
         let expiry = updated_token.expiry.to_rfc2822();
 
+        let user_pk = user.pk;
         let cookie = format_refresh_token_cookie(&uuid, &expiry);
         Ok((
             user,
+            preferences.unwrap_or_else(|| UserPreferences::default_for_user(user_pk)),
             RefreshTokenCookie {
                 token: uuid,
                 cookie,
@@ -542,9 +565,12 @@ pub async fn register_handler(
                 Ok(registered_user) => {
                     let refresh_token_cookie =
                         create_refresh_token_cookie(&registered_user, connection).await?;
-                    let login_response =
-                        create_login_response(registered_user.clone(), refresh_token_cookie)
-                            .map_err(TransactionRuntimeError::Rollback)?;
+                    let login_response = create_login_response(
+                        registered_user.clone(),
+                        Some(UserPreferences::default_for_user(registered_user.pk)),
+                        refresh_token_cookie,
+                    )
+                    .map_err(TransactionRuntimeError::Rollback)?;
                     Ok((registered_user, login_response))
                 }
                 Err(e) => Err(TransactionRuntimeError::Rollback(Error::QueryError(
@@ -626,6 +652,91 @@ impl From<User> for UserInfo {
 
 pub async fn current_user_info_handler(user: User) -> Result<impl Reply, Rejection> {
     Ok(warp::reply::json(&UserInfo::from(user)))
+}
+
+pub async fn current_user_preferences_handler(user: User) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection().await?;
+    let preferences = get_user_preferences(user.pk, &mut connection).await?;
+    Ok(warp::reply::json(&preferences))
+}
+
+pub async fn get_user_preferences(
+    user_pk: i64,
+    connection: &mut AsyncPgConnection,
+) -> Result<UserPreferences, Error> {
+    let found_preferences = user_preferences::table
+        .filter(user_preferences::fk_user.eq(user_pk))
+        .get_result::<UserPreferences>(connection)
+        .await
+        .optional()?;
+
+    Ok(found_preferences.unwrap_or_else(|| UserPreferences::default_for_user(user_pk)))
+}
+
+#[derive(Deserialize)]
+pub struct PatchUserPreferencesRequest {
+    pub advanced_query_mode: Option<bool>,
+    pub auto_play_audio: Option<bool>,
+    pub auto_play_video: Option<bool>,
+    pub auto_play_audio_in_collection: Option<bool>,
+    pub auto_play_video_in_collection: Option<bool>,
+}
+
+#[derive(AsChangeset, Insertable)]
+#[diesel(table_name = user_preferences)]
+#[diesel(primary_key(fk_user))]
+pub struct PatchUserPreferencesChangeset {
+    pub fk_user: i64,
+    pub advanced_query_mode: Option<bool>,
+    pub auto_play_audio: Option<bool>,
+    pub auto_play_video: Option<bool>,
+    pub auto_play_audio_in_collection: Option<bool>,
+    pub auto_play_video_in_collection: Option<bool>,
+}
+
+impl PatchUserPreferencesRequest {
+    pub fn has_changes(&self) -> bool {
+        self.advanced_query_mode.is_some()
+            || self.auto_play_audio.is_some()
+            || self.auto_play_video.is_some()
+            || self.auto_play_audio_in_collection.is_some()
+            || self.auto_play_video_in_collection.is_some()
+    }
+
+    pub fn into_changeset(self, user_pk: i64) -> PatchUserPreferencesChangeset {
+        PatchUserPreferencesChangeset {
+            fk_user: user_pk,
+            advanced_query_mode: self.advanced_query_mode,
+            auto_play_audio: self.auto_play_audio,
+            auto_play_video: self.auto_play_video,
+            auto_play_audio_in_collection: self.auto_play_audio_in_collection,
+            auto_play_video_in_collection: self.auto_play_video_in_collection,
+        }
+    }
+}
+
+pub async fn patch_user_preferences_handler(
+    request: PatchUserPreferencesRequest,
+    user: User,
+) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection().await?;
+    if !request.has_changes() {
+        return Ok(warp::reply::json(
+            &get_user_preferences(user.pk, &mut connection).await?,
+        ));
+    }
+
+    let changeset = request.into_changeset(user.pk);
+    let updated_preferences = diesel::insert_into(user_preferences::table)
+        .values(&changeset)
+        .on_conflict(user_preferences::fk_user)
+        .do_update()
+        .set(&changeset)
+        .get_result::<UserPreferences>(&mut connection)
+        .await
+        .map_err(Error::from)?;
+
+    Ok(warp::reply::json(&updated_preferences))
 }
 
 #[derive(Serialize)]
@@ -964,7 +1075,7 @@ pub async fn change_password_handler(
             .await?;
 
         let refresh_token_cookie = create_refresh_token_cookie(&user, connection).await?;
-        create_login_response(user, refresh_token_cookie).map_err(|e| e.into())
+        create_login_response(user, None, refresh_token_cookie).map_err(|e| e.into())
     })
     .await
     .map_err(warp::reject::custom)
@@ -1149,7 +1260,7 @@ pub async fn reset_password_handler(
             .await?;
 
         let refresh_token_cookie = create_refresh_token_cookie(&user, connection).await?;
-        create_login_response(user, refresh_token_cookie).map_err(|e| e.into())
+        create_login_response(user, None, refresh_token_cookie).map_err(|e| e.into())
     })
     .await
     .map_err(warp::reject::custom)

@@ -709,6 +709,17 @@ pub fn build_warp_filter() -> impl Filter<Extract = (impl Reply,), Error = warp:
         .and(auth::with_user())
         .and_then(broker::update::change_broker_access_admin_handler);
 
+    let current_user_preferences_route = warp::path("current-user-preferences")
+        .and(warp::get())
+        .and(auth::with_user())
+        .and_then(auth::current_user_preferences_handler);
+
+    let patch_user_preferences_route = warp::path("patch-user-preferences")
+        .and(warp::patch())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(auth::patch_user_preferences_handler);
+
     let auth_routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -727,7 +738,9 @@ pub fn build_warp_filter() -> impl Filter<Extract = (impl Reply,), Error = warp:
         .or(reset_password_route)
         .or(create_user_avatar_route)
         .or(get_user_public_route)
-        .or(get_user_public_name_route);
+        .or(get_user_public_name_route)
+        .or(current_user_preferences_route)
+        .or(patch_user_preferences_route);
 
     let query_routes = search_route.or(analyze_query_route);
 

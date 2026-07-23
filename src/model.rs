@@ -152,6 +152,32 @@ pub struct NewUser {
     pub display_name: Option<String>,
 }
 
+#[derive(
+    Associations, Clone, Debug, Default, Deserialize, Identifiable, Insertable, Queryable, Serialize,
+)]
+#[diesel(table_name = user_preferences)]
+#[diesel(belongs_to(User, foreign_key = fk_user))]
+#[diesel(primary_key(fk_user))]
+pub struct UserPreferences {
+    pub fk_user: i64,
+    pub advanced_query_mode: bool,
+    pub auto_play_audio: bool,
+    pub auto_play_video: bool,
+    pub auto_play_audio_in_collection: bool,
+    pub auto_play_video_in_collection: bool,
+}
+
+impl UserPreferences {
+    pub fn default_for_user(fk_user: i64) -> Self {
+        Self {
+            fk_user,
+            auto_play_audio_in_collection: true,
+            auto_play_video_in_collection: true,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Associations, Identifiable, Insertable, Queryable)]
 #[diesel(belongs_to(User, foreign_key = fk_user))]
 #[diesel(table_name = refresh_token)]
