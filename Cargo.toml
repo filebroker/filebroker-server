@@ -9,69 +9,69 @@ default = []
 auto_migration = ["diesel_migrations"]
 
 [dependencies]
-async-trait = "0.1.56"
-bcrypt = "0.19.0"
+async-trait = "0.1.91"
+bcrypt = "0.19.2"
 bigdecimal = "0.4.10"
-bytes = "1.11.1"
-chrono = { version = "0.4.44", features = ["serde"] }
+bytes = "1.12.1"
+chrono = { version = "0.4.45", features = ["serde"] }
 clokwerk = "0.4.0"
 data-encoding = "2.11.0"
-diesel = { version = "2.3.9", features = ["64-column-tables", "chrono", "numeric", "postgres", "r2d2", "serde_json", "uuid"] }
-diesel-async = { version = "0.9.0", features = ["postgres", "deadpool"] }
+diesel = { version = "2.3.11", features = ["64-column-tables", "chrono", "numeric", "postgres", "r2d2", "serde_json", "uuid"] }
+diesel-async = { version = "0.9.2", features = ["postgres", "deadpool"] }
 diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }
 dotenvy = "0.15.7"
 downcast-rs = "2.0.2"
 exec-rs = "0.1.2"
 fern = { version = "0.7.1", features = ["date-based"] }
 flurry = "0.5.2"
-futures = "0.3.32"
+futures = "0.3.33"
 governor = "0.10.4"
 hyper-util = "0.1.20"
 iso8601 = "0.6.3"
-itertools = "0.14.0"
+itertools = "0.15.0"
 jsonwebtoken = { version = "10.3.0", features = ["rust_crypto"] }
 lazy_static = "1.5.0"
-lettre = { version = "0.11.21", features = ["dkim"] }
-log = "0.4.29"
+lettre = { version = "0.11.22", features = ["dkim"] }
+log = "0.4.33"
 m3u8-rs = "6.0.0"
 mime = "0.3.17"
 mime_guess = "2.0.5"
 mpart-async = "0.7.0"
 num_cpus = "1.17.0"
 parking_lot = "0.12.5"
-passwords = "3.1.16"
+passwords = "3.1.18"
 percent-encoding = "2.3.2"
-pg_interval = "0.5.0"
+pg_interval = "0.6.0"
 pin-project = "1.1.11"
-rand = "0.10.1"
-regex = "1.12.3"
+rand = "0.10.2"
+regex = "1.13.1"
 reqwest = { version = "0.13", features = ["form", "json"] }
 ring = "0.17.14"
 rust-s3 = { git = "https://github.com/filebroker/rust-s3.git", rev = "caa841cc4e0c843b8f00072d05a2ef8b08ece559" }
 rustls = "0.23.40"
-rustls-native-certs = "0.8.3"
+rustls-native-certs = "0.8.4"
 rustls-pemfile = "2.2.0"
 rusty_pool = "0.7.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 tera = "1.20.1"
-thiserror = "2.0.18"
+thiserror = "2.0.19"
 tls-listener = { version = "0.11.2", features = ["native-tls", "rustls"] }
-tokio = { version = "1.52.1", features = ["full"] }
-tokio-postgres = "0.7.17"
-tokio-postgres-rustls = "0.13.0"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-postgres = "0.7.18"
+tokio-postgres-rustls = "0.14.0"
 tokio-rustls = "0.26.4"
-tokio-stream = "0.1.18"
+tokio-stream = "0.1.19"
 tower = "0.5.3"
 url = "2.5.8"
-uuid = { version = "1.23.1", features = ["v4", "serde"] }
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
 validator = { version = "0.20.0", features = ["derive"] }
 warp = { version = "0.4.3", features = ["server"] }
 webp = "0.3.1"
 zxcvbn = "3.1.1"
 
 [dependencies.diesel_migrations]
-version = "2.2.0"
+version = "2.3.2"
 optional = true
 
 [target.'cfg(unix)'.dependencies]
