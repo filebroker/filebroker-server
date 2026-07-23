@@ -176,13 +176,14 @@ where
         }
     }
 
-    log::info!("Shutting down HTTP connections");
+    shutdown_server().await;
+
+    let open_connection_count = graceful.count();
+    log::info!("Shutting down {open_connection_count} HTTP connections");
     match timeout(*HTTP_SHUTDOWN_TIMEOUT, graceful.shutdown()).await {
         Ok(()) => log::info!("HTTP connections drained"),
         Err(_) => log::warn!("Timed out waiting for HTTP connections to drain"),
     }
-
-    shutdown_server().await;
 
     Ok(())
 }
