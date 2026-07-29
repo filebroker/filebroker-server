@@ -137,8 +137,7 @@ pub fn spawn_apply_auto_tags_task(task: ApplyAutoTagsTask) {
                     Ok(Some(sentinel)) => sentinel,
                     Ok(None) => {
                         log::info!(
-                            "Aborting task apply_auto_tags_task because task {:?} has already been locked",
-                            &task
+                            "Aborting task apply_auto_tags_task because task {task:?} has already been locked"
                         );
                         return;
                     }
@@ -156,7 +155,7 @@ pub fn spawn_apply_auto_tags_task(task: ApplyAutoTagsTask) {
                 })
                 .await;
                 if let Err(e) = res {
-                    log::error!("Failed to apply auto tags for task {:?}: {e}", &task);
+                    log::error!("Failed to apply auto tags for task {task:?}: {e}");
                     let res = diesel::update(apply_auto_tags_task::table)
                         .filter(apply_auto_tags_task::pk.eq(task.pk))
                         .set(
@@ -361,7 +360,7 @@ pub async fn apply_auto_tag(
     tag: &Tag,
     connection: &mut AsyncPgConnection,
 ) -> Result<(), TransactionRuntimeError> {
-    log::debug!("Applying auto tag {}", &tag.tag_name);
+    log::debug!("Applying auto tag {}", tag.tag_name);
     let instant = std::time::Instant::now();
 
     let mut matched_posts = Vec::new();
@@ -417,7 +416,7 @@ pub async fn apply_auto_tag(
         log::debug!(
             "Found {} posts that no longer match for auto tag {}",
             unmatched_posts.len(),
-            &tag.tag_name
+            tag.tag_name
         );
 
         for unmatched_post in unmatched_posts {
@@ -427,7 +426,7 @@ pub async fn apply_auto_tag(
             {
                 log::error!(
                     "Failed to remove unmatched tag {} for post {}: {e}",
-                    &tag.tag_name,
+                    tag.tag_name,
                     unmatched_post
                 );
                 return Err(e);
@@ -438,7 +437,7 @@ pub async fn apply_auto_tag(
         log::debug!(
             "Found {} collections that no longer match for auto tag {}",
             unmatched_collections.len(),
-            &tag.tag_name
+            tag.tag_name
         );
 
         for unmatched_collection in unmatched_collections {
@@ -453,7 +452,7 @@ pub async fn apply_auto_tag(
             {
                 log::error!(
                     "Failed to remove unmatched tag {} for collection {}: {e}",
-                    &tag.tag_name,
+                    tag.tag_name,
                     unmatched_collection
                 );
                 return Err(e);
@@ -464,7 +463,7 @@ pub async fn apply_auto_tag(
     log::debug!(
         "Found {} posts for auto tag {}",
         matched_posts.len(),
-        &tag.tag_name
+        tag.tag_name
     );
     for post_pk in matched_posts {
         let request = get_add_post_tags_request(vec![tag.pk]);
@@ -472,7 +471,7 @@ pub async fn apply_auto_tag(
         if let Err(e) = update_post(post_pk, &get_system_user(), request, connection).await {
             log::error!(
                 "Failed to apply auto tag {} for post {}: {e}",
-                &tag.tag_name,
+                tag.tag_name,
                 post_pk
             );
             return Err(e);
@@ -481,7 +480,7 @@ pub async fn apply_auto_tag(
     log::debug!(
         "Found {} post collections for auto tag {}",
         matched_collections.len(),
-        &tag.tag_name
+        tag.tag_name
     );
     for post_collection_pk in matched_collections {
         let request = get_add_post_collection_tags_request(vec![tag.pk]);
@@ -492,7 +491,7 @@ pub async fn apply_auto_tag(
         {
             log::error!(
                 "Failed to apply auto tag {} for collection {}: {e}",
-                &tag.tag_name,
+                tag.tag_name,
                 post_collection_pk
             );
             return Err(e);
@@ -501,7 +500,7 @@ pub async fn apply_auto_tag(
 
     log::info!(
         "Applied auto tag {} after {}ms",
-        &tag.tag_name,
+        tag.tag_name,
         instant.elapsed().as_millis()
     );
     Ok(())
@@ -511,7 +510,7 @@ pub async fn apply_tag_category_auto_tags(
     tag_category: &TagCategory,
     connection: &mut AsyncPgConnection,
 ) -> Result<(), TransactionRuntimeError> {
-    log::debug!("Applying auto tags in category {}", &tag_category.id);
+    log::debug!("Applying auto tags in category {}", tag_category.id);
     let instant = std::time::Instant::now();
 
     let tags = Tag::belonging_to(&tag_category)
@@ -521,7 +520,7 @@ pub async fn apply_tag_category_auto_tags(
     log::debug!(
         "Going to apply {} auto tags for category {}",
         tags.len(),
-        &tag_category.id
+        tag_category.id
     );
 
     struct AutoTagMatches {
@@ -618,7 +617,7 @@ pub async fn apply_tag_category_auto_tags(
             "Applying {} auto tags and remove {} no longer matching tags from category {} for post {post_pk}",
             tag_auto_matches.new_matches.len(),
             tag_auto_matches.existing_matches.len(),
-            &tag_category.id
+            tag_category.id
         );
         let request = EditPostRequest {
             tags_overwrite: None,
@@ -651,7 +650,7 @@ pub async fn apply_tag_category_auto_tags(
             "Applying {} auto tags and remove {} no longer matching tags from category {} for collection {post_collection_pk}",
             tag_auto_matches.new_matches.len(),
             tag_auto_matches.existing_matches.len(),
-            &tag_category.id
+            tag_category.id
         );
         let request = EditPostCollectionRequest {
             tags_overwrite: None,
@@ -686,7 +685,7 @@ pub async fn apply_tag_category_auto_tags(
 
     log::info!(
         "Applied auto tags in category {} after {}ms",
-        &tag_category.id,
+        tag_category.id,
         instant.elapsed().as_millis()
     );
     Ok(())
@@ -722,10 +721,7 @@ pub fn compile_auto_match_condition(
     tag_category_auto_match_condition: Option<String>,
     scope: Scope,
 ) -> Result<Option<String>, Error> {
-    log::debug!(
-        "Compiling auto match condition {:?} for tag: {tag_name}",
-        &scope
-    );
+    log::debug!("Compiling auto match condition {scope:?} for tag: {tag_name}");
     let conditions = tag_auto_match_condition
         .into_iter()
         .chain(tag_category_auto_match_condition)

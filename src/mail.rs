@@ -83,7 +83,7 @@ pub fn send_mail(
         let email_address = if let Some(ref email) = recipient.email {
             email
         } else {
-            log::error!("No email address for recipient: {}", &recipient.user_name);
+            log::error!("No email address for recipient: {}", recipient.user_name);
             return;
         };
 
@@ -93,7 +93,7 @@ pub fn send_mail(
                 log::error!(
                     "Invalid mail address {} for recipient {}: {e}",
                     email_address,
-                    &recipient.user_name
+                    recipient.user_name
                 );
                 return;
             }
@@ -105,7 +105,7 @@ pub fn send_mail(
             Err(e) => {
                 log::error!(
                     "Failed to render template {template} for recipient {}: {e}",
-                    &recipient.user_name
+                    recipient.user_name
                 );
                 return;
             }
@@ -155,15 +155,13 @@ pub fn send_mail(
         futures::executor::block_on(RATE_LIMITER.until_ready());
         if let Err(e) = mailer.send(&message) {
             log::error!(
-                "Failed sending mail of template {template} to '{} <{}>': {e}",
-                &recipient.user_name,
-                &email_address
+                "Failed sending mail of template {template} to '{} <{email_address}>': {e}",
+                recipient.user_name,
             );
         } else {
             log::info!(
-                "Mail of template {template} sent to '{} <{}>'",
-                &recipient.user_name,
-                &email_address
+                "Mail of template {template} sent to '{} <{email_address}>'",
+                recipient.user_name,
             );
         }
     });

@@ -78,31 +78,28 @@ impl ObjectWriter for FullObjectWriter {
             Ok(response_code) => {
                 abort(&sender, Error::S3ResponseError(response_code)).await;
                 log::error!(
-                    "Non success response code {} reading object {}",
-                    response_code,
-                    &self.object.object_key
+                    "Non success response code {response_code} reading object {}",
+                    self.object.object_key
                 );
             }
             Err(Error::HyperError(msg)) => {
                 // sending probably failed due to broken pipe / connection disconnect, log as info
                 log::debug!(
-                    "Error occurred sending bytes to body for object {}: {}",
-                    &self.object.object_key,
-                    &msg
+                    "Error occurred sending bytes to body for object {}: {msg}",
+                    self.object.object_key
                 );
                 abort(&sender, Error::HyperError(msg)).await;
             }
             Err(e) => {
                 log::error!(
-                    "Error occurred reading object {}: {}",
-                    &self.object.object_key,
-                    e
+                    "Error occurred reading object {}: {e}",
+                    self.object.object_key
                 );
                 abort(&sender, e).await;
             }
         }
 
-        log::debug!("Writer exit for object {}", &self.object.object_key);
+        log::debug!("Writer exit for object {}", self.object.object_key);
     }
 }
 
@@ -132,33 +129,28 @@ impl ObjectWriter for ObjectRangeWriter {
             Ok(status_code) => {
                 abort(&sender, Error::S3ResponseError(status_code)).await;
                 log::error!(
-                    "Non success response code {} reading object {}",
-                    status_code,
-                    &self.object.object_key
+                    "Non success response code {status_code} reading object {}",
+                    self.object.object_key
                 );
             }
             Err(Error::HyperError(msg)) => {
                 // sending probably failed due to broken pipe / connection disconnect, log as info
                 log::debug!(
-                    "Error occurred sending bytes to body for object {}: {}",
-                    &self.object.object_key,
-                    &msg
+                    "Error occurred sending bytes to body for object {}: {msg}",
+                    self.object.object_key
                 );
                 abort(&sender, Error::HyperError(msg)).await;
             }
             Err(e) => {
                 log::error!(
-                    "Error occurred reading range {}-{} for object {}: {}",
-                    start,
-                    end,
-                    &self.object.object_key,
-                    e
+                    "Error occurred reading range {start}-{end} for object {}: {e}",
+                    self.object.object_key
                 );
                 abort(&sender, e).await;
             }
         }
 
-        log::debug!("Writer exit for object {}", &self.object.object_key);
+        log::debug!("Writer exit for object {}", self.object.object_key);
     }
 }
 
@@ -220,29 +212,24 @@ impl ObjectWriter for MultipartObjectWriter {
                 Ok(status_code) => {
                     abort(&sender, Error::S3ResponseError(status_code)).await;
                     log::error!(
-                        "Non success response code {} reading object {}",
-                        status_code,
-                        &self.object.object_key
+                        "Non success response code {status_code} reading object {}",
+                        self.object.object_key
                     );
                     return;
                 }
                 Err(Error::HyperError(msg)) => {
                     // sending probably failed due to broken pipe / connection disconnect, log as info
                     log::debug!(
-                        "Error occurred sending bytes to body for object {}: {}",
-                        &self.object.object_key,
-                        &msg
+                        "Error occurred sending bytes to body for object {}: {msg}",
+                        self.object.object_key
                     );
                     abort(&sender, Error::HyperError(msg)).await;
                     return;
                 }
                 Err(e) => {
                     log::error!(
-                        "Error occurred reading range {}-{} for object {}: {}",
-                        start,
-                        end,
-                        &self.object.object_key,
-                        e
+                        "Error occurred reading range {start}-{end} for object {}: {e}",
+                        self.object.object_key
                     );
                     abort(&sender, e).await;
                     return;
@@ -263,7 +250,7 @@ impl ObjectWriter for MultipartObjectWriter {
             return;
         }
 
-        log::debug!("Writer exit for object {}", &self.object.object_key);
+        log::debug!("Writer exit for object {}", self.object.object_key);
     }
 }
 
@@ -332,7 +319,7 @@ pub async fn get_command_stream(
     path: &str,
     sender: &mut BodySender,
 ) -> Result<u16, S3CommandError> {
-    log::debug!("Executing S3 command streaming: {:?}", &command);
+    log::debug!("Executing S3 command streaming: {command:?}");
     let now = std::time::Instant::now();
     let request = ReqwestRequest::new(bucket, path, command).await?;
     let response = request.response().await?;

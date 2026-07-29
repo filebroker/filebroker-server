@@ -65,7 +65,7 @@ pub fn get_object_response(
                 .collect();
 
             response_status = 206;
-            content_type = format!("multipart/byteranges; boundary={}", &boundary);
+            content_type = format!("multipart/byteranges; boundary={boundary}");
             content_range = None;
 
             let parts = parsed_range
@@ -81,7 +81,7 @@ pub fn get_object_response(
                 })
                 .collect::<Vec<_>>();
 
-            let end_delimiter = format!("\r\n--{}--\r\n", &boundary);
+            let end_delimiter = format!("\r\n--{boundary}--\r\n");
 
             content_length = parts
                 .iter()

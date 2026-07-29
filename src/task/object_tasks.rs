@@ -100,7 +100,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                     match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection).await {
                         Ok(res) => res,
                         Err(e) => {
-                            log::error!("Failed to load data for {}: {}", &object.object_key, e);
+                            log::error!("Failed to load data for {}: {e}", object.object_key);
                             continue;
                         }
                     };
@@ -113,19 +113,12 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                     Some(file_id) => match Uuid::parse_str(&file_id) {
                         Ok(uuid) => uuid,
                         Err(e) => {
-                            log::error!(
-                                "Failed to get file stem for object key '{}': {}",
-                                &object.object_key,
-                                e
-                            );
+                            log::error!("Failed to get file stem for object key '{}': {e}", object.object_key);
                             continue;
                         }
                     },
                     None => {
-                        log::error!(
-                            "Failed to get file stem for object key '{}'",
-                            &object.object_key
-                        );
+                        log::error!("Failed to get file stem for object key '{}'", object.object_key);
                         continue;
                     }
                 };
@@ -138,11 +131,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                     user,
                     true,
                 ).await {
-                    log::error!(
-                        "Failed HLS transcoding of object {}: {}",
-                        &object.object_key,
-                        e
-                    );
+                    log::error!("Failed HLS transcoding of object {}: {e}", object.object_key);
                     if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
                         log::warn!("Stopping task generate_missing_hls_streams because the task pool is shutting down");
                         return Ok(());
@@ -154,10 +143,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                         log::error!("Failed to increment hls_fail_count: {e}");
                     }
                 } else {
-                    log::info!(
-                        "Generated missing HLS stream for object {}",
-                        &object.object_key
-                    );
+                    log::info!("Generated missing HLS stream for object {}", object.object_key);
                 }
             }
         }
@@ -228,7 +214,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                     match load_object_relations(object.fk_broker, object.fk_uploader, &mut connection).await {
                         Ok(res) => res,
                         Err(e) => {
-                            log::error!("Failed to load data for {}: {}", &object.object_key, e);
+                            log::error!("Failed to load data for {}: {e}", object.object_key);
                             continue;
                         }
                     };
@@ -241,19 +227,12 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                     Some(file_id) => match Uuid::parse_str(&file_id) {
                         Ok(uuid) => uuid,
                         Err(e) => {
-                            log::error!(
-                                "Failed to get file stem for object key '{}': {}",
-                                &object.object_key,
-                                e
-                            );
+                            log::error!("Failed to get file stem for object key '{}': {e}", object.object_key);
                             continue;
                         }
                     },
                     None => {
-                        log::error!(
-                            "Failed to get file stem for object key '{}'",
-                            &object.object_key
-                        );
+                        log::error!("Failed to get file stem for object key '{}'", object.object_key);
                         continue;
                     }
                 };
@@ -267,11 +246,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                     user,
                     true,
                 ).await {
-                    log::error!(
-                        "Failed generating thumbnail for object {}: {}",
-                        &object.object_key,
-                        e
-                    );
+                    log::error!("Failed generating thumbnail for object {}: {e}", object.object_key);
                     if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
                         log::warn!("Stopping task generate_missing_thumbnails because the task pool is shutting down");
                         return Ok(());
@@ -283,10 +258,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                         log::error!("Failed to increment thumbnail_fail_count: {e}");
                     }
                 } else {
-                    log::info!(
-                        "Generated missing thumbnail for object {}",
-                        &object.object_key
-                    );
+                    log::info!("Generated missing thumbnail for object {}", object.object_key);
                 }
             }
         }
@@ -348,7 +320,7 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
                 }
 
                 if let Err(e) = load_object_metadata(object.object_key.clone(), true).await {
-                    log::error!("Failed to load metadata for object {}: {}", &object.object_key, e);
+                    log::error!("Failed to load metadata for object {}: {}", object.object_key, e);
                     if AtomicBool::load(&IS_SHUTDOWN, Ordering::Relaxed) {
                         log::warn!("Stopping task load_missing_object_metadata because the task pool is shutting down");
                         return Ok(());
@@ -360,7 +332,7 @@ pub fn load_missing_object_metadata(tokio_handle: Handle) -> Result<(), Error> {
                         log::error!("Failed to increment metadata_fail_count: {e}");
                     }
                 } else {
-                    log::info!("Loaded missing metadata for object {}", &object.object_key);
+                    log::info!("Loaded missing metadata for object {}", object.object_key);
                 }
             }
         }
@@ -453,12 +425,12 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
 
                 match bucket.delete_object(&deferred_deletion.object_key).await {
                     Ok(response) if response.status_code() < 300 => {
-                        log::info!("Deleted object {} from broker {} (s3 bucket {})", &deferred_deletion.object_key, broker.pk, &broker.bucket);
+                        log::info!("Deleted object {} from broker {} (s3 bucket {})", deferred_deletion.object_key, broker.pk, broker.bucket);
                         if let Err(e) = diesel::delete(deferred_s3_object_deletion::table)
                             .filter(deferred_s3_object_deletion::object_key.eq(&deferred_deletion.object_key))
                             .execute(&mut connection)
                             .await {
-                            log::error!("Failed to delete deferred_s3_object_deletion for object {} after successful deletion with error: {e}", &deferred_deletion.object_key);
+                            log::error!("Failed to delete deferred_s3_object_deletion for object {} after successful deletion with error: {e}", deferred_deletion.object_key);
                         }
                     }
                     Ok(response) => {
@@ -466,7 +438,7 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
                             log::warn!("Stopping task execute_deferred_s3_object_deletions because the task pool is shutting down");
                             return Ok(());
                         }
-                        log::error!("Failed to delete object {} from s3 with status code {}", &deferred_deletion.object_key, response.status_code());
+                        log::error!("Failed to delete object {} from s3 with status code {}", deferred_deletion.object_key, response.status_code());
                         if let Err(e) = diesel::sql_query("UPDATE deferred_s3_object_deletion SET fail_count = coalesce(fail_count, 0) + 1 WHERE object_key = $1")
                             .bind::<VarChar, _>(&deferred_deletion.object_key)
                             .execute(&mut connection).await {
@@ -478,7 +450,7 @@ pub fn execute_deferred_s3_object_deletions(tokio_handle: Handle) -> Result<(), 
                             log::warn!("Stopping task execute_deferred_s3_object_deletions because the task pool is shutting down");
                             return Ok(());
                         }
-                        log::error!("Failed to delete object {} from s3 with error: {e}", &deferred_deletion.object_key);
+                        log::error!("Failed to delete object {} from s3 with error: {e}", deferred_deletion.object_key);
                         if let Err(e) = diesel::sql_query("UPDATE deferred_s3_object_deletion SET fail_count = coalesce(fail_count, 0) + 1 WHERE object_key = $1")
                             .bind::<VarChar, _>(&deferred_deletion.object_key)
                             .execute(&mut connection).await {

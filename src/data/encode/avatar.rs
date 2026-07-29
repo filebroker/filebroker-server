@@ -110,16 +110,15 @@ pub async fn generate_avatar(
             }
         } else {
             return Err(Error::FfmpegProcessError(format!(
-                "ffmpeg for avatar of {} failed with status {}: {}",
-                &source_object_key, process_output.status, error_msg
+                "ffmpeg for avatar of {source_object_key} failed with status {}: {}",
+                process_output.status, error_msg
             )));
         }
     }
 
     if avatar_bytes.is_empty() {
         return Err(Error::FfmpegProcessError(format!(
-            "ffmpeg for avatar of {} received 0 bytes",
-            &source_object_key
+            "ffmpeg for avatar of {source_object_key} received 0 bytes"
         )));
     }
 
@@ -132,11 +131,7 @@ pub async fn generate_avatar(
         .unwrap();
     let avatar_id = Uuid::new_v4();
     let avatar_path = format!("{}/avatar_{}_{}.webp", user_pk, object_id, avatar_id);
-    log::info!(
-        "Storing avatar {} for object {}",
-        &avatar_path,
-        source_object_key
-    );
+    log::info!("Storing avatar {avatar_path} for object {source_object_key}");
     bucket
         .put_object_with_content_type(&avatar_path, &avatar_bytes, "image/webp")
         .await?;

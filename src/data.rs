@@ -254,11 +254,7 @@ pub async fn get_object_handler(
     }
 
     log::debug!(
-        "Streaming object {} body with Content-Type: '{}'; Content-Length: '{}'; Content-Range: '{:?}'",
-        &object_key,
-        &content_type,
-        content_length,
-        &content_range
+        "Streaming object {object_key} body with Content-Type: '{content_type}'; Content-Length: '{content_length}'; Content-Range: '{content_range:?}'"
     );
 
     Ok(response_builder

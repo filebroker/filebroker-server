@@ -94,12 +94,11 @@ pub fn compile_conditions(
         user,
     )?;
     log::debug!(
-        "Compiled conditions [{:?}] (in {} microseconds) to sql {}",
+        "Compiled conditions [{:?}] (in {} microseconds) to sql {sql_query}",
         source_conditions.unwrap_or_else(Vec::new),
         instant
             .map(|instant| instant.elapsed().as_micros())
-            .unwrap_or(0),
-        &sql_query
+            .unwrap_or(0)
     );
 
     Ok(sql_query)
@@ -204,12 +203,11 @@ pub fn compile_sql(
 
     let sql_query = build_sql_string(ctes, where_expressions, query_parameters, user)?;
     log::debug!(
-        "Compiled query [{}] (in {} microseconds) to sql {}",
-        &source_query.as_deref().unwrap_or(""),
+        "Compiled query [{}] (in {} microseconds) to sql {sql_query}",
+        source_query.as_deref().unwrap_or(""),
         instant
             .map(|instant| instant.elapsed().as_micros())
-            .unwrap_or(0),
-        &sql_query
+            .unwrap_or(0)
     );
 
     Ok(sql_query)
@@ -425,12 +423,11 @@ pub fn compile_window_query(
     }
 
     log::debug!(
-        "Compiled window query for [{}] (in {} microseconds) to sql {}",
-        &source_query.as_deref().unwrap_or(""),
+        "Compiled window query for [{}] (in {} microseconds) to sql {sql_query}",
+        source_query.as_deref().unwrap_or(""),
         instant
             .map(|instant| instant.elapsed().as_micros())
-            .unwrap_or(0),
-        &sql_query
+            .unwrap_or(0)
     );
 
     Ok(sql_query)

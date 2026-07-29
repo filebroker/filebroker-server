@@ -38,12 +38,12 @@ where
     let uuid = Uuid::new_v4();
     let object_key =
         if let Some(extension) = Path::new(&filename).extension().and_then(OsStr::to_str) {
-            format!("{}.{}", &uuid, extension)
+            format!("{uuid}.{extension}")
         } else {
             uuid.to_string()
         };
 
-    log::info!("Starting S3 upload for {}", &object_key);
+    log::info!("Starting S3 upload for {object_key}");
     let status = match bucket
         .put_object_stream_builder(&object_key)
         .with_content_type(&content_type)
@@ -54,8 +54,7 @@ where
         Ok(status) => Ok(status),
         Err(S3Error::Io(e)) if e.kind() == io::ErrorKind::InvalidInput => {
             log::warn!(
-                "Failed upload for object {} because it does not match the provided Filebroker-Upload-Size header",
-                &object_key
+                "Failed upload for object {object_key} because it does not match the provided Filebroker-Upload-Size header",
             );
             Err(Error::InvalidUploadSizeError)
         }
@@ -64,7 +63,7 @@ where
     if status.status_code() >= 300 {
         return Err(Error::S3ResponseError(status.status_code()));
     }
-    log::info!("Finished S3 upload for {}", &object_key);
+    log::info!("Finished S3 upload for {object_key}");
 
     let digest = reader.hasher.finish();
     let hash = data_encoding::HEXUPPER.encode(digest.as_ref());
@@ -88,9 +87,8 @@ where
             // don't hold on to db connection while waiting for deletion
             drop(connection);
             log::info!(
-                "Found existing object {} with same hash as new object {}, going to delete new object",
-                &existing_object.object_key,
-                &object_key
+                "Found existing object {} with same hash as new object {object_key}, going to delete new object",
+                existing_object.object_key,
             );
             match bucket.delete_object(&object_key).await {
                 Ok(delete_response) => {
@@ -100,19 +98,15 @@ where
                         return Ok((existing_object, true));
                     } else {
                         log::error!(
-                            "Deleting object {} for existing hash {} failed with status code {}. Going to use new object.",
-                            &object_key,
-                            &hash,
-                            status_code
+                            "Deleting object {object_key} for existing hash {} failed with status code {status_code}. Going to use new object.",
+                            hash,
                         );
                     }
                 }
                 Err(e) => {
                     log::error!(
-                        "Deleting object {} for existing hash {} failed with error {}. Going to use new object.",
-                        &object_key,
-                        &hash,
-                        &e
+                        "Deleting object {object_key} for existing hash {} failed with error {e}. Going to use new object.",
+                        hash,
                     );
                 }
             }
@@ -171,29 +165,24 @@ where
         Ok(s3_object) => s3_object,
         Err(Error::QuotaExceededError(quota, remaining_quota)) => {
             log::warn!(
-                "User {} exceeded quota for broker {} after completed upload of {}, going to delete object",
+                "User {} exceeded quota for broker {} after completed upload of {object_key}, going to delete object",
                 user.pk,
                 broker.pk,
-                &object_key
             );
             match bucket.delete_object(&object_key).await {
                 Ok(delete_response) => {
                     let status_code = delete_response.status_code();
                     if status_code >= 300 {
                         log::error!(
-                            "Deleting object {} for user {} failed with status code {}",
-                            &object_key,
+                            "Deleting object {object_key} for user {} failed with status code {status_code}",
                             user.pk,
-                            status_code
                         );
                     }
                 }
                 Err(e) => {
                     log::error!(
-                        "Deleting object {} for user {} failed with error {}",
-                        &object_key,
+                        "Deleting object {object_key} for user {} failed with error {e}",
                         user.pk,
-                        &e
                     );
                 }
             }

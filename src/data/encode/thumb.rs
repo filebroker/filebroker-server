@@ -35,8 +35,7 @@ pub async fn generate_thumbnail(
     if content_type_is_video || content_type_is_image || content_type_is_audio {
         if content_type_is_audio && !media_has_video(&object_url).await? {
             log::info!(
-                "Not creating thumbnail for audio object {} without video stream, marking as thumbnail_disabled",
-                &source_object_key
+                "Not creating thumbnail for audio object {source_object_key} without video stream, marking as thumbnail_disabled"
             );
             let mut connection = acquire_db_connection().await?;
             diesel::update(s3_object::table)
@@ -60,8 +59,7 @@ pub async fn generate_thumbnail(
                 Some(sentinel) => Some(sentinel),
                 None => {
                     log::info!(
-                        "Aborting thumbnail generation for object {} because it has already been locked",
-                        &source_object_key
+                        "Aborting thumbnail generation for object {source_object_key} because it has already been locked"
                     );
                     return Ok(());
                 }
@@ -150,8 +148,8 @@ pub async fn generate_thumbnail(
                 }
             } else {
                 return Err(Error::FfmpegProcessError(format!(
-                    "ffmpeg for thumbnail of {} failed with status {}: {}",
-                    &source_object_key, process_output.status, error_msg
+                    "ffmpeg for thumbnail of {source_object_key} failed with status {}: {error_msg}",
+                    process_output.status
                 )));
             }
         }
@@ -161,12 +159,8 @@ pub async fn generate_thumbnail(
             return Ok(());
         }
 
-        let thumb_path = format!("thumb_{}.{}", &file_id.to_string(), thumbnail_extension);
-        log::info!(
-            "Storing thumbnail {} for object {}",
-            &thumb_path,
-            source_object_key
-        );
+        let thumb_path = format!("thumb_{file_id}.{thumbnail_extension}");
+        log::info!("Storing thumbnail {thumb_path} for object {source_object_key}");
         bucket
             .put_object_with_content_type(&thumb_path, &thumb_bytes, &thumbnail_content_type)
             .await?;

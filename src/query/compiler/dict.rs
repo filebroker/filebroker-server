@@ -275,10 +275,7 @@ lazy_static! {
                             if string_literal.is_none() {
                                 log.errors.push(Error {
                                     location,
-                                    msg: format!(
-                                        "Expected argument to be a string literal but got expression {:?}",
-                                        &argument
-                                    ),
+                                    msg: format!("Expected argument to be a string literal but got expression {argument:?}"),
                                 });
                             }
                         }
@@ -776,8 +773,7 @@ fn accept_arguments(
                     log.errors.push(Error {
                         location,
                         msg: format!(
-                            "Expected argument to be an attribute but got expression {:?}",
-                            &argument
+                            "Expected argument to be an attribute but got expression {argument:?}"
                         ),
                     });
                 }
@@ -887,7 +883,7 @@ fn accept_sort_modifier_arguments(
             {
                 log.errors.push(Error {
                     location: attr_arg_location,
-                    msg: format!("Attribute {} is not sortable", &attribute_node.identifier),
+                    msg: format!("Attribute {} is not sortable", attribute_node.identifier),
                 });
             }
         }
@@ -912,7 +908,7 @@ fn accept_sort_modifier_arguments(
                 "asc" | "ascending" | "desc" | "descending" => {},
                 _ => log.errors.push(Error {
                     location: direction_arg_location,
-                    msg: format!("Expected sorting direction to be 'asc', 'ascending', 'desc', 'descending' but got '{}'", &direction) 
+                    msg: format!("Expected sorting direction to be 'asc', 'ascending', 'desc', 'descending' but got '{direction}'")
                 })
             }
         } else {

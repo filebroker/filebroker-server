@@ -111,10 +111,7 @@ pub async fn generate_hls_playlist(
     let (_locked_object_task_sentinel, _semaphore) = if hls_lock_acquired {
         (None, None)
     } else {
-        log::debug!(
-            "Waiting to acquire permit to start HLS transcode for {}",
-            &source_object_key
-        );
+        log::debug!("Waiting to acquire permit to start HLS transcode for {source_object_key}");
         let semaphore = VIDEO_TRANSCODE_SEMAPHORE
             .acquire()
             .await
@@ -130,15 +127,14 @@ pub async fn generate_hls_playlist(
             Some(sentinel) => (Some(sentinel), Some(semaphore)),
             None => {
                 log::info!(
-                    "Aborting HLS transcode for object {} because it has already been locked",
-                    &source_object_key
+                    "Aborting HLS transcode for object {source_object_key} because it has already been locked"
                 );
                 return Ok(());
             }
         }
     };
 
-    log::info!("Starting HLS transcode for {}", &source_object_key);
+    log::info!("Starting HLS transcode for {source_object_key}");
     let start_time = std::time::Instant::now();
     let object_url = join_api_url(["get-object", &source_object_key])?.to_string();
 
@@ -311,10 +307,7 @@ pub async fn generate_hls_playlist(
 
     let master_playlist_join_handle = spawn_hls_master_playlist_reader(&fifo_dir)?;
 
-    log::debug!(
-        "Spawning HLS transcode ffmpeg command with args {:?}",
-        &transcode_args
-    );
+    log::debug!("Spawning HLS transcode ffmpeg command with args {transcode_args:?}");
     let process = match Command::new("ffmpeg")
         .args(transcode_args)
         .stdout(Stdio::piped())
@@ -367,8 +360,8 @@ pub async fn generate_hls_playlist(
             let error_msg = String::from_utf8_lossy(&process_output.stderr);
 
             return Err(Error::FfmpegProcessError(format!(
-                "ffmpeg for hls_transcoding of {} failed with status {}: {}",
-                &source_object_key, process_output.status, error_msg,
+                "ffmpeg for hls_transcoding of {source_object_key} failed with status {}: {error_msg}",
+                process_output.status,
             )));
         }
         Err(e) => {
@@ -444,14 +437,14 @@ pub async fn generate_hls_playlist(
     }
 
     log::info!(
-        "Completed HLS transcoding for {} after {}",
-        &source_object_key,
+        "Completed HLS transcoding for {source_object_key} after {}",
         format_duration(start_time.elapsed())
     );
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_video_transcode_args_and_spawn_output_reader(
     transcode_args: &mut Vec<String>,
     video_stream_count: usize,
@@ -506,12 +499,12 @@ fn apply_video_transcode_args_and_spawn_output_reader(
 
         let output_reader_join_handle = spawn_hls_output_reader(
             #[cfg(unix)]
-            &fifo_dir,
+            fifo_dir,
             bucket.clone(),
             HlsOutputStream::Video(HlsStream {
-                stream_playlist: format!("{}/stream_{i}.m3u8", &file_id),
-                stream_file: format!("{}/stream_{i}.ts", &file_id),
-                master_playlist: format!("{}/master.m3u8", &file_id),
+                stream_playlist: format!("{file_id}/stream_{i}.m3u8"),
+                stream_file: format!("{file_id}/stream_{i}.ts"),
+                master_playlist: format!("{file_id}/master.m3u8"),
                 resolution: bitrate.resolution as i32,
                 x264_preset: String::from(preset),
                 target_bitrate: Some(String::from(bitrate.target_bitrate)),
@@ -527,6 +520,7 @@ fn apply_video_transcode_args_and_spawn_output_reader(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_audio_transcode_args_and_spawn_output_reader(
     transcode_args: &mut Vec<String>,
     video_stream_count: usize,
@@ -579,7 +573,7 @@ fn apply_audio_transcode_args_and_spawn_output_reader(
 
             let output_reader_join_handle = spawn_hls_output_reader(
                 #[cfg(unix)]
-                &fifo_dir,
+                fifo_dir,
                 bucket.clone(),
                 HlsOutputStream::Audio(HlsAudioStream {
                     stream_playlist: format!("{file_id}/stream_{variant_index}.m3u8"),
@@ -718,10 +712,7 @@ async fn generate_hls_subtitle_outputs(
         transcode_args.push(subtitle_fifo.to_string_lossy().into_owned());
     }
 
-    log::debug!(
-        "Spawning HLS subtitle ffmpeg command with args {:?}",
-        &transcode_args
-    );
+    log::debug!("Spawning HLS subtitle ffmpeg command with args {transcode_args:?}");
 
     let process = match Command::new("ffmpeg")
         .args(transcode_args)
