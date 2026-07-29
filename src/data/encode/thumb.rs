@@ -1,6 +1,6 @@
 use crate::data::encode::{
-    content_type_is_audio, content_type_is_image, content_type_is_video, media_has_video,
-    spawn_blocking,
+    probe::{content_type_is_audio, content_type_is_image, content_type_is_video, media_has_video},
+    spawn_encode_task_blocking,
 };
 use crate::error::{Error, TransactionRuntimeError};
 use crate::model::{Broker, ObjectType, S3Object, User};
@@ -129,7 +129,7 @@ pub async fn generate_thumbnail(
                 Error::FfmpegProcessError(format!("Failed to spawn ffmpeg process: {e}"))
             })?;
 
-        let process_output = spawn_blocking(|| {
+        let process_output = spawn_encode_task_blocking(|| {
             process.wait_with_output().map_err(|e| {
                 Error::FfmpegProcessError(format!("Failed to get ffmpeg process output: {e}"))
             })

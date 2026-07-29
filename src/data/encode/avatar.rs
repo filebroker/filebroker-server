@@ -1,5 +1,5 @@
 use crate::acquire_db_connection;
-use crate::data::encode::{media_is_animated, spawn_blocking};
+use crate::data::encode::{probe::media_is_animated, spawn_encode_task_blocking};
 use crate::data::get_system_bucket;
 use crate::error::Error;
 use crate::model::{ObjectType, S3Object};
@@ -89,7 +89,7 @@ pub async fn generate_avatar(
         .spawn()
         .map_err(|e| Error::FfmpegProcessError(format!("Failed to spawn ffmpeg process: {e}")))?;
 
-    let process_output = spawn_blocking(|| {
+    let process_output = spawn_encode_task_blocking(|| {
         process.wait_with_output().map_err(|e| {
             Error::FfmpegProcessError(format!("Failed to get ffmpeg process output: {e}"))
         })

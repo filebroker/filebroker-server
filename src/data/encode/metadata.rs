@@ -1,6 +1,7 @@
 use crate::data::encode::{
-    EXIF_DATE_FORMAT_REGEX, content_type_is_audio, content_type_is_image, content_type_is_video,
-    spawn_blocking,
+    EXIF_DATE_FORMAT_REGEX,
+    probe::{content_type_is_audio, content_type_is_image, content_type_is_video},
+    spawn_encode_task_blocking,
 };
 use crate::error::Error;
 use crate::model::{PgIntervalQuery, PgIntervalWrapper, S3Object, S3ObjectMetadata};
@@ -155,7 +156,7 @@ pub async fn load_object_metadata(
     );
 
     let cloned_object_url = object_url.clone();
-    let exif_proc_output = spawn_blocking(|| {
+    let exif_proc_output = spawn_encode_task_blocking(|| {
         let curl_proc = Command::new("curl")
             .arg("-s")
             .arg(cloned_object_url)
@@ -585,7 +586,7 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         .spawn()
         .map_err(|e| Error::FfmpegProcessError(format!("Failed to spawn ffprobe process: {e}")))?;
 
-    let ffprobe_proc_output = spawn_blocking(|| {
+    let ffprobe_proc_output = spawn_encode_task_blocking(|| {
         ffprobe_proc.wait_with_output().map_err(|e| {
             Error::FfmpegProcessError(format!("Failed to get ffprobe process output: {e}"))
         })

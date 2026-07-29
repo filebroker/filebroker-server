@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use validator::Validate;
 use warp::{reject::Rejection, reply::Reply};
 
+use crate::model::{HlsAudioStream, HlsSubtitleStream};
+use crate::schema::{hls_audio_stream, hls_subtitle_stream};
 use crate::{
     acquire_db_connection,
     error::{Error, TransactionRuntimeError},
@@ -218,6 +220,14 @@ pub async fn delete_s3_objects(
         .filter(hls_stream::master_playlist.eq_any(&hls_master_playlists))
         .get_results::<HlsStream>(connection)
         .await?;
+    let hls_audio_streams = diesel::delete(hls_audio_stream::table)
+        .filter(hls_audio_stream::master_playlist.eq_any(&hls_master_playlists))
+        .get_results::<HlsAudioStream>(connection)
+        .await?;
+    let hls_subtitle_streams = diesel::delete(hls_subtitle_stream::table)
+        .filter(hls_subtitle_stream::master_playlist.eq_any(&hls_master_playlists))
+        .get_results::<HlsSubtitleStream>(connection)
+        .await?;
 
     let object_keys = s3_objects
         .iter()
@@ -233,6 +243,26 @@ pub async fn delete_s3_objects(
                     hls_streams
                         .iter()
                         .map(|hls_stream| &hls_stream.stream_playlist),
+                ))
+                .or(s3_object::object_key.eq_any(
+                    hls_audio_streams
+                        .iter()
+                        .map(|hls_audio_stream| &hls_audio_stream.stream_file),
+                ))
+                .or(s3_object::object_key.eq_any(
+                    hls_audio_streams
+                        .iter()
+                        .map(|hls_audio_stream| &hls_audio_stream.stream_playlist),
+                ))
+                .or(s3_object::object_key.eq_any(
+                    hls_subtitle_streams
+                        .iter()
+                        .map(|hls_subtitle_stream| &hls_subtitle_stream.stream_file),
+                ))
+                .or(s3_object::object_key.eq_any(
+                    hls_subtitle_streams
+                        .iter()
+                        .map(|hls_subtitle_stream| &hls_subtitle_stream.stream_playlist),
                 )),
         )
         .get_results::<S3Object>(connection)
