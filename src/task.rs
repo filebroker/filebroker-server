@@ -376,7 +376,7 @@ where
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 let _mutex_guard = background_mutex.lock().await;
-                log::debug!("LockedObjectsTaskSentinel: Refreshing lock {lock_column} on {table_name} for key {key_column} in {:?}", &keys_to_refresh);
+                log::debug!("LockedObjectsTaskSentinel: Refreshing lock {lock_column} on {table_name} for key {key_column} in {keys_to_refresh:?}");
                 match acquire_db_connection().await {
                     Ok(mut connection) => {
                         if let Err(e) = diesel::sql_query(format!(
@@ -434,8 +434,7 @@ where
         tokio::spawn(async move {
             let _update_mutex = update_mutex.lock().await;
             log::debug!(
-                "LockedObjectsTaskSentinel: Releasing lock {lock_column} on {table_name} for key {key_column} in {:?}",
-                &object_keys
+                "LockedObjectsTaskSentinel: Releasing lock {lock_column} on {table_name} for key {key_column} in {object_keys:?}"
             );
             let mut connection = match acquire_db_connection().await {
                 Ok(connection) => connection,

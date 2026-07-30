@@ -193,10 +193,7 @@ pub async fn search_handler(
     let mut scope = scope
         .map(|scope| {
             Scope::from_str(scope.as_str()).map_err(|_| {
-                warp::reject::custom(Error::BadRequestError(format!(
-                    "Invalid scope '{}'",
-                    &scope
-                )))
+                warp::reject::custom(Error::BadRequestError(format!("Invalid scope '{scope}'")))
             })
         })
         .unwrap_or(Ok(Scope::Post))?;
@@ -213,8 +210,7 @@ pub async fn search_handler(
             };
         } else {
             return Err(warp::reject::custom(Error::BadRequestError(format!(
-                "Scope {:?} does not accept a parameter",
-                &scope
+                "Scope {scope:?} does not accept a parameter"
             ))));
         }
     }
@@ -230,9 +226,7 @@ pub async fn search_handler(
     )?;
     let mut connection = acquire_db_connection().await?;
     match scope {
-        Scope::Global => {
-            Err(Error::BadRequestError(format!("Invalid scope '{:?}'", &scope)).into())
-        }
+        Scope::Global => Err(Error::BadRequestError(format!("Invalid scope '{scope:?}'")).into()),
         Scope::Post | Scope::TagAutoMatchPost => Ok(warp::reply::json(
             &get_search_result::<PostQueryObject>(sql_query, max_limit, &mut connection).await?,
         )),
@@ -534,7 +528,7 @@ pub async fn get_post_handler(
                     log::debug!(
                         "Generated presigned URL for post {} object {} after {}ms: {presigned_url}",
                         post.pk,
-                        &s3_object.object_key,
+                        s3_object.object_key,
                         now.elapsed().as_millis()
                     );
                     Some(presigned_url)
@@ -542,7 +536,7 @@ pub async fn get_post_handler(
                 Err(e) => {
                     log::error!(
                         "Failed to generate presigned url for object {} of post {}: {e}",
-                        &s3_object.object_key,
+                        s3_object.object_key,
                         post.pk
                     );
                     None
@@ -773,10 +767,7 @@ pub fn prepare_query_parameters(
     }
 
     match scope {
-        Scope::Global => Err(Error::BadRequestError(format!(
-            "Invalid scope '{:?}'",
-            &scope
-        ))),
+        Scope::Global => Err(Error::BadRequestError(format!("Invalid scope '{scope:?}'"))),
         Scope::Post | Scope::TagAutoMatchPost => Ok(QueryParameters {
             pagination: if scope == &Scope::TagAutoMatchPost {
                 None
@@ -1474,10 +1465,7 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
         .scope
         .map(|scope| {
             Scope::from_str(scope.as_str()).map_err(|_| {
-                warp::reject::custom(Error::BadRequestError(format!(
-                    "Invalid scope '{}'",
-                    &scope
-                )))
+                warp::reject::custom(Error::BadRequestError(format!("Invalid scope '{scope}'")))
             })
         })
         .unwrap_or(Ok(Scope::Post))?;
@@ -1586,7 +1574,7 @@ async fn find_expression_autocomplete_suggestions(
                 text: if string_is_valid_ident(&tag.tag_name) {
                     tag.tag_name.clone()
                 } else {
-                    format!("`{}`", &tag.tag_name)
+                    format!("`{}`", tag.tag_name)
                 },
                 display: tag.tag_name,
                 target_location: expression.location,

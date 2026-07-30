@@ -375,10 +375,7 @@ impl Visitor for SemanticAnalysisVisitor {
         {
             log.errors.push(Error {
                 location,
-                msg: format!(
-                    "Operator {:?} cannot be applied to expressions of type {:?} and {:?}",
-                    &op, &left_type, &right_type
-                ),
+                msg: format!("Operator {op:?} cannot be applied to expressions of type {left_type:?} and {right_type:?}"),
             });
         }
 
@@ -405,14 +402,14 @@ impl Visitor for SemanticAnalysisVisitor {
                 if date_type == Type::Date && iso8601::date(&string_literal.val).is_err() {
                     log.errors.push(Error {
                         location: string_location,
-                        msg: format!("'{}' is not a valid date", &string_literal.val),
+                        msg: format!("'{}' is not a valid date", string_literal.val),
                     });
                 } else if iso8601::datetime(&string_literal.val).is_err()
                     && iso8601::date(&string_literal.val).is_err()
                 {
                     log.errors.push(Error {
                         location: string_location,
-                        msg: format!("'{}' is not a valid date nor datetime", &string_literal.val),
+                        msg: format!("'{}' is not a valid date nor datetime", string_literal.val),
                     });
                 }
             } else {
@@ -442,9 +439,8 @@ impl Visitor for SemanticAnalysisVisitor {
                 if is_sql_interval_regex {
                     let interval_string = MM_SS_REGEX.replace(&string_literal.val, "00:$1:$2");
                     log::debug!(
-                        "Converted MM:SS interval string '{}' to '{}'",
-                        &string_literal.val,
-                        &interval_string
+                        "Converted MM:SS interval string '{}' to '{interval_string}'",
+                        string_literal.val,
                     );
                     string_literal.val = interval_string.to_string();
                 }
@@ -457,7 +453,7 @@ impl Visitor for SemanticAnalysisVisitor {
                         location: expression_node.location,
                         msg: format!(
                             "'{}' is not a valid postgres, SQL or ISO 8601 interval",
-                            &string_literal.val
+                            string_literal.val
                         ),
                     });
                 }
@@ -898,7 +894,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
     ) {
         self.write_buff(&format!(
             "'{}'",
-            &sanitize_string_literal(&string_literal_node.val)
+            sanitize_string_literal(&string_literal_node.val)
         ));
     }
 

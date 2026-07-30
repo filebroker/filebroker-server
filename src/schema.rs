@@ -106,6 +106,30 @@ diesel::table! {
 }
 
 diesel::table! {
+    hls_audio_stream (stream_playlist) {
+        #[max_length = 255]
+        stream_playlist -> Varchar,
+        #[max_length = 255]
+        stream_file -> Varchar,
+        #[max_length = 255]
+        master_playlist -> Varchar,
+        source_stream_index -> Int4,
+        #[max_length = 32]
+        language -> Nullable<Varchar>,
+        title -> Nullable<Text>,
+        is_default -> Bool,
+        autoselect -> Bool,
+        #[max_length = 64]
+        source_codec -> Nullable<Varchar>,
+        #[max_length = 64]
+        codec -> Varchar,
+        #[max_length = 32]
+        bitrate -> Varchar,
+        channels -> Nullable<Int4>,
+    }
+}
+
+diesel::table! {
     hls_stream (stream_playlist) {
         #[max_length = 255]
         stream_playlist -> Varchar,
@@ -122,6 +146,29 @@ diesel::table! {
         min_bitrate -> Nullable<Varchar>,
         #[max_length = 255]
         max_bitrate -> Nullable<Varchar>,
+        has_muxed_audio -> Bool,
+    }
+}
+
+diesel::table! {
+    hls_subtitle_stream (stream_playlist) {
+        #[max_length = 255]
+        stream_playlist -> Varchar,
+        #[max_length = 255]
+        stream_file -> Varchar,
+        #[max_length = 255]
+        master_playlist -> Varchar,
+        source_stream_index -> Int4,
+        #[max_length = 32]
+        language -> Nullable<Varchar>,
+        title -> Nullable<Text>,
+        is_default -> Bool,
+        autoselect -> Bool,
+        forced -> Bool,
+        #[max_length = 64]
+        source_codec -> Nullable<Varchar>,
+        #[max_length = 64]
+        codec -> Varchar,
     }
 }
 
@@ -691,7 +738,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     broker_audit_log,
     deferred_s3_object_deletion,
     email_confirmation_token,
+    hls_audio_stream,
     hls_stream,
+    hls_subtitle_stream,
     one_time_password,
     post,
     post_collection,

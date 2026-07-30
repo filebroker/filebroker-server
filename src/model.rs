@@ -1448,6 +1448,44 @@ pub struct HlsStream {
     pub target_bitrate: Option<String>,
     pub min_bitrate: Option<String>,
     pub max_bitrate: Option<String>,
+    pub has_muxed_audio: bool,
+}
+
+#[derive(Associations, Debug, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(S3Object, foreign_key = stream_playlist))]
+#[diesel(table_name = hls_audio_stream)]
+#[diesel(primary_key(stream_file))]
+pub struct HlsAudioStream {
+    pub stream_playlist: String,
+    pub stream_file: String,
+    pub master_playlist: String,
+    pub source_stream_index: i32,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub is_default: bool,
+    pub autoselect: bool,
+    pub source_codec: Option<String>,
+    pub codec: String,
+    pub bitrate: String,
+    pub channels: Option<i32>,
+}
+
+#[derive(Associations, Debug, Clone, Identifiable, Insertable, Queryable, Serialize)]
+#[diesel(belongs_to(S3Object, foreign_key = stream_playlist))]
+#[diesel(table_name = hls_subtitle_stream)]
+#[diesel(primary_key(stream_file))]
+pub struct HlsSubtitleStream {
+    pub stream_playlist: String,
+    pub stream_file: String,
+    pub master_playlist: String,
+    pub source_stream_index: i32,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub is_default: bool,
+    pub autoselect: bool,
+    pub forced: bool,
+    pub source_codec: Option<String>,
+    pub codec: String,
 }
 
 #[derive(Associations, Clone, Identifiable, Insertable, Queryable, Serialize)]

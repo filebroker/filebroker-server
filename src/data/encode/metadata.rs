@@ -1,6 +1,7 @@
 use crate::data::encode::{
-    EXIF_DATE_FORMAT_REGEX, content_type_is_audio, content_type_is_image, content_type_is_video,
-    spawn_blocking,
+    EXIF_DATE_FORMAT_REGEX,
+    probe::{content_type_is_audio, content_type_is_image, content_type_is_video},
+    spawn_encode_task_blocking,
 };
 use crate::error::Error;
 use crate::model::{PgIntervalQuery, PgIntervalWrapper, S3Object, S3ObjectMetadata};
@@ -140,22 +141,16 @@ pub async fn load_object_metadata(
         {
             Some(sentinel) => Some(sentinel),
             None => {
-                log::info!(
-                    "Aborting metadata extraction for object {} because it has already been locked",
-                    &source_object_key
-                );
+                log::info!("Aborting metadata extraction for object {source_object_key} because it has already been locked");
                 return Ok(());
             }
         }
     };
 
-    log::info!(
-        "Spawning exiftool process to extract metadata for {}",
-        &source_object_key
-    );
+    log::info!("Spawning exiftool process to extract metadata for {source_object_key}");
 
     let cloned_object_url = object_url.clone();
-    let exif_proc_output = spawn_blocking(|| {
+    let exif_proc_output = spawn_encode_task_blocking(|| {
         let curl_proc = Command::new("curl")
             .arg("-s")
             .arg(cloned_object_url)
@@ -246,10 +241,7 @@ pub async fn load_object_metadata(
         match load_ffprobe_media_metadata(&object_url).await {
             Ok(metadata) => metadata,
             Err(e) => {
-                log::error!(
-                    "Failed to load ffprobe metadata for {}: {e}",
-                    &source_object_key
-                );
+                log::error!("Failed to load ffprobe metadata for {source_object_key}: {e}");
                 FfprobeMediaMetadata::default()
             }
         }
@@ -312,9 +304,7 @@ pub async fn load_object_metadata(
         Ok(date) => date,
         Err(e) => {
             log::warn!(
-                "Failed to parse '{:?}' as date from exiftool output for {}: {e}",
-                &date_str,
-                &source_object_key
+                "Failed to parse '{date_str:?}' as date from exiftool output for {source_object_key}: {e}"
             );
             None
         }
@@ -327,9 +317,7 @@ pub async fn load_object_metadata(
                 Ok(parsed_date) => Some(parsed_date.with_timezone(&Utc)),
                 Err(e) => {
                     log::warn!(
-                        "Failed to parse '{:?}' as date from ffprobe output for {}: {e}",
-                        &ffprobe_date,
-                        &source_object_key
+                        "Failed to parse '{ffprobe_date}' as date from ffprobe output for {source_object_key}: {e}",
                     );
                     None
                 }
@@ -358,19 +346,16 @@ pub async fn load_object_metadata(
                         Ok(pg_interval) => Some(pg_interval.interval),
                         Err(e) => {
                             log::warn!(
-                                "Failed to cast exiftool duration '{:?}' and ffprobe duration '{}' to postgres interval for {}: {e}",
-                                &exif_output.duration,
-                                ffprobe_duration,
-                                &source_object_key
+                                "Failed to cast exiftool duration '{:?}' and ffprobe duration '{ffprobe_duration}' to postgres interval for {source_object_key}: {e}",
+                                exif_output.duration
                             );
                             None
                         }
                     }
                 } else {
                     log::warn!(
-                        "Failed to cast exiftool duration '{:?}' to postgres interval for {}: {e}",
-                        &exif_output.duration,
-                        &source_object_key
+                        "Failed to cast exiftool duration '{:?}' to postgres interval for {source_object_key}: {e}",
+                        exif_output.duration,
                     );
                     None
                 }
@@ -403,11 +388,7 @@ pub async fn load_object_metadata(
                     let track_count = captures.get(2).and_then(|m| m.as_str().parse::<i32>().ok());
                     (track_number, track_count)
                 } else {
-                    log::warn!(
-                        "Cannot to parse track or disc number from '{}' for {}",
-                        &track_number,
-                        &source_object_key
-                    );
+                    log::warn!("Cannot to parse track or disc number from '{track_number}' for {source_object_key}");
                     (None, None)
                 }
             })
@@ -513,9 +494,8 @@ pub async fn load_object_metadata(
 
                 if post_update_count > 0 {
                     log::info!(
-                        "Updated {} posts with title from metadata for object {}",
-                        post_update_count,
-                        &s3_object_metadata.object_key
+                        "Updated {post_update_count} posts with title from metadata for object {}",
+                        s3_object_metadata.object_key
                     );
                 }
             }
@@ -539,7 +519,7 @@ pub async fn load_object_metadata(
 
     log::info!(
         "Completed metadata extraction for {}",
-        &s3_object_metadata.object_key
+        s3_object_metadata.object_key
     );
 
     for apply_auto_tags_task in apply_auto_tags_tasks {
@@ -585,7 +565,7 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         .spawn()
         .map_err(|e| Error::FfmpegProcessError(format!("Failed to spawn ffprobe process: {e}")))?;
 
-    let ffprobe_proc_output = spawn_blocking(|| {
+    let ffprobe_proc_output = spawn_encode_task_blocking(|| {
         ffprobe_proc.wait_with_output().map_err(|e| {
             Error::FfmpegProcessError(format!("Failed to get ffprobe process output: {e}"))
         })
@@ -664,9 +644,7 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
                     .or(Some(frame_rate));
             } else {
                 log::warn!(
-                    "Failed to parse frame rate '{}' from ffprobe output for {}",
-                    &frame_rate,
-                    object_url,
+                    "Failed to parse frame rate '{frame_rate}' from ffprobe output for {object_url}"
                 );
             }
         }

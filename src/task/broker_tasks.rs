@@ -56,7 +56,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                 break;
             }
 
-            log::info!("Found {} reconcile_broker_quota_usage_tasks to run (grace period: {})", tasks.len(), &grace_period);
+            log::info!("Found {} reconcile_broker_quota_usage_tasks to run (grace period: {})", tasks.len(), grace_period);
 
             let task_keys = tasks.iter().map(|t| t.pk).collect::<Vec<i64>>();
             let sentinel = LockedObjectsTaskSentinel::new_with_values(
@@ -82,7 +82,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                     let mut used_quota = get_broker_quota_used_by_user(broker.pk, user.pk, connection).await?;
 
                     if let Some(quota) = quota && used_quota > quota as u128 {
-                        log::info!("reconcile_broker_quota_usage_task: Quota exceeded for user '{}' ({}) on broker '{}' ({}) (quota: {}, used: {}), going to clean up posts", &user.user_name, user.pk, &broker.name, broker.pk, quota, used_quota);
+                        log::info!("reconcile_broker_quota_usage_task: Quota exceeded for user '{}' ({}) on broker '{}' ({}) (quota: {}, used: {}), going to clean up posts", user.user_name, user.pk, broker.name, broker.pk, quota, used_quota);
                         let mut deleted_post_count = 0;
 
                         // First, delete all posts where the s3_object exceeds the quota
@@ -110,7 +110,7 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                             .await?;
 
                         if !post_pks_to_delete.is_empty() {
-                            log::debug!("reconcile_broker_quota_usage_task: Deleting following posts for user '{}' ({}) on broker '{}' ({}): {:?}", &user.user_name, user.pk, &broker.name, broker.pk, &post_pks_to_delete);
+                            log::debug!("reconcile_broker_quota_usage_task: Deleting following posts for user '{}' ({}) on broker '{}' ({}): {:?}", user.user_name, user.pk, broker.name, broker.pk, post_pks_to_delete);
                             deleted_post_count += post_pks_to_delete.len();
                             for chunk in post_pks_to_delete.chunks(4096) {
                                 execute_delete_posts(chunk, true, &system_user, connection).await?;
@@ -133,18 +133,18 @@ pub fn run_reconcile_broker_quota_usage_tasks(tokio_handle: Handle) -> Result<()
                                 .optional()?;
 
                             if let Some(post_pk) = post_pk {
-                                log::debug!("reconcile_broker_quota_usage_task: Deleting post with pk {} for user '{}' ({}) on broker '{}' ({})", post_pk, &user.user_name, user.pk, &broker.name, broker.pk);
+                                log::debug!("reconcile_broker_quota_usage_task: Deleting post with pk {} for user '{}' ({}) on broker '{}' ({})", post_pk, user.user_name, user.pk, broker.name, broker.pk);
                                 deleted_post_count += 1;
                                 execute_delete_posts(&[post_pk], true, &system_user, connection).await?;
                                 used_quota = get_broker_quota_used_by_user(broker.pk, user.pk, connection).await?;
                             } else {
-                                log::warn!("reconcile_broker_quota_usage_task: No posts left to delete for user '{}' ({}) on broker '{}' ({}) (quota: {:?}, used: {})", &user.user_name, user.pk, &broker.name, broker.pk, quota, used_quota);
+                                log::warn!("reconcile_broker_quota_usage_task: No posts left to delete for user '{}' ({}) on broker '{}' ({}) (quota: {:?}, used: {})", user.user_name, user.pk, broker.name, broker.pk, quota, used_quota);
                             }
                         }
 
-                        log::info!("reconcile_broker_quota_usage_task: Deleted {} posts for user '{}' ({}) on broker '{}' ({}) (quota: {:?}, used: {})", deleted_post_count, &user.user_name, user.pk, &broker.name, broker.pk, quota, used_quota);
+                        log::info!("reconcile_broker_quota_usage_task: Deleted {} posts for user '{}' ({}) on broker '{}' ({}) (quota: {:?}, used: {})", deleted_post_count, user.user_name, user.pk, broker.name, broker.pk, quota, used_quota);
                     } else {
-                        log::info!("reconcile_broker_quota_usage_task: Quota not exceeded for user '{}' ({}) on broker '{}' ({}) (quota: {:?}, used: {})", &user.user_name, user.pk, &broker.name, broker.pk, quota, used_quota);
+                        log::info!("reconcile_broker_quota_usage_task: Quota not exceeded for user '{}' ({}) on broker '{}' ({}) (quota: {:?}, used: {})", user.user_name, user.pk, broker.name, broker.pk, quota, used_quota);
                     }
 
                     Ok(())
@@ -364,7 +364,7 @@ pub fn run_broker_quota_usage_audits(tokio_handle: Handle) -> Result<(), Error> 
 
                         if affected > 0 {
                             violations_found += 1;
-                            log::warn!("quota audit: Detected quota violation for user '{}' ({}) on broker '{}' ({}) (quota: {}, used: {}), creating reconcile_broker_quota_usage_task", &user.user_name, user.pk, &broker_to_check.name, broker_to_check.pk, quota, used_quota);
+                            log::warn!("quota audit: Detected quota violation for user '{}' ({}) on broker '{}' ({}) (quota: {}, used: {}), creating reconcile_broker_quota_usage_task", user.user_name, user.pk, broker_to_check.name, broker_to_check.pk, quota, used_quota);
                         }
                     }
                 }
@@ -373,16 +373,17 @@ pub fn run_broker_quota_usage_audits(tokio_handle: Handle) -> Result<(), Error> 
             }).await;
 
             match res {
-                Ok(violations_found) => log::info!("quota audit: Quota audit completed for broker '{}' ({}), found {} violations", &broker_to_check.name, broker_to_check.pk, violations_found),
-                Err(e) => log::error!("quota audit: Error occurred during quota audit for broker '{}' ({}): {}", &broker_to_check.name, broker_to_check.pk, e)
+                Ok(violations_found) => log::info!("quota audit: Quota audit completed for broker '{}' ({}), found {} violations", broker_to_check.name, broker_to_check.pk, violations_found),
+                Err(e) => log::error!("quota audit: Error occurred during quota audit for broker '{}' ({}): {e}", broker_to_check.name, broker_to_check.pk)
             }
 
             if let Err(e) = diesel::update(broker::table)
                 .set(broker::last_quota_audit.eq(Utc::now()))
                 .filter(broker::pk.eq(broker_to_check.pk))
                 .execute(&mut connection)
-                .await {
-                log::error!("quota audit: Error updating last_quota_audit for broker '{}' ({}): {}", &broker_to_check.name, broker_to_check.pk, e);
+                .await
+            {
+                log::error!("quota audit: Error updating last_quota_audit for broker '{}' ({}): {e}", broker_to_check.name, broker_to_check.pk);
             }
         }
 
