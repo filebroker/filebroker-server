@@ -1,9 +1,7 @@
 use crate::data::create_bucket;
 use crate::data::encode::{SUBMITTED_HLS_TRANSCODINGS, VIDEO_TRANSCODE_SEMAPHORE};
 use crate::data::encode::{
-    hls::{generate_hls_playlist, is_hls_supported_on_current_platform},
-    metadata::load_object_metadata,
-    thumb::generate_thumbnail,
+    hls::generate_hls_playlist, metadata::load_object_metadata, thumb::generate_thumbnail,
 };
 use crate::error::Error;
 use crate::model::{Broker, DeferredS3ObjectDeletion, S3Object, User};
@@ -26,12 +24,6 @@ use uuid::Uuid;
 pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
     if *DISABLE_GENERATE_MISSING_HLS_STREAMS {
         log::info!("generate_missing_hls_streams disabled");
-        return Ok(());
-    }
-    if !is_hls_supported_on_current_platform() {
-        log::warn!(
-            "Skipping generate_missing_hls_streams because it is unsupported on the current platform"
-        );
         return Ok(());
     }
     tokio_handle.block_on(async {

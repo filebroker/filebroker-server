@@ -54,6 +54,7 @@ rustls-pemfile = "2.2.0"
 rusty_pool = "0.7.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+tempfile = "3.27.0"
 tera = "1.20.1"
 thiserror = "2.0.19"
 tls-listener = { version = "0.11.2", features = ["native-tls", "rustls"] }
@@ -76,4 +77,3 @@ optional = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.2", features = ["fs"] }
-tempfile = "3.27.0"

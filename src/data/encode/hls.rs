@@ -15,11 +15,12 @@ use crate::{acquire_db_connection, run_serializable_transaction};
 use chrono::Utc;
 use diesel::ExpressionMethods;
 use diesel_async::RunQueryDsl;
-use futures::future::try_join_all;
+use futures::{TryFutureExt, future::try_join_all, try_join};
 use itertools::Itertools;
 use s3::Bucket;
 use std::cmp::Reverse;
 use std::fmt::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -252,9 +253,12 @@ pub async fn generate_hls_playlist(
 
     let mut output_reader_join_handles = Vec::new();
 
-    #[cfg(unix)]
     let fifo_dir = tempfile::tempdir()
         .map_err(|e| Error::IoError(format!("Failed to create tempdir: {e}")))?;
+
+    #[cfg(not(unix))]
+    let (ffmpeg_completion_tx, ffmpeg_completion_rx) =
+        tokio::sync::watch::channel(FfmpegCompletion::Running);
 
     apply_video_transcode_args_and_spawn_output_reader(
         &mut transcode_args,
@@ -266,6 +270,8 @@ pub async fn generate_hls_playlist(
         &file_id,
         has_muxed_audio,
         &mut output_reader_join_handles,
+        #[cfg(not(unix))]
+        ffmpeg_completion_rx.clone(),
     )?;
 
     apply_audio_transcode_args_and_spawn_output_reader(
@@ -279,6 +285,8 @@ pub async fn generate_hls_playlist(
         &bucket,
         &file_id,
         &mut output_reader_join_handles,
+        #[cfg(not(unix))]
+        ffmpeg_completion_rx.clone(),
     )?;
 
     transcode_args.push(String::from("-f"));
@@ -300,12 +308,13 @@ pub async fn generate_hls_playlist(
         has_separate_audio,
         &audio_streams,
     ));
-    #[cfg(unix)]
     transcode_args.push(format!("{}/stream_%v.m3u8", fifo_dir.path().display()));
-    #[cfg(not(unix))]
-    transcode_args.push(format!("{}_stream_%v.m3u8", &file_id));
 
-    let master_playlist_join_handle = spawn_hls_master_playlist_reader(&fifo_dir)?;
+    let master_playlist_join_handle = spawn_hls_master_playlist_reader(
+        &fifo_dir,
+        #[cfg(not(unix))]
+        ffmpeg_completion_rx.clone(),
+    )?;
 
     log::debug!("Spawning HLS transcode ffmpeg command with args {transcode_args:?}");
     let process = match Command::new("ffmpeg")
@@ -321,9 +330,10 @@ pub async fn generate_hls_playlist(
             for handle in output_reader_join_handles {
                 handle.abort();
             }
-            return Err(Error::FfmpegProcessError(format!(
-                "Error in ffmpeg process: {e}"
-            )));
+            let msg = format!("Error in ffmpeg process: {e}");
+            #[cfg(not(unix))]
+            let _ = ffmpeg_completion_tx.send(FfmpegCompletion::Failed(msg.clone()));
+            return Err(Error::FfmpegProcessError(msg));
         }
     };
 
@@ -358,21 +368,27 @@ pub async fn generate_hls_playlist(
             .await;
 
             let error_msg = String::from_utf8_lossy(&process_output.stderr);
-
-            return Err(Error::FfmpegProcessError(format!(
+            let msg = format!(
                 "ffmpeg for hls_transcoding of {source_object_key} failed with status {}: {error_msg}",
                 process_output.status,
-            )));
+            );
+            #[cfg(not(unix))]
+            let _ = ffmpeg_completion_tx.send(FfmpegCompletion::Failed(msg.clone()));
+            return Err(Error::FfmpegProcessError(msg));
         }
         Err(e) => {
             master_playlist_join_handle.abort();
             for handle in output_reader_join_handles {
                 handle.abort();
             }
+            #[cfg(not(unix))]
+            let _ = ffmpeg_completion_tx.send(FfmpegCompletion::Failed(e.to_string()));
             return Err(e);
         }
         Ok(process_output) => process_output,
     };
+    #[cfg(not(unix))]
+    let _ = ffmpeg_completion_tx.send(FfmpegCompletion::Succeeded);
 
     let finalization_result = async {
         let (master_playlist_bytes, mut stream_results) = await_and_verify_results(
@@ -455,6 +471,7 @@ fn apply_video_transcode_args_and_spawn_output_reader(
     file_id: &Uuid,
     has_muxed_audio: bool,
     output_reader_join_handles: &mut Vec<JoinHandle<Result<UploadedHlsStream, Error>>>,
+    #[cfg(not(unix))] ffmpeg_completion: tokio::sync::watch::Receiver<FfmpegCompletion>,
 ) -> Result<(), Error> {
     for i in 0..video_stream_count {
         transcode_args.push(String::from("-map"));
@@ -498,7 +515,6 @@ fn apply_video_transcode_args_and_spawn_output_reader(
         transcode_args.push(String::from("+faststart"));
 
         let output_reader_join_handle = spawn_hls_output_reader(
-            #[cfg(unix)]
             fifo_dir,
             bucket.clone(),
             HlsOutputStream::Video(HlsStream {
@@ -512,6 +528,8 @@ fn apply_video_transcode_args_and_spawn_output_reader(
                 max_bitrate: Some(String::from(bitrate.max_bitrate)),
                 has_muxed_audio,
             }),
+            #[cfg(not(unix))]
+            ffmpeg_completion.clone(),
         )?;
 
         output_reader_join_handles.push(output_reader_join_handle);
@@ -532,6 +550,7 @@ fn apply_audio_transcode_args_and_spawn_output_reader(
     bucket: &Bucket,
     file_id: &Uuid,
     output_reader_join_handles: &mut Vec<JoinHandle<Result<UploadedHlsStream, Error>>>,
+    #[cfg(not(unix))] ffmpeg_completion: tokio::sync::watch::Receiver<FfmpegCompletion>,
 ) -> Result<(), Error> {
     if has_muxed_audio {
         let source_audio_stream = audio_streams[0];
@@ -572,7 +591,6 @@ fn apply_audio_transcode_args_and_spawn_output_reader(
             let variant_index = audio_variant_offset + audio_index;
 
             let output_reader_join_handle = spawn_hls_output_reader(
-                #[cfg(unix)]
                 fifo_dir,
                 bucket.clone(),
                 HlsOutputStream::Audio(HlsAudioStream {
@@ -589,6 +607,8 @@ fn apply_audio_transcode_args_and_spawn_output_reader(
                     bitrate: audio_bitrate.to_owned(),
                     channels: source_audio_stream.channels,
                 }),
+                #[cfg(not(unix))]
+                ffmpeg_completion.clone(),
             )?;
 
             output_reader_join_handles.push(output_reader_join_handle);
@@ -598,7 +618,6 @@ fn apply_audio_transcode_args_and_spawn_output_reader(
     Ok(())
 }
 
-#[cfg(unix)]
 async fn generate_hls_subtitle_outputs(
     object_url: &str,
     subtitle_streams: &[&MediaStream],
@@ -614,6 +633,10 @@ async fn generate_hls_subtitle_outputs(
     if subtitle_streams.is_empty() {
         return Ok(Vec::new());
     }
+
+    #[cfg(not(unix))]
+    let (subtitle_ffmpeg_completion_tx, subtitle_ffmpeg_completion_rx) =
+        tokio::sync::watch::channel(FfmpegCompletion::Running);
 
     let video_stream_path = format!("{file_id}/stream_0.ts");
     let mpegts_timestamp = match async {
@@ -654,7 +677,6 @@ async fn generate_hls_subtitle_outputs(
         let variant_index = subtitle_variant_offset + subtitle_index;
 
         let stream_file = format!("{file_id}/stream_{variant_index}.vtt");
-
         let stream_playlist = format!("{file_id}/stream_{variant_index}.m3u8");
 
         let subtitle_playlist = MediaPlaylist {
@@ -696,6 +718,8 @@ async fn generate_hls_subtitle_outputs(
             hls_subtitle_stream,
             subtitle_playlist,
             mpegts_timestamp,
+            #[cfg(not(unix))]
+            subtitle_ffmpeg_completion_rx.clone(),
         )?;
 
         output_reader_join_handles.push(output_reader_join_handle);
@@ -732,6 +756,9 @@ async fn generate_hls_subtitle_outputs(
                 let _ = handle.await;
             }
 
+            #[cfg(not(unix))]
+            let _ = subtitle_ffmpeg_completion_tx.send(FfmpegCompletion::Failed(e.to_string()));
+
             return Err(e);
         }
     };
@@ -756,11 +783,13 @@ async fn generate_hls_subtitle_outputs(
             }
 
             let error_msg = String::from_utf8_lossy(&process_output.stderr);
-
-            return Err(Error::FfmpegProcessError(format!(
+            let msg = format!(
                 "ffmpeg for HLS subtitle transcoding failed with status {}: {}",
                 process_output.status, error_msg,
-            )));
+            );
+            #[cfg(not(unix))]
+            let _ = subtitle_ffmpeg_completion_tx.send(FfmpegCompletion::Failed(msg.clone()));
+            return Err(Error::FfmpegProcessError(msg));
         }
         Err(e) => {
             for handle in &output_reader_join_handles {
@@ -771,10 +800,15 @@ async fn generate_hls_subtitle_outputs(
                 let _ = handle.await;
             }
 
+            #[cfg(not(unix))]
+            let _ = subtitle_ffmpeg_completion_tx.send(FfmpegCompletion::Failed(e.to_string()));
+
             return Err(e);
         }
         Ok(process_output) => process_output,
     };
+    #[cfg(not(unix))]
+    let _ = subtitle_ffmpeg_completion_tx.send(FfmpegCompletion::Succeeded);
 
     if !process_output.stderr.is_empty() {
         log::warn!(
@@ -1239,34 +1273,76 @@ async fn delete_hls_transcode_objects(
     }
 }
 
-pub fn is_hls_supported_on_current_platform() -> bool {
-    cfg!(unix)
-}
-
 #[cfg(unix)]
 fn spawn_hls_output_reader(
     fifo_dir: &tempfile::TempDir,
     bucket: Bucket,
     hls_stream: HlsOutputStream,
 ) -> Result<JoinHandle<Result<UploadedHlsStream, Error>>, Error> {
-    use futures::try_join;
-
     let hls_stream_pipe = fifo_dir
         .path()
         .join(hls_stream.stream_file().split('/').next_back().unwrap());
+
     nix::unistd::mkfifo(&hls_stream_pipe, nix::sys::stat::Mode::S_IRWXU)
         .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
+
     let hls_playlist_pipe = fifo_dir
         .path()
         .join(hls_stream.stream_playlist().split('/').next_back().unwrap());
+
     nix::unistd::mkfifo(&hls_playlist_pipe, nix::sys::stat::Mode::S_IRWXU)
         .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
 
-    let join_handle = tokio::spawn(async move {
+    spawn_hls_output_reader_inner(
+        bucket,
+        hls_stream,
+        hls_stream_pipe,
+        hls_playlist_pipe,
+        async { Ok(()) },
+    )
+}
+
+#[cfg(not(unix))]
+fn spawn_hls_output_reader(
+    output_dir: &tempfile::TempDir,
+    bucket: Bucket,
+    hls_stream: HlsOutputStream,
+    ffmpeg_completion: tokio::sync::watch::Receiver<FfmpegCompletion>,
+) -> Result<JoinHandle<Result<UploadedHlsStream, Error>>, Error> {
+    let hls_stream_path = output_dir
+        .path()
+        .join(hls_stream.stream_file().split('/').next_back().unwrap());
+
+    let hls_playlist_path = output_dir
+        .path()
+        .join(hls_stream.stream_playlist().split('/').next_back().unwrap());
+
+    spawn_hls_output_reader_inner(
+        bucket,
+        hls_stream,
+        hls_stream_path,
+        hls_playlist_path,
+        wait_for_ffmpeg(ffmpeg_completion),
+    )
+}
+
+fn spawn_hls_output_reader_inner<F>(
+    bucket: Bucket,
+    hls_stream: HlsOutputStream,
+    hls_stream_path: PathBuf,
+    hls_playlist_path: PathBuf,
+    output_ready: F,
+) -> Result<JoinHandle<Result<UploadedHlsStream, Error>>, Error>
+where
+    F: Future<Output = Result<(), Error>> + Send + 'static,
+{
+    Ok(tokio::spawn(async move {
+        output_ready.await?;
+
         let stream_file_target_path = hls_stream.stream_file().to_owned();
         let hls_stream_upload = upload_tokio_file(
             bucket.clone(),
-            &hls_stream_pipe,
+            &hls_stream_path,
             stream_file_target_path,
             hls_stream.stream_mime_type().to_owned(),
         );
@@ -1274,7 +1350,7 @@ fn spawn_hls_output_reader(
         let playlist_file_target_path = hls_stream.stream_playlist().to_owned();
         let hls_playlist_upload = upload_tokio_file(
             bucket,
-            &hls_playlist_pipe,
+            &hls_playlist_path,
             playlist_file_target_path,
             String::from("application/vnd.apple.mpegurl"),
         );
@@ -1285,6 +1361,7 @@ fn spawn_hls_output_reader(
         if stream_upload_result.response_status >= 300 {
             return Err(Error::S3ResponseError(stream_upload_result.response_status));
         }
+
         if playlist_upload_result.response_status >= 300 {
             return Err(Error::S3ResponseError(
                 playlist_upload_result.response_status,
@@ -1296,29 +1373,7 @@ fn spawn_hls_output_reader(
             stream_upload_result,
             hls_stream,
         })
-    });
-    Ok(join_handle)
-}
-
-#[cfg(windows)]
-fn spawn_hls_output_reader(
-    _bucket: Bucket,
-    _hls_stream: HlsStream,
-) -> Result<JoinHandle<Result<UploadedHlsStream, Error>>, Error> {
-    // TODO implement named pipes on windows
-    Err(Error::FfmpegProcessError(String::from(
-        "HLS transcoding not supported on current platform",
-    )))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn spawn_hls_output_reader(
-    _bucket: Bucket,
-    _hls_stream: HlsStream,
-) -> Result<JoinHandle<Result<UploadedHlsStream, Error>>, Error> {
-    Err(Error::FfmpegProcessError(String::from(
-        "HLS transcoding not supported on current platform",
-    )))
+    }))
 }
 
 #[cfg(unix)]
@@ -1346,25 +1401,29 @@ fn spawn_hls_master_playlist_reader(
     }))
 }
 
-#[cfg(windows)]
+#[cfg(not(unix))]
 fn spawn_hls_master_playlist_reader(
-    _bucket: Bucket,
-    _master_playlist_path: String,
-) -> Result<JoinHandle<Result<S3UploadResult, Error>>, Error> {
-    // TODO implement named pipes on windows
-    Err(Error::FfmpegProcessError(String::from(
-        "HLS transcoding not supported on current platform",
-    )))
-}
+    output_dir: &tempfile::TempDir,
+    ffmpeg_completion: tokio::sync::watch::Receiver<FfmpegCompletion>,
+) -> Result<JoinHandle<Result<Vec<u8>, Error>>, Error> {
+    use tokio::io::AsyncReadExt;
 
-#[cfg(not(any(unix, windows)))]
-fn spawn_hls_master_playlist_reader(
-    _bucket: Bucket,
-    _master_playlist_path: String,
-) -> Result<JoinHandle<Result<S3UploadResult, Error>>, Error> {
-    Err(Error::FfmpegProcessError(String::from(
-        "HLS transcoding not supported on current platform",
-    )))
+    let master_playlist_path = output_dir.path().join("master.m3u8");
+
+    Ok(tokio::spawn(async move {
+        wait_for_ffmpeg(ffmpeg_completion).await?;
+
+        let mut file = tokio::fs::File::open(&master_playlist_path)
+            .await
+            .map_err(|e| Error::IoError(format!("Failed to open HLS master playlist: {e}")))?;
+
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .await
+            .map_err(|e| Error::IoError(format!("Failed to read HLS master playlist: {e}")))?;
+
+        Ok(bytes)
+    }))
 }
 
 async fn upload_hls_master_playlist(
@@ -1405,32 +1464,84 @@ fn spawn_hls_subtitle_output_reader(
     ),
     Error,
 > {
-    use futures::try_join;
-
-    let stream_file_target_path = hls_subtitle_stream.stream_file.clone();
-    let playlist_file_target_path = hls_subtitle_stream.stream_playlist.clone();
-
-    let subtitle_pipe = fifo_dir
-        .path()
-        .join(stream_file_target_path.split('/').next_back().unwrap());
+    let subtitle_pipe = fifo_dir.path().join(
+        hls_subtitle_stream
+            .stream_file
+            .split('/')
+            .next_back()
+            .unwrap(),
+    );
 
     nix::unistd::mkfifo(&subtitle_pipe, nix::sys::stat::Mode::S_IRWXU)
         .map_err(|e| Error::IoError(format!("Failed to create HLS subtitle FIFO: {e}")))?;
+
+    spawn_hls_subtitle_output_reader_inner(
+        subtitle_pipe,
+        bucket,
+        hls_subtitle_stream,
+        subtitle_playlist,
+        mpegts_timestamp,
+        async { Ok(()) },
+    )
+}
+
+#[cfg(not(unix))]
+fn spawn_hls_subtitle_output_reader(
+    output_dir: &tempfile::TempDir,
+    bucket: Bucket,
+    hls_subtitle_stream: HlsSubtitleStream,
+    subtitle_playlist: m3u8_rs::MediaPlaylist,
+    mpegts_timestamp: Option<u64>,
+    ffmpeg_completion: tokio::sync::watch::Receiver<FfmpegCompletion>,
+) -> Result<(PathBuf, JoinHandle<Result<UploadedHlsStream, Error>>), Error> {
+    let subtitle_output_path = output_dir.path().join(
+        hls_subtitle_stream
+            .stream_file
+            .split('/')
+            .next_back()
+            .unwrap(),
+    );
+
+    spawn_hls_subtitle_output_reader_inner(
+        subtitle_output_path,
+        bucket,
+        hls_subtitle_stream,
+        subtitle_playlist,
+        mpegts_timestamp,
+        wait_for_ffmpeg(ffmpeg_completion),
+    )
+}
+
+fn spawn_hls_subtitle_output_reader_inner<F>(
+    subtitle_output_path: PathBuf,
+    bucket: Bucket,
+    hls_subtitle_stream: HlsSubtitleStream,
+    subtitle_playlist: m3u8_rs::MediaPlaylist,
+    mpegts_timestamp: Option<u64>,
+    output_ready: F,
+) -> Result<(PathBuf, JoinHandle<Result<UploadedHlsStream, Error>>), Error>
+where
+    F: Future<Output = Result<(), Error>> + Send + 'static,
+{
+    let stream_file_target_path = hls_subtitle_stream.stream_file.clone();
+    let playlist_file_target_path = hls_subtitle_stream.stream_playlist.clone();
 
     let mut playlist_bytes = Vec::new();
     subtitle_playlist
         .write_to(&mut playlist_bytes)
         .map_err(|e| Error::IoError(format!("Failed to serialise HLS subtitle playlist: {e}")))?;
 
-    let ffmpeg_output_path = subtitle_pipe.clone();
+    let ffmpeg_output_path = subtitle_output_path.clone();
 
     let join_handle = tokio::spawn(async move {
+        output_ready.await?;
+
         let subtitle_upload = async {
             match mpegts_timestamp {
                 Some(mpegts_timestamp) => {
                     upload_timestamp_mapped_webvtt(
                         bucket.clone(),
-                        &subtitle_pipe,
+                        &subtitle_output_path,
                         stream_file_target_path,
                         mpegts_timestamp,
                     )
@@ -1439,7 +1550,7 @@ fn spawn_hls_subtitle_output_reader(
                 None => {
                     upload_tokio_file(
                         bucket.clone(),
-                        &subtitle_pipe,
+                        &subtitle_output_path,
                         stream_file_target_path,
                         String::from("text/vtt"),
                     )
@@ -1458,7 +1569,8 @@ fn spawn_hls_subtitle_output_reader(
                 .await
                 .map_err(|e| {
                     Error::S3Error(format!(
-                        "Failed to upload generated HLS subtitle playlist '{playlist_file_target_path}': {e}",
+                        "Failed to upload generated HLS subtitle playlist \
+                         '{playlist_file_target_path}': {e}"
                     ))
                 })?;
 
@@ -1492,14 +1604,12 @@ fn spawn_hls_subtitle_output_reader(
     Ok((ffmpeg_output_path, join_handle))
 }
 
-#[cfg(unix)]
 fn upload_tokio_file(
     bucket: Bucket,
     file_path: impl AsRef<std::path::Path>,
     s3_path: String,
     content_type: String,
-) -> impl futures::Future<Output = Result<S3UploadResult, Error>> {
-    use futures::TryFutureExt;
+) -> impl Future<Output = Result<S3UploadResult, Error>> {
     tokio::fs::File::open(file_path)
         .map_err(|e| Error::IoError(format!("Failed to open pipe file: {e}")))
         .and_then(|f| async move {
@@ -1521,7 +1631,6 @@ fn upload_tokio_file(
         })
 }
 
-#[cfg(unix)]
 async fn upload_timestamp_mapped_webvtt(
     bucket: Bucket,
     file_path: impl AsRef<std::path::Path>,
@@ -1607,5 +1716,37 @@ impl Drop for SubmittedHlsTranscodingSentinel<'_> {
     fn drop(&mut self) {
         let mut submitted_hls_transcodings = SUBMITTED_HLS_TRANSCODINGS.lock();
         submitted_hls_transcodings.remove(self.object_key);
+    }
+}
+
+#[cfg(not(unix))]
+#[derive(Clone)]
+enum FfmpegCompletion {
+    Running,
+    Succeeded,
+    Failed(String),
+}
+
+#[cfg(not(unix))]
+async fn wait_for_ffmpeg(
+    mut completion: tokio::sync::watch::Receiver<FfmpegCompletion>,
+) -> Result<(), Error> {
+    let completion = {
+        let completion = completion
+            .wait_for(|completion| !matches!(completion, FfmpegCompletion::Running))
+            .await
+            .map_err(|_| {
+                Error::FfmpegProcessError(String::from(
+                    "FFmpeg completion signal was dropped before completion",
+                ))
+            })?;
+
+        (*completion).clone()
+    };
+
+    match completion {
+        FfmpegCompletion::Succeeded => Ok(()),
+        FfmpegCompletion::Failed(message) => Err(Error::FfmpegProcessError(message)),
+        FfmpegCompletion::Running => unreachable!(),
     }
 }
