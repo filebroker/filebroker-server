@@ -590,6 +590,8 @@ fn apply_audio_transcode_args_and_spawn_output_reader(
                 transcode_args.push(format!("language={language}"));
             }
 
+            let title = hls_track_name(source_audio_stream, "Audio", audio_index);
+
             let variant_index = audio_variant_offset + audio_index;
 
             let output_reader_join_handle = spawn_hls_output_reader(
@@ -601,7 +603,7 @@ fn apply_audio_transcode_args_and_spawn_output_reader(
                     master_playlist: format!("{file_id}/master.m3u8"),
                     source_stream_index: source_audio_stream.index,
                     language: source_audio_stream.tags.language.clone(),
-                    title: source_audio_stream.tags.title.clone(),
+                    title: Some(title),
                     is_default: audio_index == default_audio_index,
                     autoselect: true,
                     source_codec: source_audio_stream.codec_name.clone(),
@@ -696,13 +698,15 @@ async fn generate_hls_subtitle_outputs(
             ..Default::default()
         };
 
+        let title = hls_track_name(source_subtitle_stream, "Subtitle", subtitle_index);
+
         let hls_subtitle_stream = HlsSubtitleStream {
             stream_playlist,
             stream_file,
             master_playlist: format!("{file_id}/master.m3u8"),
             source_stream_index: source_subtitle_stream.index,
             language: source_subtitle_stream.tags.language.clone(),
-            title: source_subtitle_stream.tags.title.clone(),
+            title: Some(title),
             is_default: Some(subtitle_index) == default_subtitle_index,
             autoselect: true,
             forced: source_subtitle_stream.disposition.forced,
@@ -930,11 +934,10 @@ fn finalize_hls_master_playlist(
                 ))
             })?;
 
-        alternative.name = hls_track_name(
-            audio_stream.title.as_deref(),
-            audio_stream.language.as_deref(),
-            audio_index,
-        );
+        alternative.name = audio_stream
+            .title
+            .clone()
+            .unwrap_or_else(|| format!("Audio {}", audio_index + 1));
     }
 
     /*
@@ -967,32 +970,10 @@ fn finalize_hls_master_playlist(
             })?
             .to_owned();
 
-        let title = subtitle_stream
+        let name = subtitle_stream
             .title
-            .as_deref()
-            .filter(|title| !title.is_empty());
-
-        let language = subtitle_stream
-            .language
-            .as_deref()
-            .filter(|language| !language.is_empty());
-
-        /*
-         * Mirrors VLC's track-title fallback without translating or
-         * otherwise modifying the source language metadata.
-         */
-        let name = match (title, language) {
-            (Some(title), Some(language)) => {
-                format!("{title} - [{language}]")
-            }
-            (Some(title), None) => title.to_owned(),
-            (None, Some(language)) => {
-                format!("Track {subtitle_index} - [{language}]")
-            }
-            (None, None) => {
-                format!("Track {subtitle_index}")
-            }
-        };
+            .clone()
+            .unwrap_or_else(|| format!("Subtitle {}", subtitle_index + 1));
 
         master_playlist.alternatives.push(AlternativeMedia {
             media_type: AlternativeMediaType::Subtitles,
@@ -1024,20 +1005,67 @@ fn finalize_hls_master_playlist(
     Ok(modified_master_playlist)
 }
 
-fn hls_track_name(title: Option<&str>, language: Option<&str>, track_index: usize) -> String {
-    let title = title.filter(|title| !title.is_empty());
-    let language = language.filter(|language| !language.is_empty());
+fn hls_track_name(source_stream: &MediaStream, fallback_name: &str, track_index: usize) -> String {
+    let title = source_stream
+        .tags
+        .title
+        .as_deref()
+        .filter(|title| !title.is_empty());
 
-    match (title, language) {
+    let language = source_stream
+        .tags
+        .language
+        .as_deref()
+        .filter(|language| !language.is_empty());
+
+    let mut name = match (title, language) {
         (Some(title), Some(language)) => {
             format!("{title} - [{language}]")
         }
         (Some(title), None) => title.to_owned(),
-        (None, Some(language)) => {
-            format!("Track {track_index} - [{language}]")
+        (None, Some(language)) => language.to_owned(),
+        (None, None) => {
+            format!("{fallback_name} {}", track_index + 1)
         }
-        (None, None) => format!("Track {track_index}"),
+    };
+
+    let lowercase_name = name.to_ascii_lowercase();
+    let mut qualifiers = Vec::new();
+
+    match source_stream.codec_type {
+        StreamType::Audio => {
+            if source_stream.disposition.comment && !lowercase_name.contains("comment") {
+                qualifiers.push("Commentary");
+            }
+
+            if source_stream.disposition.visual_impaired
+                && !lowercase_name.contains("audio description")
+                && !lowercase_name.contains("descriptive audio")
+            {
+                qualifiers.push("Audio Description");
+            }
+        }
+        StreamType::Subtitle => {
+            if source_stream.disposition.hearing_impaired
+                && !lowercase_name.contains("sdh")
+                && !lowercase_name.contains("hearing impaired")
+                && !lowercase_name.contains("hearing-impaired")
+            {
+                qualifiers.push("SDH");
+            }
+
+            if source_stream.disposition.forced && !lowercase_name.contains("forced") {
+                qualifiers.push("Forced");
+            }
+        }
+        _ => {}
     }
+
+    if !qualifiers.is_empty() {
+        write!(name, " ({})", qualifiers.join(", ")).unwrap();
+    }
+
+    name
 }
 
 async fn await_and_verify_results(

@@ -173,6 +173,12 @@ pub struct StreamDisposition {
     pub default: bool,
     #[serde(default, deserialize_with = "deserialize_ffmpeg_bool")]
     pub forced: bool,
+    #[serde(default, deserialize_with = "deserialize_ffmpeg_bool")]
+    pub comment: bool,
+    #[serde(default, deserialize_with = "deserialize_ffmpeg_bool")]
+    pub hearing_impaired: bool,
+    #[serde(default, deserialize_with = "deserialize_ffmpeg_bool")]
+    pub visual_impaired: bool,
 }
 
 fn deserialize_ffmpeg_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
