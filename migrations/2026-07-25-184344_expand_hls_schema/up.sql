@@ -46,6 +46,5 @@ SET has_muxed_audio = metadata.audio_stream_count > 0
 FROM s3_object master
     JOIN s3_object_metadata metadata ON metadata.object_key = master.derived_from
 WHERE master.object_key = hs.master_playlist;
-UPDATE s3_object_metadata SET has_muxed_audio = FALSE WHERE has_muxed_audio IS NULL;
 
 ALTER TABLE hls_stream ALTER COLUMN has_muxed_audio SET NOT NULL;
