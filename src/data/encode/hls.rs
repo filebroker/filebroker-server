@@ -253,7 +253,9 @@ pub async fn generate_hls_playlist(
 
     let mut output_reader_join_handles = Vec::new();
 
-    let fifo_dir = tempfile::tempdir()
+    let fifo_dir = tempfile::Builder::new()
+        .prefix("filebroker-hls-")
+        .tempdir()
         .map_err(|e| Error::IoError(format!("Failed to create tempdir: {e}")))?;
 
     #[cfg(not(unix))]
