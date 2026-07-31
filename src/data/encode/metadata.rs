@@ -20,6 +20,8 @@ use diesel_async::RunQueryDsl;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::Deserialize;
+use serde_json::{Map, Value, value::RawValue};
+use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
 
 #[derive(Deserialize)]
@@ -249,16 +251,28 @@ pub async fn load_object_metadata(
         FfprobeMediaMetadata::default()
     };
 
-    let raw = if let Some(ffprobe_output_str) = ffprobe_output_str {
-        serde_json::from_str(&format!(
-            "{{\"exiftool\": {exif_output_str}, \"ffprobe\": {ffprobe_output_str}}}"
-        ))
-        .map_err(|e| Error::SerialisationError(format!("Failed to serialize raw metadate: {e}")))?
-    } else {
-        serde_json::from_str(&format!("{{\"exiftool\": {exif_output_str}}}")).map_err(|e| {
-            Error::SerialisationError(format!("Failed to serialize raw metadata: {e}"))
+    let exiftool = deserialize_raw_json_lossy(exif_output_str.as_ref(), "$.exiftool")
+        .map_err(|e| {
+            Error::SerialisationError(format!("Failed to deserialize raw exiftool metadata: {e}"))
         })?
-    };
+        .unwrap_or(Value::Null);
+
+    let mut raw = Map::new();
+    raw.insert("exiftool".to_string(), exiftool);
+
+    if let Some(ffprobe_output_str) = ffprobe_output_str.as_deref() {
+        let ffprobe = deserialize_raw_json_lossy(ffprobe_output_str, "$.ffprobe")
+            .map_err(|e| {
+                Error::SerialisationError(format!(
+                    "Failed to deserialize raw ffprobe metadata: {e}"
+                ))
+            })?
+            .unwrap_or(Value::Null);
+
+        raw.insert("ffprobe".to_string(), ffprobe);
+    }
+
+    let raw = Value::Object(raw);
 
     let date_str = exif_output
         .create_date
@@ -698,4 +712,59 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         ffprobe_output_str: Some(ffprobe_output_str),
         ffprobe_tags: ffprobe_output.format.tags,
     })
+}
+
+fn deserialize_raw_json_lossy(raw: &str, path: &str) -> Result<Option<Value>, serde_json::Error> {
+    let trimmed = raw.trim_start();
+
+    match trimmed.as_bytes().first().copied() {
+        Some(b'{') => {
+            let fields = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(raw)?;
+
+            let mut object = Map::new();
+
+            for (name, raw_value) in fields {
+                let field_path = format!("{path}.{name}");
+
+                if let Some(value) = deserialize_raw_json_lossy(raw_value.get(), &field_path)? {
+                    object.insert(name, value);
+                }
+            }
+
+            Ok(Some(Value::Object(object)))
+        }
+
+        Some(b'[') => {
+            let elements = serde_json::from_str::<Vec<Box<RawValue>>>(raw)?;
+
+            let mut array = Vec::with_capacity(elements.len());
+
+            for (index, raw_value) in elements.into_iter().enumerate() {
+                let element_path = format!("{path}[{index}]");
+
+                // An array element cannot simply be omitted without changing all
+                // subsequent indexes, so replace an invalid element with null.
+                let value = deserialize_raw_json_lossy(raw_value.get(), &element_path)?
+                    .unwrap_or(Value::Null);
+
+                array.push(value);
+            }
+
+            Ok(Some(Value::Array(array)))
+        }
+
+        Some(_) => match serde_json::from_str::<Value>(raw) {
+            Ok(value) => Ok(Some(value)),
+
+            Err(e) => {
+                let preview: String = raw.chars().take(200).collect();
+
+                log::warn!("Dropping invalid raw metadata value at {path}: {e}; value: {preview}");
+
+                Ok(None)
+            }
+        },
+
+        None => serde_json::from_str::<Value>(raw).map(Some),
+    }
 }
