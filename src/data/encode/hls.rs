@@ -154,15 +154,14 @@ pub async fn generate_hls_playlist(
             Some(codec_name) if !is_bitmap_subtitle_codec(codec_name) => true,
             Some(codec_name) => {
                 log::warn!(
-                    "Skipping unsupported bitmap subtitle stream {} with codec '{}'",
+                    "HLS transcode for {source_object_key}: Skipping unsupported bitmap subtitle stream {} with codec '{codec_name}'",
                     stream.index,
-                    codec_name,
                 );
                 false
             }
             None => {
                 log::warn!(
-                    "Skipping subtitle stream {} because ffprobe returned no codec name",
+                    "HLS transcode for {source_object_key}: Skipping subtitle stream {} because ffprobe returned no codec name",
                     stream.index,
                 );
                 false
@@ -655,7 +654,7 @@ async fn generate_hls_subtitle_outputs(
         Ok(mpegts_timestamp) => Some(mpegts_timestamp),
         Err(error) => {
             log::warn!(
-                "Failed to determine MPEG-TS start time for HLS subtitles, subtitles will be uploaded without X-TIMESTAMP-MAP: {error}"
+                "HLS transcode for {file_id}: Failed to determine MPEG-TS start time for HLS subtitles, subtitles will be uploaded without X-TIMESTAMP-MAP: {error}"
             );
 
             None
@@ -818,7 +817,7 @@ async fn generate_hls_subtitle_outputs(
 
     if !process_output.stderr.is_empty() {
         log::warn!(
-            "ffmpeg reported errors while generating HLS subtitles: {}",
+            "HLS transcode for {file_id}: ffmpeg reported errors while generating HLS subtitles: {}",
             String::from_utf8_lossy(&process_output.stderr),
         );
     }
