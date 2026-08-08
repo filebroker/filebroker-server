@@ -28,40 +28,40 @@ use uuid::Uuid;
 static VIDEO_TRANSCODE_RESOLUTIONS: [TranscodeResolution; 5] = [
     TranscodeResolution {
         resolution: 2160,
-        target_bitrate: "27M",
-        min_bitrate: "13M",
-        max_bitrate: "39150K",
+        target_bitrate_kbps: 24_000,
         downscale_target: true,
     },
     TranscodeResolution {
         resolution: 1440,
-        target_bitrate: "13M",
-        min_bitrate: "6750K",
-        max_bitrate: "19575K",
+        target_bitrate_kbps: 12_000,
         downscale_target: false,
     },
     TranscodeResolution {
         resolution: 1080,
-        target_bitrate: "4500K",
-        min_bitrate: "2250K",
-        max_bitrate: "6525K",
+        target_bitrate_kbps: 6_000,
         downscale_target: true,
     },
     TranscodeResolution {
         resolution: 720,
-        target_bitrate: "2700K",
-        min_bitrate: "1350K",
-        max_bitrate: "3930K",
+        target_bitrate_kbps: 3_500,
         downscale_target: true,
     },
     TranscodeResolution {
         resolution: 360,
-        target_bitrate: "750K",
-        min_bitrate: "384K",
-        max_bitrate: "1200K",
+        target_bitrate_kbps: 1_000,
         downscale_target: true,
     },
 ];
+
+fn frame_rate_bitrate_multiplier(frame_rate: f64) -> f64 {
+    (frame_rate.max(30.0) / 30.0).sqrt().min(2.0)
+}
+
+fn scaled_bitrate_kbps(base_bitrate_kbps: u64, frame_rate: f64) -> u64 {
+    let multiplier = frame_rate_bitrate_multiplier(frame_rate);
+
+    (base_bitrate_kbps as f64 * multiplier).round() as u64
+}
 
 fn hls_audio_bitrate(channels: Option<i32>) -> &'static str {
     match channels {
@@ -88,9 +88,7 @@ fn is_bitmap_subtitle_codec(codec_name: &str) -> bool {
 #[derive(Debug, Clone, Copy)]
 struct TranscodeResolution {
     resolution: usize,
-    target_bitrate: &'static str,
-    min_bitrate: &'static str,
-    max_bitrate: &'static str,
+    target_bitrate_kbps: u64,
     downscale_target: bool,
 }
 
@@ -139,13 +137,29 @@ pub async fn generate_hls_playlist(
     let start_time = std::time::Instant::now();
     let object_url = join_api_url(["get-object", &source_object_key])?.to_string();
 
-    let resolution = probe::get_video_resolution(&source_object_key, &object_url).await?;
     let media_probe = probe::probe_media(&object_url).await?;
+
+    let video_stream = media_probe.video_stream().ok_or_else(|| {
+        Error::FfmpegProcessError(format!(
+            "ffprobe returned no video stream for object '{source_object_key}'"
+        ))
+    })?;
+    let resolution = video_stream.height.ok_or_else(|| {
+        Error::FfmpegProcessError(format!(
+            "ffprobe returned no height for the first video stream of '{source_object_key}'"
+        ))
+    })?;
+    let source_frame_rate = video_stream.frame_rate().unwrap_or_else(|| {
+        log::warn!("HLS transcode for {source_object_key}: Could not determine source frame rate because ffprobe returned no valid frame rate, falling back to 30fps.");
+        30.0
+    });
+
     let audio_streams = media_probe
         .streams
         .iter()
         .filter(|stream| stream.codec_type == StreamType::Audio)
         .collect::<Vec<_>>();
+
     let subtitle_streams = media_probe
         .streams
         .iter()
@@ -168,6 +182,7 @@ pub async fn generate_hls_playlist(
             }
         })
         .collect::<Vec<_>>();
+
     let source_duration_str = media_probe.format.duration.as_deref().ok_or_else(|| {
         Error::FfmpegProcessError(format!(
             "ffprobe returned no duration for object '{source_object_key}'"
@@ -190,18 +205,18 @@ pub async fn generate_hls_playlist(
     let mut video_transcode_resolutions = VIDEO_TRANSCODE_RESOLUTIONS;
     video_transcode_resolutions.sort_by_key(|t| Reverse(t.resolution));
 
-    let target_bitrate = video_transcode_resolutions
+    let target_rendition = video_transcode_resolutions
         .into_iter()
         .find(|t| t.resolution <= resolution)
         .unwrap_or_else(|| *video_transcode_resolutions.last().unwrap());
 
-    let downscaled_bitrates = video_transcode_resolutions
+    let downscaled_renditions = video_transcode_resolutions
         .into_iter()
-        .filter(|t| t.resolution < target_bitrate.resolution && t.downscale_target)
+        .filter(|t| t.resolution < target_rendition.resolution && t.downscale_target)
         .take(2)
         .collect::<Vec<_>>();
 
-    let video_stream_count = downscaled_bitrates.len() + 1;
+    let video_stream_count = downscaled_renditions.len() + 1;
     let separate_audio_stream_count = if audio_streams.len() > 1 {
         audio_streams.len()
     } else {
@@ -214,8 +229,8 @@ pub async fn generate_hls_playlist(
     // generate string that splits the input video into separate streams for the source resolution and the two downscaled resolutions
     // e.g. [0:v]split=3[v1][v2][v3]; [v1]copy[v1out]; [v2]scale=w=1280:h=720[v2out]; [v3]scale=w=640:h=360[v3out]
     let mut split_string = String::from("[0:v]split=");
-    split_string.push_str(&(downscaled_bitrates.len() + 1).to_string());
-    split_string.push_str(&(0..=downscaled_bitrates.len()).fold(
+    split_string.push_str(&(downscaled_renditions.len() + 1).to_string());
+    split_string.push_str(&(0..=downscaled_renditions.len()).fold(
         String::new(),
         |mut output, idx| {
             // writing to sting never fails
@@ -224,9 +239,9 @@ pub async fn generate_hls_playlist(
         },
     ));
     split_string.push_str("; [v1]format=yuv420p,fps=source_fps[v1out]");
-    if !downscaled_bitrates.is_empty() {
+    if !downscaled_renditions.is_empty() {
         split_string.push_str("; ");
-        let scale_string = downscaled_bitrates
+        let scale_string = downscaled_renditions
             .iter()
             .enumerate()
             .map(|(i, bitrate)| {
@@ -264,12 +279,13 @@ pub async fn generate_hls_playlist(
     apply_video_transcode_args_and_spawn_output_reader(
         &mut transcode_args,
         video_stream_count,
-        target_bitrate,
-        &downscaled_bitrates,
+        target_rendition,
+        &downscaled_renditions,
         &fifo_dir,
         &bucket,
         &file_id,
         has_muxed_audio,
+        source_frame_rate,
         &mut output_reader_join_handles,
         #[cfg(not(unix))]
         ffmpeg_completion_rx.clone(),
@@ -465,12 +481,13 @@ pub async fn generate_hls_playlist(
 fn apply_video_transcode_args_and_spawn_output_reader(
     transcode_args: &mut Vec<String>,
     video_stream_count: usize,
-    target_bitrate: TranscodeResolution,
-    downscaled_bitrates: &[TranscodeResolution],
+    target_rendition: TranscodeResolution,
+    downscaled_renditions: &[TranscodeResolution],
     fifo_dir: &tempfile::TempDir,
     bucket: &Bucket,
     file_id: &Uuid,
     has_muxed_audio: bool,
+    source_frame_rate: f64,
     output_reader_join_handles: &mut Vec<JoinHandle<Result<UploadedHlsStream, Error>>>,
     #[cfg(not(unix))] ffmpeg_completion: tokio::sync::watch::Receiver<FfmpegCompletion>,
 ) -> Result<(), Error> {
@@ -478,10 +495,16 @@ fn apply_video_transcode_args_and_spawn_output_reader(
         transcode_args.push(String::from("-map"));
         let is_target_resolution = i == 0;
         let bitrate = if is_target_resolution {
-            target_bitrate
+            target_rendition
         } else {
-            downscaled_bitrates[i - 1]
+            downscaled_renditions[i - 1]
         };
+
+        let target_bitrate = scaled_bitrate_kbps(bitrate.target_bitrate_kbps, source_frame_rate);
+
+        let max_bitrate = target_bitrate * 115 / 100;
+        let buffer_size = target_bitrate * 2;
+        let keyframe_interval = source_frame_rate.round().max(1.0) as u64;
 
         let preset = if is_target_resolution {
             "medium"
@@ -493,25 +516,23 @@ fn apply_video_transcode_args_and_spawn_output_reader(
         transcode_args.push(format!("-c:v:{i}"));
         transcode_args.push(String::from("libx264"));
         transcode_args.push(String::from("-x264-params"));
-        transcode_args.push(String::from("nal-hrd=cbr:force-cfr=1"));
+        transcode_args.push(String::from("nal-hrd=vbr:force-cfr=1"));
         transcode_args.push(format!("-b:v:{i}"));
-        transcode_args.push(bitrate.target_bitrate.to_string());
+        transcode_args.push(format!("{target_bitrate}K"));
         transcode_args.push(format!("-maxrate:v:{i}"));
-        transcode_args.push(bitrate.max_bitrate.to_string());
-        transcode_args.push(format!("-minrate:v:{i}"));
-        transcode_args.push(bitrate.min_bitrate.to_string());
+        transcode_args.push(format!("{max_bitrate}K"));
         transcode_args.push(format!("-bufsize:v:{i}"));
-        transcode_args.push(bitrate.max_bitrate.to_string());
+        transcode_args.push(format!("{buffer_size}K"));
         transcode_args.push(String::from("-preset"));
         transcode_args.push(preset.to_string());
         transcode_args.push(format!("-profile:v:{i}"));
         transcode_args.push(String::from("high"));
-        transcode_args.push(String::from("-g"));
-        transcode_args.push(String::from("48"));
-        transcode_args.push(String::from("-sc_threshold"));
+        transcode_args.push(format!("-g:v:{i}"));
+        transcode_args.push(keyframe_interval.to_string());
+        transcode_args.push(format!("-sc_threshold:v:{i}"));
         transcode_args.push(String::from("0"));
-        transcode_args.push(String::from("-keyint_min"));
-        transcode_args.push(String::from("48"));
+        transcode_args.push(format!("-keyint_min:v:{i}"));
+        transcode_args.push(keyframe_interval.to_string());
         transcode_args.push(String::from("-movflags"));
         transcode_args.push(String::from("+faststart"));
 
@@ -524,9 +545,9 @@ fn apply_video_transcode_args_and_spawn_output_reader(
                 master_playlist: format!("{file_id}/master.m3u8"),
                 resolution: bitrate.resolution as i32,
                 x264_preset: String::from(preset),
-                target_bitrate: Some(String::from(bitrate.target_bitrate)),
-                min_bitrate: Some(String::from(bitrate.min_bitrate)),
-                max_bitrate: Some(String::from(bitrate.max_bitrate)),
+                target_bitrate: Some(format!("{target_bitrate}K")),
+                min_bitrate: None,
+                max_bitrate: Some(format!("{max_bitrate}K")),
                 has_muxed_audio,
             }),
             #[cfg(not(unix))]

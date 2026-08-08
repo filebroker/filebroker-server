@@ -134,12 +134,21 @@ pub struct MediaProbe {
     pub format: MediaFormat,
 }
 
+impl MediaProbe {
+    pub fn video_stream(&self) -> Option<&MediaStream> {
+        self.streams
+            .iter()
+            .find(|stream| stream.codec_type == StreamType::Video)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MediaFormat {
     pub duration: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct MediaStream {
     pub index: i32,
     pub codec_type: StreamType,
@@ -149,6 +158,42 @@ pub struct MediaStream {
     pub tags: StreamTags,
     #[serde(default)]
     pub disposition: StreamDisposition,
+    #[serde(default)]
+    pub width: Option<usize>,
+    #[serde(default)]
+    pub height: Option<usize>,
+    #[serde(default)]
+    pub avg_frame_rate: Option<String>,
+    #[serde(default)]
+    pub r_frame_rate: Option<String>,
+}
+
+impl MediaStream {
+    pub fn frame_rate(&self) -> Option<f64> {
+        self.avg_frame_rate
+            .as_deref()
+            .and_then(parse_frame_rate)
+            .or_else(|| self.r_frame_rate.as_deref().and_then(parse_frame_rate))
+    }
+}
+
+fn parse_frame_rate(value: &str) -> Option<f64> {
+    let value = value.trim();
+
+    let frame_rate = if let Some((numerator, denominator)) = value.split_once('/') {
+        let numerator = numerator.trim().parse::<f64>().ok()?;
+        let denominator = denominator.trim().parse::<f64>().ok()?;
+
+        if denominator == 0.0 {
+            return None;
+        }
+
+        numerator / denominator
+    } else {
+        value.parse::<f64>().ok()?
+    };
+
+    (frame_rate.is_finite() && frame_rate > 0.0).then_some(frame_rate)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -317,60 +362,4 @@ pub async fn get_object_start_time(object_url: &str) -> Result<f64, Error> {
     }
 
     Ok(start_time)
-}
-
-pub async fn get_video_resolution(
-    source_object_key: &str,
-    object_url: &str,
-) -> Result<usize, Error> {
-    let resolution_probe_process = Command::new("ffprobe")
-        .args([
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=height",
-            "-of",
-            "csv=s=x:p=0",
-            "-v",
-            "error",
-            object_url,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Error::FfmpegProcessError(format!("Failed to spawn ffprobe process: {e}")))?;
-
-    let process_output = spawn_encode_task_blocking(|| {
-        resolution_probe_process.wait_with_output().map_err(|e| {
-            Error::FfmpegProcessError(format!("Failed to get ffprobe process output: {e}"))
-        })
-    })
-    .await;
-    match process_output {
-        Ok(process_output) => {
-            let resolution_string = String::from_utf8_lossy(&process_output.stdout)
-                .trim()
-                .to_string();
-            if !process_output.status.success() || !process_output.stderr.is_empty() {
-                let error_msg = String::from_utf8_lossy(&process_output.stderr);
-                if process_output.status.success() {
-                    log::warn!(
-                        "ffprobe reported error while getting resolution for {source_object_key}, going to check output validity: {error_msg}"
-                    );
-                } else {
-                    return Err(Error::FfmpegProcessError(format!(
-                        "ffprobe failed with status {}: {}",
-                        process_output.status, error_msg
-                    )));
-                }
-            }
-
-            resolution_string.trim().parse::<usize>().map_err(|_| {
-                Error::FfmpegProcessError(format!(
-                    "Invalid resolution from ffprobe for '{source_object_key}': {resolution_string}"
-                ))
-            })
-        }
-        Err(e) => Err(e),
-    }
 }
