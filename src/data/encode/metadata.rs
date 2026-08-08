@@ -96,6 +96,8 @@ struct FfprobeStream {
     height: DeserializeOrDefault<Option<i32>>,
     duration: DeserializeOrDefault<Option<String>>,
     bit_rate: DeserializeOrDefault<Option<String>>,
+    sample_rate: DeserializeOrDefault<Option<String>>,
+    channels: DeserializeOrDefault<Option<i32>>,
 }
 
 #[derive(Deserialize)]
@@ -228,6 +230,8 @@ pub async fn load_object_metadata(
         size,
         bit_rate,
         duration_secs,
+        width,
+        height,
         video_stream_count,
         video_codec_name,
         video_codec_long_name,
@@ -237,6 +241,8 @@ pub async fn load_object_metadata(
         audio_codec_name,
         audio_codec_long_name,
         audio_bit_rate_max,
+        audio_sample_rate,
+        audio_channels,
         ffprobe_output_str,
         ffprobe_tags,
     } = if content_type_is_video || content_type_is_image || content_type_is_audio {
@@ -343,41 +349,43 @@ pub async fn load_object_metadata(
 
     let mut connection = acquire_db_connection().await?;
 
-    let duration = if let Some(ref duration_str) = *exif_output.duration {
+    let mut duration = if let Some(ref duration_str) = *exif_output.duration {
         let pg_interval = diesel::sql_query("SELECT $1::interval AS pg_interval")
             .bind::<Text, _>(duration_str)
             .get_result::<PgIntervalQuery>(&mut connection)
             .await;
+
         match pg_interval {
             Ok(pg_interval) => Some(pg_interval.interval),
             Err(e) => {
-                if let Some(ffprobe_duration) = duration_secs {
-                    let pg_interval = diesel::sql_query("SELECT $1::interval AS pg_interval")
-                        .bind::<Text, _>(format!("{ffprobe_duration}s"))
-                        .get_result::<PgIntervalQuery>(&mut connection)
-                        .await;
-                    match pg_interval {
-                        Ok(pg_interval) => Some(pg_interval.interval),
-                        Err(e) => {
-                            log::warn!(
-                                "Failed to cast exiftool duration '{:?}' and ffprobe duration '{ffprobe_duration}' to postgres interval for {source_object_key}: {e}",
-                                exif_output.duration
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    log::warn!(
-                        "Failed to cast exiftool duration '{:?}' to postgres interval for {source_object_key}: {e}",
-                        exif_output.duration,
-                    );
-                    None
-                }
+                log::warn!(
+                    "Failed to cast exiftool duration '{:?}' to postgres interval for {source_object_key}: {e}",
+                    exif_output.duration,
+                );
+                None
             }
         }
     } else {
         None
     };
+
+    if duration.is_none()
+        && let Some(ffprobe_duration) = duration_secs
+    {
+        let pg_interval = diesel::sql_query("SELECT $1::interval AS pg_interval")
+            .bind::<Text, _>(format!("{ffprobe_duration}s"))
+            .get_result::<PgIntervalQuery>(&mut connection)
+            .await;
+
+        match pg_interval {
+            Ok(pg_interval) => duration = Some(pg_interval.interval),
+            Err(e) => {
+                log::warn!(
+                    "Failed to cast ffprobe duration '{ffprobe_duration}' to postgres interval for {source_object_key}: {e}"
+                );
+            }
+        }
+    }
 
     fn parse_track_or_disc_number(
         track_or_disc_number: Option<String>,
@@ -462,8 +470,8 @@ pub async fn load_object_metadata(
                 track_number,
                 disc_number,
                 duration: duration.map(PgIntervalWrapper),
-                width: *exif_output.width,
-                height: *exif_output.height,
+                width: (*exif_output.width).or(width),
+                height: (*exif_output.height).or(height),
                 size: size.or(Some(object.size_bytes)),
                 bit_rate,
                 format_name,
@@ -478,8 +486,10 @@ pub async fn load_object_metadata(
                 audio_codec_long_name,
                 audio_sample_rate: exif_output
                     .audio_sample_rate
-                    .or(exif_output.sample_rate.into_inner()),
-                audio_channels: *exif_output.audio_channels,
+                    .into_inner()
+                    .or(exif_output.sample_rate.into_inner())
+                    .or(audio_sample_rate),
+                audio_channels: (*exif_output.audio_channels).or(audio_channels),
                 audio_bit_rate_max,
                 raw,
                 loaded: true,
@@ -550,6 +560,8 @@ struct FfprobeMediaMetadata {
     size: Option<i64>,
     bit_rate: Option<i64>,
     duration_secs: Option<f32>,
+    width: Option<i32>,
+    height: Option<i32>,
     video_stream_count: i32,
     video_codec_name: Option<String>,
     video_codec_long_name: Option<String>,
@@ -559,6 +571,8 @@ struct FfprobeMediaMetadata {
     audio_codec_name: Option<String>,
     audio_codec_long_name: Option<String>,
     audio_bit_rate_max: Option<i64>,
+    audio_sample_rate: Option<f64>,
+    audio_channels: Option<i32>,
     ffprobe_output_str: Option<String>,
     ffprobe_tags: FfprobeTags,
 }
@@ -613,7 +627,7 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         .map_err(|e| {
             Error::FfmpegProcessError(format!("Failed to parse bit rate from ffprobe output: {e}"))
         })?;
-    let duration_secs = ffprobe_output
+    let mut duration_secs = ffprobe_output
         .format
         .duration
         .map(|d| d.parse::<f32>())
@@ -621,7 +635,11 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         .map_err(|e| {
             Error::FfmpegProcessError(format!("Failed to parse duration from ffprobe output: {e}"))
         })?;
+    let mut video_duration_secs: Option<f32> = None;
+    let mut audio_duration_secs: Option<f32> = None;
 
+    let mut width: Option<i32> = None;
+    let mut height: Option<i32> = None;
     let mut video_stream_count = 0;
     let mut video_codec_name: Option<String> = None;
     let mut video_codec_long_name: Option<String> = None;
@@ -631,6 +649,8 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
     let mut audio_codec_name: Option<String> = None;
     let mut audio_codec_long_name: Option<String> = None;
     let mut audio_bit_rate_max: Option<i64> = None;
+    let mut audio_sample_rate: Option<f64> = None;
+    let mut audio_channels: Option<i32> = None;
 
     for stream in ffprobe_output.streams {
         if let Some(frame_rate) = stream.frame_rate.into_inner() {
@@ -665,6 +685,8 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
 
         if *stream.codec_type == "video" {
             video_stream_count += 1;
+            width = width.or(stream.width.into_inner());
+            height = height.or(stream.height.into_inner());
             video_codec_name = video_codec_name.or(stream.codec_name.into_inner());
             video_codec_long_name = video_codec_long_name.or(stream.codec_long_name.into_inner());
             if let Some(bit_rate) = stream.bit_rate.into_inner() {
@@ -676,6 +698,18 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
                 video_bit_rate_max = video_bit_rate_max
                     .map(|b| b.max(bit_rate))
                     .or(Some(bit_rate));
+            }
+            if video_duration_secs.is_none()
+                && let Some(duration) = stream.duration.into_inner()
+            {
+                match duration.parse::<f32>() {
+                    Ok(duration) => video_duration_secs = Some(duration),
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to parse video stream duration '{duration}' from ffprobe output for {object_url}: {e}"
+                        );
+                    }
+                }
             }
         } else if *stream.codec_type == "audio" {
             audio_stream_count += 1;
@@ -691,8 +725,38 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
                     .map(|b| b.max(bit_rate))
                     .or(Some(bit_rate));
             }
+            if audio_stream_count == 1 {
+                audio_channels = stream.channels.into_inner();
+
+                if let Some(sample_rate) = stream.sample_rate.into_inner() {
+                    match sample_rate.parse::<f64>() {
+                        Ok(sample_rate) => audio_sample_rate = Some(sample_rate),
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to parse audio sample rate '{sample_rate}' from ffprobe output for {object_url}: {e}"
+                            );
+                        }
+                    }
+                }
+            }
+            if audio_duration_secs.is_none()
+                && let Some(duration) = stream.duration.into_inner()
+            {
+                match duration.parse::<f32>() {
+                    Ok(duration) => audio_duration_secs = Some(duration),
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to parse audio stream duration '{duration}' from ffprobe output for {object_url}: {e}"
+                        );
+                    }
+                }
+            }
         }
     }
+
+    duration_secs = duration_secs
+        .or(video_duration_secs)
+        .or(audio_duration_secs);
 
     Ok(FfprobeMediaMetadata {
         format_name: Some(format_name),
@@ -700,6 +764,8 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         size: Some(size),
         bit_rate,
         duration_secs,
+        width,
+        height,
         video_stream_count,
         video_codec_name,
         video_codec_long_name,
@@ -709,6 +775,8 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
         audio_codec_name,
         audio_codec_long_name,
         audio_bit_rate_max,
+        audio_sample_rate,
+        audio_channels,
         ffprobe_output_str: Some(ffprobe_output_str),
         ffprobe_tags: ffprobe_output.format.tags,
     })
