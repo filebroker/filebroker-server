@@ -39,7 +39,8 @@ impl HlsOutputStream {
 
     pub fn stream_mime_type(&self) -> &'static str {
         match self {
-            Self::Video(_) | Self::Audio(_) => "video/mp2t",
+            Self::Video(_) => "video/mp4",
+            Self::Audio(_) => "audio/mp4",
             Self::Subtitle(_) => "text/vtt",
         }
     }

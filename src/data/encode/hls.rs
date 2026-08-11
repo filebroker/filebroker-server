@@ -315,7 +315,7 @@ pub async fn generate_hls_playlist(
     transcode_args.push(String::from("-hls_flags"));
     transcode_args.push(String::from("independent_segments+single_file"));
     transcode_args.push(String::from("-hls_segment_type"));
-    transcode_args.push(String::from("mpegts"));
+    transcode_args.push(String::from("fmp4"));
     transcode_args.push(String::from("-master_pl_name"));
     transcode_args.push(String::from("master.m3u8"));
     transcode_args.push(String::from("-var_stream_map"));
@@ -533,15 +533,13 @@ fn apply_video_transcode_args_and_spawn_output_reader(
         transcode_args.push(String::from("0"));
         transcode_args.push(format!("-keyint_min:v:{i}"));
         transcode_args.push(keyframe_interval.to_string());
-        transcode_args.push(String::from("-movflags"));
-        transcode_args.push(String::from("+faststart"));
 
         let output_reader_join_handle = spawn_hls_output_reader(
             fifo_dir,
             bucket.clone(),
             HlsOutputStream::Video(HlsStream {
                 stream_playlist: format!("{file_id}/stream_{i}.m3u8"),
-                stream_file: format!("{file_id}/stream_{i}.ts"),
+                stream_file: format!("{file_id}/stream_{i}.m4s"),
                 master_playlist: format!("{file_id}/master.m3u8"),
                 resolution: bitrate.resolution as i32,
                 x264_preset: String::from(preset),
@@ -619,7 +617,7 @@ fn apply_audio_transcode_args_and_spawn_output_reader(
                 bucket.clone(),
                 HlsOutputStream::Audio(HlsAudioStream {
                     stream_playlist: format!("{file_id}/stream_{variant_index}.m3u8"),
-                    stream_file: format!("{file_id}/stream_{variant_index}.ts"),
+                    stream_file: format!("{file_id}/stream_{variant_index}.m4s"),
                     master_playlist: format!("{file_id}/master.m3u8"),
                     source_stream_index: source_audio_stream.index,
                     language: source_audio_stream.tags.language.clone(),
@@ -662,8 +660,8 @@ async fn generate_hls_subtitle_outputs(
     let (subtitle_ffmpeg_completion_tx, subtitle_ffmpeg_completion_rx) =
         tokio::sync::watch::channel(FfmpegCompletion::Running);
 
-    let video_stream_path = format!("{file_id}/stream_0.ts");
-    let mpegts_timestamp = match async {
+    let video_stream_path = format!("{file_id}/stream_0.m4s");
+    let media_timestamp = match async {
         let video_stream_url = bucket.presign_get(&video_stream_path, 300, None).await?;
 
         let start_time_sec = probe::get_object_start_time(&video_stream_url).await?;
@@ -672,10 +670,10 @@ async fn generate_hls_subtitle_outputs(
     }
     .await
     {
-        Ok(mpegts_timestamp) => Some(mpegts_timestamp),
+        Ok(media_timestamp) => Some(media_timestamp),
         Err(error) => {
             log::warn!(
-                "HLS transcode for {file_id}: Failed to determine MPEG-TS start time for HLS subtitles, subtitles will be uploaded without X-TIMESTAMP-MAP: {error}"
+                "HLS transcode for {file_id}: Failed to determine HLS media start time for HLS subtitles, subtitles will be uploaded without X-TIMESTAMP-MAP: {error}"
             );
 
             None
@@ -743,7 +741,7 @@ async fn generate_hls_subtitle_outputs(
             bucket.clone(),
             hls_subtitle_stream,
             subtitle_playlist,
-            mpegts_timestamp,
+            media_timestamp,
             #[cfg(not(unix))]
             subtitle_ffmpeg_completion_rx.clone(),
         )?;
@@ -1301,7 +1299,7 @@ async fn delete_hls_transcode_objects(
 
     for video_index in 0..video_stream_count {
         delete_object(bucket, format!("{file_id}/stream_{video_index}.m3u8")).await;
-        delete_object(bucket, format!("{file_id}/stream_{video_index}.ts")).await;
+        delete_object(bucket, format!("{file_id}/stream_{video_index}.m4s")).await;
     }
 
     let audio_variant_offset = video_stream_count;
@@ -1310,7 +1308,7 @@ async fn delete_hls_transcode_objects(
         let variant_index = audio_variant_offset + audio_index;
 
         delete_object(bucket, format!("{file_id}/stream_{variant_index}.m3u8")).await;
-        delete_object(bucket, format!("{file_id}/stream_{variant_index}.ts")).await;
+        delete_object(bucket, format!("{file_id}/stream_{variant_index}.m4s")).await;
     }
 
     let subtitle_variant_offset = audio_variant_offset + audio_stream_count;
@@ -1506,14 +1504,8 @@ fn spawn_hls_subtitle_output_reader(
     bucket: Bucket,
     hls_subtitle_stream: HlsSubtitleStream,
     subtitle_playlist: m3u8_rs::MediaPlaylist,
-    mpegts_timestamp: Option<u64>,
-) -> Result<
-    (
-        std::path::PathBuf,
-        JoinHandle<Result<UploadedHlsStream, Error>>,
-    ),
-    Error,
-> {
+    media_timestamp: Option<u64>,
+) -> Result<(PathBuf, JoinHandle<Result<UploadedHlsStream, Error>>), Error> {
     let subtitle_pipe = fifo_dir.path().join(
         hls_subtitle_stream
             .stream_file
@@ -1530,7 +1522,7 @@ fn spawn_hls_subtitle_output_reader(
         bucket,
         hls_subtitle_stream,
         subtitle_playlist,
-        mpegts_timestamp,
+        media_timestamp,
         async { Ok(()) },
     )
 }
@@ -1541,7 +1533,7 @@ fn spawn_hls_subtitle_output_reader(
     bucket: Bucket,
     hls_subtitle_stream: HlsSubtitleStream,
     subtitle_playlist: m3u8_rs::MediaPlaylist,
-    mpegts_timestamp: Option<u64>,
+    media_timestamp: Option<u64>,
     ffmpeg_completion: tokio::sync::watch::Receiver<FfmpegCompletion>,
 ) -> Result<(PathBuf, JoinHandle<Result<UploadedHlsStream, Error>>), Error> {
     let subtitle_output_path = output_dir.path().join(
@@ -1557,7 +1549,7 @@ fn spawn_hls_subtitle_output_reader(
         bucket,
         hls_subtitle_stream,
         subtitle_playlist,
-        mpegts_timestamp,
+        media_timestamp,
         wait_for_ffmpeg(ffmpeg_completion),
     )
 }
@@ -1567,7 +1559,7 @@ fn spawn_hls_subtitle_output_reader_inner<F>(
     bucket: Bucket,
     hls_subtitle_stream: HlsSubtitleStream,
     subtitle_playlist: m3u8_rs::MediaPlaylist,
-    mpegts_timestamp: Option<u64>,
+    media_timestamp: Option<u64>,
     output_ready: F,
 ) -> Result<(PathBuf, JoinHandle<Result<UploadedHlsStream, Error>>), Error>
 where
@@ -1587,13 +1579,13 @@ where
         output_ready.await?;
 
         let subtitle_upload = async {
-            match mpegts_timestamp {
-                Some(mpegts_timestamp) => {
+            match media_timestamp {
+                Some(media_timestamp) => {
                     upload_timestamp_mapped_webvtt(
                         bucket.clone(),
                         &subtitle_output_path,
                         stream_file_target_path,
-                        mpegts_timestamp,
+                        media_timestamp,
                     )
                     .await
                 }
@@ -1685,7 +1677,7 @@ async fn upload_timestamp_mapped_webvtt(
     bucket: Bucket,
     file_path: impl AsRef<std::path::Path>,
     s3_path: String,
-    mpegts_timestamp: u64,
+    media_timestamp: u64,
 ) -> Result<S3UploadResult, Error> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
@@ -1725,7 +1717,7 @@ async fn upload_timestamp_mapped_webvtt(
     let replacement_header = format!(
         "WEBVTT{line_ending}\
          X-TIMESTAMP-MAP=LOCAL:00:00:00.000,\
-         MPEGTS:{mpegts_timestamp}{line_ending}"
+         MPEGTS:{media_timestamp}{line_ending}"
     );
 
     let header_reader = std::io::Cursor::new(replacement_header.into_bytes());

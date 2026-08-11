@@ -379,25 +379,23 @@ pub async fn get_presigned_hls_playlist_handler(
             Ok((_, mut pl)) => {
                 let mut presigned_url_map = HashMap::<String, String>::new();
                 for segment in pl.segments.iter_mut() {
-                    if presigned_url_map.contains_key(&segment.uri) {
-                        segment.uri = presigned_url_map[&segment.uri].clone();
-                    } else {
-                        let object_path = if let Some(last_slash) = object_key.rfind('/') {
-                            let dir = &object_key[..=last_slash];
-                            format!("{}{}", dir, segment.uri)
-                        } else {
-                            segment.uri.to_string()
-                        };
-                        let presigned_url = bucket
-                            .presign_get(&object_path, *PRESIGNED_GET_EXPIRATION_SECS, None)
-                            .await
-                            .map_err(Error::from)?;
-                        log::debug!(
-                            "Generated presigned URL for {object_key} segment {object_path}: {presigned_url}"
-                        );
-                        presigned_url_map.insert(segment.uri.clone(), presigned_url.clone());
-                        segment.uri = presigned_url;
+                    if let Some(map) = segment.map.as_mut() {
+                        presign_hls_media_uri(
+                            &bucket,
+                            object_key,
+                            &mut map.uri,
+                            &mut presigned_url_map,
+                        )
+                        .await?;
                     }
+
+                    presign_hls_media_uri(
+                        &bucket,
+                        object_key,
+                        &mut segment.uri,
+                        &mut presigned_url_map,
+                    )
+                    .await?;
                 }
 
                 let mut buff = Vec::with_capacity(object_response.bytes().len());
@@ -417,6 +415,41 @@ pub async fn get_presigned_hls_playlist_handler(
             Err(e) => Err(warp::reject::custom(Error::M3U8ParseError(e.to_string()))),
         }
     }
+}
+
+async fn presign_hls_media_uri(
+    bucket: &Bucket,
+    playlist_object_key: &str,
+    uri: &mut String,
+    presigned_url_map: &mut HashMap<String, String>,
+) -> Result<(), Error> {
+    let original_uri = uri.clone();
+
+    if let Some(presigned_url) = presigned_url_map.get(&original_uri) {
+        *uri = presigned_url.clone();
+        return Ok(());
+    }
+
+    let object_path = if let Some(last_slash) = playlist_object_key.rfind('/') {
+        let dir = &playlist_object_key[..=last_slash];
+        format!("{dir}{original_uri}")
+    } else {
+        original_uri.clone()
+    };
+
+    let presigned_url = bucket
+        .presign_get(&object_path, *PRESIGNED_GET_EXPIRATION_SECS, None)
+        .await
+        .map_err(Error::from)?;
+
+    log::debug!(
+        "Generated presigned URL for {playlist_object_key} media object {object_path}: {presigned_url}"
+    );
+
+    presigned_url_map.insert(original_uri, presigned_url.clone());
+    *uri = presigned_url;
+
+    Ok(())
 }
 
 #[derive(Deserialize, Validate)]
