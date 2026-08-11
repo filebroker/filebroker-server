@@ -10,6 +10,9 @@ To host the filebroker-client frontend it should be installed to `../filebroker-
 ## Dependencies
 
 * Requires [ffmpeg](https://trac.ffmpeg.org/wiki/CompilationGuide) to generate thumbnails and transcode media, make sure to enable webp using `--enable-libwebp`
+  * filebroker's [ffmpeg fork](https://github.com/filebroker/FFmpeg/tree/release/9.0) includes an improvement that writes 
+    fragment duration to HLS fMP4 fragments, preventing Chromium based browsers from treating them as a livestream with unknown duration,
+    which would enable low-delay mode with a much shallower decoded-frame buffer, causing high-bitrate content to stall frequently
 * Requires [exiftool](https://exiftool.org/) for file metadata extraction
 
 ## Setup
