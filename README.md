@@ -43,7 +43,7 @@ The following variables are available:
 
 `FILEBROKER_JWT_SECRET` (mandatory, u64): Secret unsigned 64 bit integer used to generate JWTs.
 
-`FILEBROKER_API_PORT` (mandatory, u16): Port on which to host the API server, changing this requires adjustments to the nginx configuration in `default.conf`.
+`FILEBROKER_API_PORT` (mandatory, u16): Port on which to host the API server, changing this requires adjustments to the nginx configuration.
 
 `FILEBROKER_MAX_DB_CONNECTIONS` (optional, u32): Maximum size of the DB connection pool, defaults to 25.
 

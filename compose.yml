@@ -1,0 +1,67 @@
+x-env-files: &env-files
+  - path: ./.env
+    required: false
+  - path: ./.env.secret
+    required: false
+  - path: ./.env.local
+    required: false
+
+services:
+  filebroker-db:
+    image: postgres:18
+    restart: unless-stopped
+
+    env_file: *env-files
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    volumes:
+      - postgres-data:/var/lib/postgresql
+
+  filebroker-server:
+    build:
+      context: .
+
+    restart: unless-stopped
+
+    env_file: *env-files
+
+    depends_on:
+      filebroker-db:
+        condition: service_healthy
+
+  nginx:
+    build:
+      context: ../filebroker-client
+
+    restart: unless-stopped
+
+    env_file: *env-files
+
+    environment:
+      FILEBROKER_API_UPSTREAMS: "server filebroker-server:8080 resolve;"
+
+    depends_on:
+      - filebroker-server
+
+    ports:
+      - "8080:80"
+
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - thumb-cache:/data/nginx/thumb_cache
+
+volumes:
+  postgres-data:
+  thumb-cache:
