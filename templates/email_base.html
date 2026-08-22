@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<body style="margin: 0; padding: 0; background-color: #181818; font-family: Arial, sans-serif; color: #e8e8e8;">
+<table
+    role="presentation"
+    width="100%"
+    cellspacing="0"
+    cellpadding="0"
+    border="0"
+    style="background-color: #181818; padding: 32px 16px;"
+>
+    <tr>
+        <td align="center">
+            <table
+                role="presentation"
+                width="100%"
+                cellspacing="0"
+                cellpadding="0"
+                border="0"
+                style="max-width: 600px; background-color: #161b22; border-radius: 8px;"
+            >
+                <tr>
+                    <td style="padding: 24px 32px 0 32px;">
+                        <img
+                            src="{{ host }}logo192.png"
+                            alt="filebroker"
+                            width="140"
+                            style="display: block; border: 0;"
+                        >
+                    </td>
+                </tr>
+
+                <tr>
+                    <td style="padding: 24px 32px 32px 32px;">
+                        {% block content %}{% endblock content %}
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+</table>
+</body>
+</html>

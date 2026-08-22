@@ -10,8 +10,8 @@ use crate::user_group::{
 };
 use crate::util::OptFmt;
 use crate::{
-    CERT_PATH, HTTP_SHUTDOWN_TIMEOUT, KEY_PATH, PG_SSL_CERT_PATH, PORT, auth, broker, data, error,
-    perms, post, query, tag, task, user_group,
+    CERT_PATH, HOST_BASE_PATH, HTTP_SHUTDOWN_TIMEOUT, KEY_PATH, PG_SSL_CERT_PATH, PORT, auth,
+    broker, data, error, perms, post, query, tag, task, user_group,
 };
 use futures::{Stream, StreamExt, TryFuture, stream};
 use hyper_util::rt::TokioExecutor;
@@ -872,6 +872,23 @@ pub fn build_warp_filter() -> impl Filter<Extract = (impl Reply,), Error = warp:
     );
 
     filter
+}
+
+pub fn get_host_url<S: ToString>(fallback: S) -> String {
+    let mut host = HOST_BASE_PATH
+        .clone()
+        .unwrap_or_else(|| fallback.to_string());
+    if !host.starts_with("http://") && !host.starts_with("https://") {
+        if CERT_PATH.is_some() {
+            host.insert_str(0, "https://");
+        } else {
+            host.insert_str(0, "http://");
+        }
+    }
+    if !host.ends_with('/') {
+        host.push('/');
+    }
+    host
 }
 
 #[cfg(unix)]

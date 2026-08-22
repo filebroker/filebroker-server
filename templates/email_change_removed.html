@@ -1,3 +1,6 @@
-{% import "macros.html" as macros %}
-<h2>Hi, {{ macros::display_user(user = recipient) }}</h2>
+{% extends "email_base.html" %}
+
+{% block content %}
+<h2>Hi, {{<display_user user={recipient}/>}}</h2>
 <p>Your Email address has been {% if new_email_address %}changed to {{new_email_address}} {% else %}removed {% endif %}and this address is no longer associated with your account.</p>
+{% endblock content %}

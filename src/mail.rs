@@ -16,6 +16,7 @@ use rusty_pool::ThreadPool;
 use tera::Tera;
 
 use crate::model::User;
+use crate::server::get_host_url;
 
 lazy_static! {
     pub static ref MAIL_WORKER_POOL: ThreadPool = rusty_pool::Builder::new()
@@ -40,10 +41,10 @@ lazy_static! {
     pub static ref DKIM_KEY: Option<Result<String, io::Error>> =
         (*DKIM_KEY_PATH).as_ref().map(fs::read_to_string);
     pub static ref TEMPLATES: Tera = {
-        match Tera::new("templates/*.html") {
-            Ok(tera) => tera,
-            Err(e) => panic!("Could not load tera templates: '{e}'"),
-        }
+        let mut tera = Tera::new();
+        tera.load_from_glob("templates/*.html")
+            .unwrap_or_else(|e| panic!("Could not load tera templates: '{e}'"));
+        tera
     };
     pub static ref MAILS_PER_HOUR_LIMIT: u32 = std::env::var("FILEBROKER_MAILS_PER_HOUR_LIMIT")
         .map(|limit| limit
@@ -77,6 +78,10 @@ pub fn send_mail(
     {
         log::error!("Cannot send mail due to incomplete configuration");
         return;
+    }
+
+    if !context.contains_key("host") {
+        context.insert("host", &get_host_url("https://filebroker.io/"));
     }
 
     MAIL_WORKER_POOL.execute(move || {

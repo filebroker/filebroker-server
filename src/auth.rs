@@ -23,7 +23,7 @@ use warp::{
 use zxcvbn::zxcvbn;
 
 use crate::{
-    CERT_PATH, HOST_BASE_PATH, acquire_db_connection,
+    acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension, QueryDsl},
     error::{Error, TransactionRuntimeError},
     mail,
@@ -37,6 +37,7 @@ use crate::{
         email_confirmation_token, one_time_password, refresh_token, registered_user,
         user_preferences,
     },
+    server::get_host_url,
 };
 
 mod captcha;
@@ -803,19 +804,7 @@ fn prepare_email_confirmation_context(
     authority: &Authority,
 ) {
     context.insert("email_confirmation_token", email_confirmation_token);
-    let mut host = HOST_BASE_PATH
-        .clone()
-        .unwrap_or_else(|| authority.to_string());
-    if !host.starts_with("http://") && !host.starts_with("https://") {
-        if CERT_PATH.is_some() {
-            host.insert_str(0, "https://");
-        } else {
-            host.insert_str(0, "http://");
-        }
-    }
-    if !host.ends_with('/') {
-        host.push('/');
-    }
+    let mut host = get_host_url(authority);
     context.insert("host", &host);
     host.push_str("confirm-email/");
     host.push_str(&email_confirmation_token.uuid.to_string());
