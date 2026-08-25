@@ -813,8 +813,13 @@ pub fn build_warp_filter() -> impl Filter<Extract = (impl Reply,), Error = warp:
         .or(change_user_group_membership_route)
         .or(revoke_user_group_invite_route);
 
-    let routes = auth_routes
-        .boxed()
+    let health_route = warp::path("health")
+        .and(warp::path::end())
+        .and(warp::get())
+        .map(warp::reply);
+
+    let routes = health_route
+        .or(auth_routes.boxed())
         .or(user_routes.boxed())
         .or(query_routes.boxed())
         .or(post_routes.boxed())
