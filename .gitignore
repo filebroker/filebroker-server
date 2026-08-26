@@ -4,3 +4,4 @@
 /filebroker-server.iml
 /.env.local
 /.env.secret
+/.env.docker

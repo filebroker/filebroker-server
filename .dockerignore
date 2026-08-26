@@ -1,2 +1,5 @@
 target
 .git
+logs
+.idea
+.DS_Store

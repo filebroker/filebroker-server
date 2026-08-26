@@ -32,10 +32,21 @@ FILEBROKER_DATABASE_URL=postgres://postgres:postgres@localhost:5432/filebroker
 FILEBROKER_JWT_SECRET=2344654432423
 ```
 
-You may also create a `.env.local` file to override variables for local development.
-Env files are loaded in the following order: 1. `.env.local` 2. `.env.secret` 3. `.env` and the variables present in these
+For the postgres container used by local docker deployments, these are also required
+
+```text
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+POSTGRES_DB=filebroker
+```
+
+You may also create a `.env.local` file to override variables for local development and a `.env.docker` file for docker-specific overrides
+to make switching between docker and bare metal easier for local development easier (e.g. using `FILEBROKER_DATABASE_URL=postgres://postgres:postgres@localhost:5432/filebroker` in `.env.secret`
+for bare metal postgres and `FILEBROKER_DATABASE_URL=postgres://postgres:postgres@filebroker-db:5432/filebroker` in `.env.docker` for the postgres docker container hostname).
+Env files are loaded in the following order: 1. `.env.docker` (only for docker) 2. `.env.local` 3. `.env.secret` 4. `.env` and the variables present in these
 files do not override existing variables, meaning the first occurrence of the variable is applied as long as the variable
-does not already exist in the system (e.g. when set via CLI).
+does not already exist in the process environment (e.g. when set via CLI or injected into the process env by docker). Docker compose
+lists the files in opposite order because it overrides existing variables instead and writes them to the process environment.
 
 The following variables are available:
 

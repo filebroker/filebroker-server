@@ -25,9 +25,13 @@ RUN curl -fsSL \
         "https://github.com/filebroker/FFmpeg/releases/download/${FFMPEG_VERSION}/install.sh" \
         -o /tmp/install-ffmpeg.sh && \
     chmod +x /tmp/install-ffmpeg.sh && \
-    /tmp/install-ffmpeg.sh
+    /tmp/install-ffmpeg.sh && \
+    rm /tmp/install-ffmpeg.sh
 
 USER root
+
+RUN rm -f /etc/sudoers.d/ffmpeg-installer && \
+    userdel --remove ffmpeg-installer
 
 ###################################
 # filebroker-server dependencies. #

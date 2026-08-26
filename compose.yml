@@ -1,9 +1,13 @@
+name: filebroker
+
 x-env-files: &env-files
   - path: ./.env
     required: false
   - path: ./.env.secret
     required: false
   - path: ./.env.local
+    required: false
+  - path: ./.env.docker
     required: false
 
 services:
@@ -15,10 +19,8 @@ services:
 
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
-        ]
+        - CMD-SHELL
+        - 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"'
       interval: 5s
       timeout: 5s
       retries: 15
@@ -31,8 +33,22 @@ services:
       context: .
 
     restart: unless-stopped
+    stop_grace_period: 4h
 
     env_file: *env-files
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl --fail --silent "http://127.0.0.1:$${FILEBROKER_API_PORT}/health" > /dev/null'
+      start_period: 30m
+      start_interval: 5s
+      interval: 30s
+      timeout: 2s
+      retries: 3
+
+    volumes:
+      - ./logs/docker:/opt/filebroker-server/logs
 
     depends_on:
       filebroker-db:
@@ -47,10 +63,12 @@ services:
     env_file: *env-files
 
     environment:
-      FILEBROKER_API_UPSTREAMS: "server filebroker-server:8080 resolve;"
+      FILEBROKER_API_UPSTREAMS: >-
+        server filebroker-server:${FILEBROKER_API_PORT:-8080} resolve;
 
     depends_on:
-      - filebroker-server
+      filebroker-server:
+        condition: service_healthy
 
     ports:
       - "8080:80"

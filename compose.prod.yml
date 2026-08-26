@@ -1,3 +1,5 @@
+name: filebroker
+
 x-env-files: &env-files
   - path: ./.env
     required: false
@@ -5,19 +7,49 @@ x-env-files: &env-files
     required: false
   - path: ./.env.local
     required: false
+  - path: ./.env.docker
+    required: false
 
 services:
   filebroker-server-castor:
     image: ghcr.io/filebroker/filebroker-server:latest
     restart: unless-stopped
+    stop_grace_period: 4h
 
     env_file: *env-files
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl --fail --silent "http://127.0.0.1:$${FILEBROKER_API_PORT}/health" > /dev/null'
+      start_period: 30m
+      start_interval: 5s
+      interval: 30s
+      timeout: 2s
+      retries: 3
+
+    volumes:
+      - ./logs/castor:/opt/filebroker-server/logs
 
   filebroker-server-pollux:
     image: ghcr.io/filebroker/filebroker-server:latest
     restart: unless-stopped
+    stop_grace_period: 4h
 
     env_file: *env-files
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl --fail --silent "http://127.0.0.1:$${FILEBROKER_API_PORT}/health" > /dev/null'
+      start_period: 30m
+      start_interval: 5s
+      interval: 30s
+      timeout: 2s
+      retries: 3
+
+    volumes:
+      - ./logs/pollux:/opt/filebroker-server/logs
 
   nginx:
     image: ghcr.io/filebroker/filebroker-client:latest
@@ -27,12 +59,14 @@ services:
 
     environment:
       FILEBROKER_API_UPSTREAMS: >-
-        server filebroker-server-castor:8080 resolve;
-        server filebroker-server-pollux:8080 resolve;
+        server filebroker-server-castor:${FILEBROKER_API_PORT:-8080} resolve;
+        server filebroker-server-pollux:${FILEBROKER_API_PORT:-8080} resolve;
 
     depends_on:
-      - filebroker-server-castor
-      - filebroker-server-pollux
+      filebroker-server-castor:
+        condition: service_healthy
+      filebroker-server-pollux:
+        condition: service_healthy
 
     ports:
       - "127.0.0.1:8080:80"
