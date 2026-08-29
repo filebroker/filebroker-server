@@ -15,7 +15,29 @@ To host the filebroker-client frontend it should be installed to `../filebroker-
     which would enable low-delay mode with a much shallower decoded-frame buffer, causing high-bitrate content to stall frequently
 * Requires [exiftool](https://exiftool.org/) for file metadata extraction
 
-## Setup
+## Run
+(check out the Setup & Configuration section for required configurations first)
+
+#### Run the whole project in docker:
+```bash
+./scripts/deploy-local.sh --local-db
+```
+or if you bring your own postgres instance:
+```bash
+./scripts/deploy-local.sh
+```
+
+#### Or, if you just want to run the server bare-metal and run the web client separately
+```bash
+cargo run --features auto_migration
+```
+(the auto_migration feature runs DB migrations on startup)
+
+Note that CORS is only enabled when running debug binaries (meaning `cargo run --release` won't enable CORS), which is
+required when running the client locally without a reverse proxy. For local development, run the debug binaries of the
+server with `cargo run` and start the client with `npm run start`, or run in docker to get a full local deployment.
+
+## Setup & Configuration
 
 The configuration is managed via the `.env` files, which need to be created in the root directory of this project:
 
