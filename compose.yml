@@ -14,6 +14,8 @@ services:
   filebroker-db:
     image: postgres:18
     restart: unless-stopped
+    profiles:
+      - local-db
 
     env_file: *env-files
 
@@ -53,6 +55,10 @@ services:
     depends_on:
       filebroker-db:
         condition: service_healthy
+        required: false
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   nginx:
     build:

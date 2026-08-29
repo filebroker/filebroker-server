@@ -31,6 +31,9 @@ services:
     volumes:
       - ./logs/castor:/opt/filebroker-server/logs
 
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   filebroker-server-pollux:
     image: ghcr.io/filebroker/filebroker-server:latest
     restart: unless-stopped
@@ -50,6 +53,9 @@ services:
 
     volumes:
       - ./logs/pollux:/opt/filebroker-server/logs
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   nginx:
     image: ghcr.io/filebroker/filebroker-client:latest
