@@ -14,6 +14,11 @@ limit_conn_status 429;
 
 resolver 127.0.0.11 valid=10s ipv6=off;
 
+map $http_x_forwarded_proto $filebroker_forwarded_proto {
+    ""      $scheme;
+    default $http_x_forwarded_proto;
+}
+
 upstream filebroker_api {
     zone filebroker_api 64k;
 
@@ -25,6 +30,17 @@ server {
     listen [::]:80;
 
     server_name _;
+
+    # Requests arrive from the host edge nginx through Docker's network.
+    # Trust its X-Real-IP value so nginx's $remote_addr / $binary_remote_addr represent the actual client.
+    set_real_ip_from 127.0.0.1;
+    set_real_ip_from 172.16.0.0/12;
+    real_ip_header X-Real-IP;
+
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $filebroker_forwarded_proto;
 
     access_log /var/log/nginx/access.log;
 
