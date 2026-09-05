@@ -27,6 +27,7 @@ pub struct Attribute {
     pub return_type: Type,
     pub allow_sorting: bool,
     pub nullable: bool,
+    pub secondary_ordering_attributes: Option<Vec<&'static str>>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -124,6 +125,7 @@ impl Scope {
                         return_type: Type::Number,
                         allow_sorting: true,
                         nullable: false,
+                        secondary_ordering_attributes: None,
                     }),
                 );
                 post_attributes
@@ -472,7 +474,8 @@ lazy_static! {
                 selection_expression: String::from("post.creation_timestamp"),
                 return_type: Type::DateTime,
                 allow_sorting: true,
-                nullable: false
+                nullable: false,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -483,6 +486,7 @@ lazy_static! {
                 return_type: Type::String,
                 allow_sorting: true,
                 nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -492,7 +496,8 @@ lazy_static! {
                 selection_expression: String::from("post.fk_create_user"),
                 return_type: Type::Number,
                 allow_sorting: true,
-                nullable: false
+                nullable: false,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -502,7 +507,8 @@ lazy_static! {
                 selection_expression: String::from("post.description"),
                 return_type: Type::String,
                 allow_sorting: false,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -512,7 +518,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.mime_type"),
                 return_type: Type::String,
                 allow_sorting: false,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -522,7 +529,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.artist"),
                 return_type: Type::String,
                 allow_sorting: true,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: Some(vec!["album", "disc", "track"]),
             })
         ),
         (
@@ -532,7 +540,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.album"),
                 return_type: Type::String,
                 allow_sorting: true,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: Some(vec!["disc", "track"]),
             })
         ),
         (
@@ -542,7 +551,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.composer"),
                 return_type: Type::String,
                 allow_sorting: false,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -552,7 +562,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.genre"),
                 return_type: Type::String,
                 allow_sorting: false,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -562,7 +573,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.date"),
                 return_type: Type::DateTime,
                 allow_sorting: true,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -572,7 +584,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.duration"),
                 return_type: Type::Interval,
                 allow_sorting: true,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -582,7 +595,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.track_number"),
                 return_type: Type::Number,
                 allow_sorting: true,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -592,7 +606,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.disc_number"),
                 return_type: Type::Number,
                 allow_sorting: true,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: Some(vec!["track"]),
             })
         ),
         (
@@ -602,7 +617,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.width"),
                 return_type: Type::Number,
                 allow_sorting: true,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: Some(vec!["height"]),
             })
         ),
         (
@@ -612,7 +628,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.height"),
                 return_type: Type::Number,
                 allow_sorting: true,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: Some(vec!["width"]),
             })
         ),
         (
@@ -622,7 +639,8 @@ lazy_static! {
                 selection_expression: String::from("s3_object_metadata.size"),
                 return_type: Type::Number,
                 allow_sorting: true,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -632,7 +650,8 @@ lazy_static! {
                 selection_expression: String::from("post_s3_object.fk_broker"),
                 return_type: Type::Number,
                 allow_sorting: false,
-                nullable: false
+                nullable: false,
+                secondary_ordering_attributes: None,
             })
         ),
     ]);
@@ -644,7 +663,8 @@ lazy_static! {
                 selection_expression: String::from("post_collection.creation_timestamp"),
                 return_type: Type::DateTime,
                 allow_sorting: true,
-                nullable: false
+                nullable: false,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -655,6 +675,7 @@ lazy_static! {
                 return_type: Type::String,
                 allow_sorting: true,
                 nullable: true,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -664,7 +685,8 @@ lazy_static! {
                 selection_expression: String::from("post_collection.fk_create_user"),
                 return_type: Type::Number,
                 allow_sorting: true,
-                nullable: false
+                nullable: false,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -674,7 +696,8 @@ lazy_static! {
                 selection_expression: String::from("post_collection.description"),
                 return_type: Type::String,
                 allow_sorting: false,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         )
     ]);
@@ -686,7 +709,8 @@ lazy_static! {
                 selection_expression: String::from("user_group.creation_timestamp"),
                 return_type: Type::DateTime,
                 allow_sorting: true,
-                nullable: false
+                nullable: false,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -697,6 +721,7 @@ lazy_static! {
                 return_type: Type::String,
                 allow_sorting: true,
                 nullable: false,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -706,7 +731,8 @@ lazy_static! {
                 selection_expression: String::from("user_group.fk_owner"),
                 return_type: Type::Number,
                 allow_sorting: false,
-                nullable: false
+                nullable: false,
+                secondary_ordering_attributes: None,
             })
         ),
         (
@@ -716,7 +742,8 @@ lazy_static! {
                 selection_expression: String::from("user_group.description"),
                 return_type: Type::String,
                 allow_sorting: false,
-                nullable: true
+                nullable: true,
+                secondary_ordering_attributes: None,
             })
         )
     ]);
@@ -919,6 +946,36 @@ fn accept_sort_modifier_arguments(
                     &direction_arg.node_type
                 ),
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::query::compiler::dict::Scope;
+
+    #[test]
+    fn verify_secondary_ordering_attribute_references() {
+        verify_scope_attributes(&Scope::Post);
+        verify_scope_attributes(&Scope::Collection);
+        verify_scope_attributes(&Scope::CollectionItem { collection_pk: 1 });
+        verify_scope_attributes(&Scope::UserGroup);
+    }
+
+    fn verify_scope_attributes(scope: &Scope) {
+        let attributes = scope.get_attributes();
+
+        for (name, attribute) in &attributes {
+            for secondary_name in attribute.secondary_ordering_attributes.iter().flatten() {
+                let secondary_attribute = attributes.get(secondary_name).unwrap_or_else(|| {
+                    panic!("Attribute {name} in scope {scope:?} references non-existent secondary ordering attribute {secondary_name}")
+                });
+
+                assert_eq!(
+                    attribute.table, secondary_attribute.table,
+                    "Attribute {name} in scope {scope:?} references secondary ordering attribute {secondary_name} from a different table"
+                );
+            }
         }
     }
 }

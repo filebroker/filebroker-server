@@ -1,0 +1,429 @@
+-- Remove multi-attribute sort indexes from post.
+DROP INDEX post_creation_timestamp_desc_fk_create_user_desc_idx;
+DROP INDEX post_creation_timestamp_desc_fk_create_user_idx;
+DROP INDEX post_creation_timestamp_desc_title_desc_idx;
+DROP INDEX post_creation_timestamp_desc_title_idx;
+DROP INDEX post_creation_timestamp_fk_create_user_desc_idx;
+DROP INDEX post_creation_timestamp_fk_create_user_idx;
+DROP INDEX post_creation_timestamp_title_desc_idx;
+DROP INDEX post_creation_timestamp_title_idx;
+DROP INDEX post_fk_create_user_creation_timestamp_desc_idx;
+DROP INDEX post_fk_create_user_creation_timestamp_idx;
+DROP INDEX post_fk_create_user_desc_creation_timestamp_desc_idx;
+DROP INDEX post_fk_create_user_desc_creation_timestamp_idx;
+DROP INDEX post_fk_create_user_desc_title_desc_idx;
+DROP INDEX post_fk_create_user_desc_title_idx;
+DROP INDEX post_fk_create_user_title_desc_idx;
+DROP INDEX post_fk_create_user_title_idx;
+DROP INDEX post_title_creation_timestamp_desc_idx;
+DROP INDEX post_title_creation_timestamp_idx;
+DROP INDEX post_title_desc_creation_timestamp_desc_idx;
+DROP INDEX post_title_desc_creation_timestamp_idx;
+DROP INDEX post_title_desc_fk_create_user_desc_idx;
+DROP INDEX post_title_desc_fk_create_user_idx;
+DROP INDEX post_title_fk_create_user_desc_idx;
+DROP INDEX post_title_fk_create_user_idx;
+
+
+-- Remove multi-attribute sort indexes from post_collection.
+DROP INDEX post_collection_creation_timestamp_desc_fk_create_user_desc_idx;
+DROP INDEX post_collection_creation_timestamp_desc_fk_create_user_idx;
+DROP INDEX post_collection_creation_timestamp_desc_title_desc_idx;
+DROP INDEX post_collection_creation_timestamp_desc_title_idx;
+DROP INDEX post_collection_creation_timestamp_fk_create_user_desc_idx;
+DROP INDEX post_collection_creation_timestamp_fk_create_user_idx;
+DROP INDEX post_collection_creation_timestamp_title_desc_idx;
+DROP INDEX post_collection_creation_timestamp_title_idx;
+DROP INDEX post_collection_fk_create_user_creation_timestamp_desc_idx;
+DROP INDEX post_collection_fk_create_user_creation_timestamp_idx;
+DROP INDEX post_collection_fk_create_user_desc_creation_timestamp_desc_idx;
+DROP INDEX post_collection_fk_create_user_desc_creation_timestamp_idx;
+DROP INDEX post_collection_fk_create_user_desc_title_desc_idx;
+DROP INDEX post_collection_fk_create_user_desc_title_idx;
+DROP INDEX post_collection_fk_create_user_title_desc_idx;
+DROP INDEX post_collection_fk_create_user_title_idx;
+DROP INDEX post_collection_title_creation_timestamp_desc_idx;
+DROP INDEX post_collection_title_creation_timestamp_idx;
+DROP INDEX post_collection_title_desc_creation_timestamp_desc_idx;
+DROP INDEX post_collection_title_desc_creation_timestamp_idx;
+DROP INDEX post_collection_title_desc_fk_create_user_desc_idx;
+DROP INDEX post_collection_title_desc_fk_create_user_idx;
+DROP INDEX post_collection_title_fk_create_user_desc_idx;
+DROP INDEX post_collection_title_fk_create_user_idx;
+
+-- Ensure ascending post_collection uploader sorting includes the deterministic pk DESC fallback.
+DROP INDEX post_collection_fk_create_user_idx;
+CREATE INDEX post_collection_fk_create_user_idx ON post_collection(fk_create_user, pk DESC);
+
+-- Remove multi-attribute sort indexes from user_group.
+DROP INDEX user_group_creation_timestamp_desc_name_desc_idx;
+DROP INDEX user_group_creation_timestamp_desc_name_idx;
+DROP INDEX user_group_creation_timestamp_name_desc_idx;
+DROP INDEX user_group_creation_timestamp_name_idx;
+DROP INDEX user_group_name_creation_timestamp_desc_idx;
+DROP INDEX user_group_name_creation_timestamp_idx;
+DROP INDEX user_group_name_desc_creation_timestamp_desc_idx;
+DROP INDEX user_group_name_desc_creation_timestamp_idx;
+
+-- Remove multi-attribute sort indexes from s3_object_metadata.
+DROP INDEX s3_object_metadata_album_artist_desc_idx;
+DROP INDEX s3_object_metadata_album_artist_idx;
+DROP INDEX s3_object_metadata_album_date_desc_idx;
+DROP INDEX s3_object_metadata_album_date_idx;
+DROP INDEX s3_object_metadata_album_desc_artist_desc_idx;
+DROP INDEX s3_object_metadata_album_desc_artist_idx;
+DROP INDEX s3_object_metadata_album_desc_date_desc_idx;
+DROP INDEX s3_object_metadata_album_desc_date_idx;
+DROP INDEX s3_object_metadata_album_desc_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_album_desc_disc_number_idx;
+DROP INDEX s3_object_metadata_album_desc_duration_desc_idx;
+DROP INDEX s3_object_metadata_album_desc_duration_idx;
+DROP INDEX s3_object_metadata_album_desc_height_desc_idx;
+DROP INDEX s3_object_metadata_album_desc_height_idx;
+DROP INDEX s3_object_metadata_album_desc_size_desc_idx;
+DROP INDEX s3_object_metadata_album_desc_size_idx;
+DROP INDEX s3_object_metadata_album_desc_track_number_desc_idx;
+DROP INDEX s3_object_metadata_album_desc_track_number_idx;
+DROP INDEX s3_object_metadata_album_desc_width_desc_idx;
+DROP INDEX s3_object_metadata_album_desc_width_idx;
+DROP INDEX s3_object_metadata_album_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_album_disc_number_idx;
+DROP INDEX s3_object_metadata_album_duration_desc_idx;
+DROP INDEX s3_object_metadata_album_duration_idx;
+DROP INDEX s3_object_metadata_album_height_desc_idx;
+DROP INDEX s3_object_metadata_album_height_idx;
+DROP INDEX s3_object_metadata_album_size_desc_idx;
+DROP INDEX s3_object_metadata_album_size_idx;
+DROP INDEX s3_object_metadata_album_track_number_desc_idx;
+DROP INDEX s3_object_metadata_album_track_number_idx;
+DROP INDEX s3_object_metadata_album_width_desc_idx;
+DROP INDEX s3_object_metadata_album_width_idx;
+DROP INDEX s3_object_metadata_artist_album_desc_idx;
+DROP INDEX s3_object_metadata_artist_album_idx;
+DROP INDEX s3_object_metadata_artist_date_desc_idx;
+DROP INDEX s3_object_metadata_artist_date_idx;
+DROP INDEX s3_object_metadata_artist_desc_album_desc_idx;
+DROP INDEX s3_object_metadata_artist_desc_album_idx;
+DROP INDEX s3_object_metadata_artist_desc_date_desc_idx;
+DROP INDEX s3_object_metadata_artist_desc_date_idx;
+DROP INDEX s3_object_metadata_artist_desc_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_artist_desc_disc_number_idx;
+DROP INDEX s3_object_metadata_artist_desc_duration_desc_idx;
+DROP INDEX s3_object_metadata_artist_desc_duration_idx;
+DROP INDEX s3_object_metadata_artist_desc_height_desc_idx;
+DROP INDEX s3_object_metadata_artist_desc_height_idx;
+DROP INDEX s3_object_metadata_artist_desc_size_desc_idx;
+DROP INDEX s3_object_metadata_artist_desc_size_idx;
+DROP INDEX s3_object_metadata_artist_desc_track_number_desc_idx;
+DROP INDEX s3_object_metadata_artist_desc_track_number_idx;
+DROP INDEX s3_object_metadata_artist_desc_width_desc_idx;
+DROP INDEX s3_object_metadata_artist_desc_width_idx;
+DROP INDEX s3_object_metadata_artist_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_artist_disc_number_idx;
+DROP INDEX s3_object_metadata_artist_duration_desc_idx;
+DROP INDEX s3_object_metadata_artist_duration_idx;
+DROP INDEX s3_object_metadata_artist_height_desc_idx;
+DROP INDEX s3_object_metadata_artist_height_idx;
+DROP INDEX s3_object_metadata_artist_size_desc_idx;
+DROP INDEX s3_object_metadata_artist_size_idx;
+DROP INDEX s3_object_metadata_artist_track_number_desc_idx;
+DROP INDEX s3_object_metadata_artist_track_number_idx;
+DROP INDEX s3_object_metadata_artist_width_desc_idx;
+DROP INDEX s3_object_metadata_artist_width_idx;
+DROP INDEX s3_object_metadata_date_album_desc_idx;
+DROP INDEX s3_object_metadata_date_album_idx;
+DROP INDEX s3_object_metadata_date_artist_desc_idx;
+DROP INDEX s3_object_metadata_date_artist_idx;
+DROP INDEX s3_object_metadata_date_desc_album_desc_idx;
+DROP INDEX s3_object_metadata_date_desc_album_idx;
+DROP INDEX s3_object_metadata_date_desc_artist_desc_idx;
+DROP INDEX s3_object_metadata_date_desc_artist_idx;
+DROP INDEX s3_object_metadata_date_desc_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_date_desc_disc_number_idx;
+DROP INDEX s3_object_metadata_date_desc_duration_desc_idx;
+DROP INDEX s3_object_metadata_date_desc_duration_idx;
+DROP INDEX s3_object_metadata_date_desc_height_desc_idx;
+DROP INDEX s3_object_metadata_date_desc_height_idx;
+DROP INDEX s3_object_metadata_date_desc_size_desc_idx;
+DROP INDEX s3_object_metadata_date_desc_size_idx;
+DROP INDEX s3_object_metadata_date_desc_track_number_desc_idx;
+DROP INDEX s3_object_metadata_date_desc_track_number_idx;
+DROP INDEX s3_object_metadata_date_desc_width_desc_idx;
+DROP INDEX s3_object_metadata_date_desc_width_idx;
+DROP INDEX s3_object_metadata_date_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_date_disc_number_idx;
+DROP INDEX s3_object_metadata_date_duration_desc_idx;
+DROP INDEX s3_object_metadata_date_duration_idx;
+DROP INDEX s3_object_metadata_date_height_desc_idx;
+DROP INDEX s3_object_metadata_date_height_idx;
+DROP INDEX s3_object_metadata_date_size_desc_idx;
+DROP INDEX s3_object_metadata_date_size_idx;
+DROP INDEX s3_object_metadata_date_track_number_desc_idx;
+DROP INDEX s3_object_metadata_date_track_number_idx;
+DROP INDEX s3_object_metadata_date_width_desc_idx;
+DROP INDEX s3_object_metadata_date_width_idx;
+DROP INDEX s3_object_metadata_disc_number_album_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_album_idx;
+DROP INDEX s3_object_metadata_disc_number_artist_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_artist_idx;
+DROP INDEX s3_object_metadata_disc_number_date_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_date_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_album_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_album_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_artist_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_artist_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_date_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_date_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_duration_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_duration_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_height_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_height_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_size_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_size_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_track_number_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_track_number_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_width_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_width_idx;
+DROP INDEX s3_object_metadata_disc_number_duration_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_duration_idx;
+DROP INDEX s3_object_metadata_disc_number_height_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_height_idx;
+DROP INDEX s3_object_metadata_disc_number_size_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_size_idx;
+DROP INDEX s3_object_metadata_disc_number_track_number_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_track_number_idx;
+DROP INDEX s3_object_metadata_disc_number_width_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_width_idx;
+DROP INDEX s3_object_metadata_duration_album_desc_idx;
+DROP INDEX s3_object_metadata_duration_album_idx;
+DROP INDEX s3_object_metadata_duration_artist_desc_idx;
+DROP INDEX s3_object_metadata_duration_artist_idx;
+DROP INDEX s3_object_metadata_duration_date_desc_idx;
+DROP INDEX s3_object_metadata_duration_date_idx;
+DROP INDEX s3_object_metadata_duration_desc_album_desc_idx;
+DROP INDEX s3_object_metadata_duration_desc_album_idx;
+DROP INDEX s3_object_metadata_duration_desc_artist_desc_idx;
+DROP INDEX s3_object_metadata_duration_desc_artist_idx;
+DROP INDEX s3_object_metadata_duration_desc_date_desc_idx;
+DROP INDEX s3_object_metadata_duration_desc_date_idx;
+DROP INDEX s3_object_metadata_duration_desc_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_duration_desc_disc_number_idx;
+DROP INDEX s3_object_metadata_duration_desc_height_desc_idx;
+DROP INDEX s3_object_metadata_duration_desc_height_idx;
+DROP INDEX s3_object_metadata_duration_desc_size_desc_idx;
+DROP INDEX s3_object_metadata_duration_desc_size_idx;
+DROP INDEX s3_object_metadata_duration_desc_track_number_desc_idx;
+DROP INDEX s3_object_metadata_duration_desc_track_number_idx;
+DROP INDEX s3_object_metadata_duration_desc_width_desc_idx;
+DROP INDEX s3_object_metadata_duration_desc_width_idx;
+DROP INDEX s3_object_metadata_duration_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_duration_disc_number_idx;
+DROP INDEX s3_object_metadata_duration_height_desc_idx;
+DROP INDEX s3_object_metadata_duration_height_idx;
+DROP INDEX s3_object_metadata_duration_size_desc_idx;
+DROP INDEX s3_object_metadata_duration_size_idx;
+DROP INDEX s3_object_metadata_duration_track_number_desc_idx;
+DROP INDEX s3_object_metadata_duration_track_number_idx;
+DROP INDEX s3_object_metadata_duration_width_desc_idx;
+DROP INDEX s3_object_metadata_duration_width_idx;
+DROP INDEX s3_object_metadata_height_album_desc_idx;
+DROP INDEX s3_object_metadata_height_album_idx;
+DROP INDEX s3_object_metadata_height_artist_desc_idx;
+DROP INDEX s3_object_metadata_height_artist_idx;
+DROP INDEX s3_object_metadata_height_date_desc_idx;
+DROP INDEX s3_object_metadata_height_date_idx;
+DROP INDEX s3_object_metadata_height_desc_album_desc_idx;
+DROP INDEX s3_object_metadata_height_desc_album_idx;
+DROP INDEX s3_object_metadata_height_desc_artist_desc_idx;
+DROP INDEX s3_object_metadata_height_desc_artist_idx;
+DROP INDEX s3_object_metadata_height_desc_date_desc_idx;
+DROP INDEX s3_object_metadata_height_desc_date_idx;
+DROP INDEX s3_object_metadata_height_desc_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_height_desc_disc_number_idx;
+DROP INDEX s3_object_metadata_height_desc_duration_desc_idx;
+DROP INDEX s3_object_metadata_height_desc_duration_idx;
+DROP INDEX s3_object_metadata_height_desc_size_desc_idx;
+DROP INDEX s3_object_metadata_height_desc_size_idx;
+DROP INDEX s3_object_metadata_height_desc_track_number_desc_idx;
+DROP INDEX s3_object_metadata_height_desc_track_number_idx;
+DROP INDEX s3_object_metadata_height_desc_width_desc_idx;
+DROP INDEX s3_object_metadata_height_desc_width_idx;
+DROP INDEX s3_object_metadata_height_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_height_disc_number_idx;
+DROP INDEX s3_object_metadata_height_duration_desc_idx;
+DROP INDEX s3_object_metadata_height_duration_idx;
+DROP INDEX s3_object_metadata_height_size_desc_idx;
+DROP INDEX s3_object_metadata_height_size_idx;
+DROP INDEX s3_object_metadata_height_track_number_desc_idx;
+DROP INDEX s3_object_metadata_height_track_number_idx;
+DROP INDEX s3_object_metadata_height_width_desc_idx;
+DROP INDEX s3_object_metadata_height_width_idx;
+DROP INDEX s3_object_metadata_size_album_desc_idx;
+DROP INDEX s3_object_metadata_size_album_idx;
+DROP INDEX s3_object_metadata_size_artist_desc_idx;
+DROP INDEX s3_object_metadata_size_artist_idx;
+DROP INDEX s3_object_metadata_size_date_desc_idx;
+DROP INDEX s3_object_metadata_size_date_idx;
+DROP INDEX s3_object_metadata_size_desc_album_desc_idx;
+DROP INDEX s3_object_metadata_size_desc_album_idx;
+DROP INDEX s3_object_metadata_size_desc_artist_desc_idx;
+DROP INDEX s3_object_metadata_size_desc_artist_idx;
+DROP INDEX s3_object_metadata_size_desc_date_desc_idx;
+DROP INDEX s3_object_metadata_size_desc_date_idx;
+DROP INDEX s3_object_metadata_size_desc_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_size_desc_disc_number_idx;
+DROP INDEX s3_object_metadata_size_desc_duration_desc_idx;
+DROP INDEX s3_object_metadata_size_desc_duration_idx;
+DROP INDEX s3_object_metadata_size_desc_height_desc_idx;
+DROP INDEX s3_object_metadata_size_desc_height_idx;
+DROP INDEX s3_object_metadata_size_desc_track_number_desc_idx;
+DROP INDEX s3_object_metadata_size_desc_track_number_idx;
+DROP INDEX s3_object_metadata_size_desc_width_desc_idx;
+DROP INDEX s3_object_metadata_size_desc_width_idx;
+DROP INDEX s3_object_metadata_size_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_size_disc_number_idx;
+DROP INDEX s3_object_metadata_size_duration_desc_idx;
+DROP INDEX s3_object_metadata_size_duration_idx;
+DROP INDEX s3_object_metadata_size_height_desc_idx;
+DROP INDEX s3_object_metadata_size_height_idx;
+DROP INDEX s3_object_metadata_size_track_number_desc_idx;
+DROP INDEX s3_object_metadata_size_track_number_idx;
+DROP INDEX s3_object_metadata_size_width_desc_idx;
+DROP INDEX s3_object_metadata_size_width_idx;
+DROP INDEX s3_object_metadata_track_number_album_desc_idx;
+DROP INDEX s3_object_metadata_track_number_album_idx;
+DROP INDEX s3_object_metadata_track_number_artist_desc_idx;
+DROP INDEX s3_object_metadata_track_number_artist_idx;
+DROP INDEX s3_object_metadata_track_number_date_desc_idx;
+DROP INDEX s3_object_metadata_track_number_date_idx;
+DROP INDEX s3_object_metadata_track_number_desc_album_desc_idx;
+DROP INDEX s3_object_metadata_track_number_desc_album_idx;
+DROP INDEX s3_object_metadata_track_number_desc_artist_desc_idx;
+DROP INDEX s3_object_metadata_track_number_desc_artist_idx;
+DROP INDEX s3_object_metadata_track_number_desc_date_desc_idx;
+DROP INDEX s3_object_metadata_track_number_desc_date_idx;
+DROP INDEX s3_object_metadata_track_number_desc_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_track_number_desc_disc_number_idx;
+DROP INDEX s3_object_metadata_track_number_desc_duration_desc_idx;
+DROP INDEX s3_object_metadata_track_number_desc_duration_idx;
+DROP INDEX s3_object_metadata_track_number_desc_height_desc_idx;
+DROP INDEX s3_object_metadata_track_number_desc_height_idx;
+DROP INDEX s3_object_metadata_track_number_desc_size_desc_idx;
+DROP INDEX s3_object_metadata_track_number_desc_size_idx;
+DROP INDEX s3_object_metadata_track_number_desc_width_desc_idx;
+DROP INDEX s3_object_metadata_track_number_desc_width_idx;
+DROP INDEX s3_object_metadata_track_number_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_track_number_disc_number_idx;
+DROP INDEX s3_object_metadata_track_number_duration_desc_idx;
+DROP INDEX s3_object_metadata_track_number_duration_idx;
+DROP INDEX s3_object_metadata_track_number_height_desc_idx;
+DROP INDEX s3_object_metadata_track_number_height_idx;
+DROP INDEX s3_object_metadata_track_number_size_desc_idx;
+DROP INDEX s3_object_metadata_track_number_size_idx;
+DROP INDEX s3_object_metadata_track_number_width_desc_idx;
+DROP INDEX s3_object_metadata_track_number_width_idx;
+DROP INDEX s3_object_metadata_width_album_desc_idx;
+DROP INDEX s3_object_metadata_width_album_idx;
+DROP INDEX s3_object_metadata_width_artist_desc_idx;
+DROP INDEX s3_object_metadata_width_artist_idx;
+DROP INDEX s3_object_metadata_width_date_desc_idx;
+DROP INDEX s3_object_metadata_width_date_idx;
+DROP INDEX s3_object_metadata_width_desc_album_desc_idx;
+DROP INDEX s3_object_metadata_width_desc_album_idx;
+DROP INDEX s3_object_metadata_width_desc_artist_desc_idx;
+DROP INDEX s3_object_metadata_width_desc_artist_idx;
+DROP INDEX s3_object_metadata_width_desc_date_desc_idx;
+DROP INDEX s3_object_metadata_width_desc_date_idx;
+DROP INDEX s3_object_metadata_width_desc_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_width_desc_disc_number_idx;
+DROP INDEX s3_object_metadata_width_desc_duration_desc_idx;
+DROP INDEX s3_object_metadata_width_desc_duration_idx;
+DROP INDEX s3_object_metadata_width_desc_height_desc_idx;
+DROP INDEX s3_object_metadata_width_desc_height_idx;
+DROP INDEX s3_object_metadata_width_desc_size_desc_idx;
+DROP INDEX s3_object_metadata_width_desc_size_idx;
+DROP INDEX s3_object_metadata_width_desc_track_number_desc_idx;
+DROP INDEX s3_object_metadata_width_desc_track_number_idx;
+DROP INDEX s3_object_metadata_width_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_width_disc_number_idx;
+DROP INDEX s3_object_metadata_width_duration_desc_idx;
+DROP INDEX s3_object_metadata_width_duration_idx;
+DROP INDEX s3_object_metadata_width_height_desc_idx;
+DROP INDEX s3_object_metadata_width_height_idx;
+DROP INDEX s3_object_metadata_width_size_desc_idx;
+DROP INDEX s3_object_metadata_width_size_idx;
+DROP INDEX s3_object_metadata_width_track_number_desc_idx;
+DROP INDEX s3_object_metadata_width_track_number_idx;
+
+-- Remove desc variants of single-expression indexes for attributes with semantic ordering overrides.
+DROP INDEX s3_object_metadata_artist_desc_idx;
+DROP INDEX s3_object_metadata_album_desc_idx;
+DROP INDEX s3_object_metadata_disc_number_desc_idx;
+DROP INDEX s3_object_metadata_width_desc_idx;
+DROP INDEX s3_object_metadata_height_desc_idx;
+
+-- Create new semantic ordering indexes.
+CREATE INDEX s3_object_metadata_artist_ordering_idx ON s3_object_metadata(LOWER(artist), LOWER(album), disc_number, track_number, object_key);
+CREATE INDEX s3_object_metadata_artist_desc_ordering_idx ON s3_object_metadata(LOWER(artist) DESC NULLS LAST, LOWER(album) DESC NULLS LAST, disc_number DESC NULLS LAST, track_number DESC NULLS LAST, object_key);
+CREATE INDEX s3_object_metadata_album_ordering_idx ON s3_object_metadata(LOWER(album), disc_number, track_number, object_key);
+CREATE INDEX s3_object_metadata_album_desc_ordering_idx ON s3_object_metadata(LOWER(album) DESC NULLS LAST, disc_number DESC NULLS LAST, track_number DESC NULLS LAST, object_key);
+CREATE INDEX s3_object_metadata_disc_number_ordering_idx ON s3_object_metadata(disc_number, track_number, object_key);
+CREATE INDEX s3_object_metadata_disc_number_desc_ordering_idx ON s3_object_metadata(disc_number DESC NULLS LAST, track_number DESC NULLS LAST, object_key);
+CREATE INDEX s3_object_metadata_width_ordering_idx ON s3_object_metadata(width, height, object_key);
+CREATE INDEX s3_object_metadata_width_desc_ordering_idx ON s3_object_metadata(width DESC NULLS LAST, height DESC NULLS LAST, object_key);
+CREATE INDEX s3_object_metadata_height_ordering_idx ON s3_object_metadata(height, width, object_key);
+CREATE INDEX s3_object_metadata_height_desc_ordering_idx ON s3_object_metadata(height DESC NULLS LAST, width DESC NULLS LAST, object_key);
+
+-- Create media type indexes
+CREATE INDEX s3_object_metadata_video_idx ON s3_object_metadata(object_key) WHERE LOWER(mime_type) LIKE 'video/%';
+CREATE INDEX s3_object_metadata_audio_idx ON s3_object_metadata(object_key) WHERE LOWER(mime_type) LIKE 'audio/%';
+CREATE INDEX s3_object_metadata_image_idx ON s3_object_metadata(object_key) WHERE LOWER(mime_type) LIKE 'image/%';
+
+CREATE FUNCTION set_empty_s3_object_metadata_strings_to_null()
+RETURNS TRIGGER AS
+$BODY$
+BEGIN
+    NEW.file_type := NULLIF(TRIM(NEW.file_type), '');
+    NEW.file_type_extension := NULLIF(TRIM(NEW.file_type_extension), '');
+    NEW.mime_type := NULLIF(TRIM(NEW.mime_type), '');
+    NEW.title := NULLIF(TRIM(NEW.title), '');
+    NEW.artist := NULLIF(TRIM(NEW.artist), '');
+    NEW.album := NULLIF(TRIM(NEW.album), '');
+    NEW.album_artist := NULLIF(TRIM(NEW.album_artist), '');
+    NEW.composer := NULLIF(TRIM(NEW.composer), '');
+    NEW.genre := NULLIF(TRIM(NEW.genre), '');
+    NEW.format_name := NULLIF(TRIM(NEW.format_name), '');
+    NEW.format_long_name := NULLIF(TRIM(NEW.format_long_name), '');
+    NEW.video_codec_name := NULLIF(TRIM(NEW.video_codec_name), '');
+    NEW.video_codec_long_name := NULLIF(TRIM(NEW.video_codec_long_name), '');
+    NEW.audio_codec_name := NULLIF(TRIM(NEW.audio_codec_name), '');
+    NEW.audio_codec_long_name := NULLIF(TRIM(NEW.audio_codec_long_name), '');
+
+    RETURN NEW;
+END;
+$BODY$
+LANGUAGE plpgsql;
+
+CREATE TRIGGER set_empty_s3_object_metadata_strings_to_null
+BEFORE INSERT OR UPDATE
+ON s3_object_metadata
+FOR EACH ROW
+EXECUTE FUNCTION set_empty_s3_object_metadata_strings_to_null();
+
+UPDATE s3_object_metadata
+SET
+    file_type = NULLIF(TRIM(file_type), ''),
+    file_type_extension = NULLIF(TRIM(file_type_extension), ''),
+    mime_type = NULLIF(TRIM(mime_type), ''),
+    title = NULLIF(TRIM(title), ''),
+    artist = NULLIF(TRIM(artist), ''),
+    album = NULLIF(TRIM(album), ''),
+    album_artist = NULLIF(TRIM(album_artist), ''),
+    composer = NULLIF(TRIM(composer), ''),
+    genre = NULLIF(TRIM(genre), ''),
+    format_name = NULLIF(TRIM(format_name), ''),
+    format_long_name = NULLIF(TRIM(format_long_name), ''),
+    video_codec_name = NULLIF(TRIM(video_codec_name), ''),
+    video_codec_long_name = NULLIF(TRIM(video_codec_long_name), ''),
+    audio_codec_name = NULLIF(TRIM(audio_codec_name), ''),
+    audio_codec_long_name = NULLIF(TRIM(audio_codec_long_name), '');

@@ -664,18 +664,21 @@ impl QueryBuilderVisitor<'_> {
         location: Location,
     ) {
         if !arguments.is_empty() {
-            if self.query_parameters.ordering.len() >= 2 {
+            if !self.query_parameters.ordering.is_empty() {
                 log.errors.push(Error {
                     location,
-                    msg: String::from("Cannot sort by more than two attributes"),
+                    msg: String::from(
+                        "Ordering already defined, duplicate sort modifiers are not allowed",
+                    ),
                 });
+                return;
             }
             self.buffer = Some(String::new());
+            let scope_attributes = scope.get_attributes();
             let attr_arg = &arguments[0];
             let attribute_node = attr_arg.node_type.downcast_ref::<AttributeNode>();
             let attribute = attribute_node.and_then(|attribute_node| {
-                scope
-                    .get_attributes()
+                scope_attributes
                     .get(attribute_node.identifier.as_str())
                     .cloned()
             });
@@ -683,19 +686,9 @@ impl QueryBuilderVisitor<'_> {
             let nullable = attribute
                 .as_ref()
                 .is_some_and(|attribute| attribute.nullable);
-            let table = attribute.map_or("--invalid--", |attribute| attribute.table);
-            if !self.query_parameters.ordering.is_empty() {
-                let last_ordering = &self.query_parameters.ordering[0];
-                if last_ordering.table != table {
-                    log.errors.push(Error {
-                        location,
-                        msg: format!(
-                            "Cannot sort by attributes from different tables ({} and {})",
-                            last_ordering.table, table
-                        ),
-                    });
-                }
-            }
+            let table = attribute
+                .as_ref()
+                .map_or("--invalid--", |attribute| attribute.table);
 
             if is_string {
                 self.write_buff("LOWER(");
@@ -705,6 +698,7 @@ impl QueryBuilderVisitor<'_> {
                 self.write_buff(")");
             }
             let expression = self.buffer.take().unwrap();
+
             let direction = if arguments.len() > 1 {
                 match arguments[1].node_type.downcast_ref::<StringLiteralNode>() {
                     Some(string_literal)
@@ -725,6 +719,34 @@ impl QueryBuilderVisitor<'_> {
                 nullable,
                 table,
             });
+
+            let secondary_ordering_attributes = attribute
+                .as_ref()
+                .and_then(|attr| attr.secondary_ordering_attributes.as_ref());
+            if let Some(secondary_ordering_attributes) = secondary_ordering_attributes {
+                for secondary_ordering_attribute in secondary_ordering_attributes {
+                    let attribute = scope_attributes.get(secondary_ordering_attribute);
+                    if let Some(attribute) = attribute {
+                        let expression = if attribute.return_type == Type::String {
+                            format!("LOWER({})", attribute.selection_expression)
+                        } else {
+                            attribute.selection_expression.clone()
+                        };
+
+                        self.query_parameters.ordering.push(Ordering {
+                            expression,
+                            direction,
+                            nullable: attribute.nullable,
+                            table: attribute.table,
+                        });
+                    } else {
+                        log.errors.push(Error {
+                            location,
+                            msg: format!("Internal error: Secondary ordering attribute {secondary_ordering_attribute} not found"),
+                        });
+                    }
+                }
+            }
         }
     }
 

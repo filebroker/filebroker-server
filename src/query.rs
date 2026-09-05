@@ -160,7 +160,7 @@ pub struct Ordering {
     pub table: &'static str,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Direction {
     Ascending,
     Descending,
