@@ -21,7 +21,7 @@ diesel-async = { version = "0.9.2", features = ["postgres", "deadpool"] }
 diesel-derive-enum = { version = "2.1.0", features = ["postgres"] }
 dotenvy = "0.15.7"
 downcast-rs = "2.0.2"
-exec-rs = "0.1.2"
+exec-rs = "0.2.0"
 fern = { version = "0.7.1", features = ["date-based"] }
 flurry = "0.5.2"
 futures = "0.3.33"

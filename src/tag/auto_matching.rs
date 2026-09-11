@@ -18,6 +18,7 @@ use diesel::dsl::not;
 use diesel::sql_types::BigInt;
 use diesel::{BelongingToDsl, BoolExpressionMethods, ExpressionMethods, QueryDsl};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use exec_rs::mutex::MutexAsync;
 use lazy_static::lazy_static;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -110,80 +111,107 @@ pub async fn create_apply_auto_tags_for_collection_task(
 
 lazy_static! {
     pub static ref APPLY_AUTO_TAGS_SEMAPHORE: Semaphore = Semaphore::new(4);
+    pub static ref APPLY_AUTO_TAGS_SYNC: MutexAsync<ApplyAutoTagsTarget> = MutexAsync::new();
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ApplyAutoTagsTarget {
+    Tag(i64),
+    TagCategory(String),
+    Post(i64),
+    PostCollection(i64),
+    Task(i64),
+}
+
+impl From<&ApplyAutoTagsTask> for ApplyAutoTagsTarget {
+    fn from(task: &ApplyAutoTagsTask) -> Self {
+        if let Some(tag) = task.tag_to_apply {
+            Self::Tag(tag)
+        } else if let Some(ref tag_category) = task.tag_category_to_apply {
+            Self::TagCategory(tag_category.clone())
+        } else if let Some(post) = task.post_to_apply {
+            Self::Post(post)
+        } else if let Some(post_collection) = task.post_collection_to_apply {
+            Self::PostCollection(post_collection)
+        } else {
+            Self::Task(task.pk)
+        }
+    }
 }
 
 pub fn spawn_apply_auto_tags_task(task: ApplyAutoTagsTask) {
     tokio::spawn(async move {
-        let _semaphore = match APPLY_AUTO_TAGS_SEMAPHORE.acquire().await {
-            Ok(semaphore) => semaphore,
-            Err(e) => {
-                log::error!("Failed to acquire semaphore for apply_auto_tags_task: {e}");
-                return;
-            }
-        };
+        let target = ApplyAutoTagsTarget::from(&task);
+        APPLY_AUTO_TAGS_SYNC.evaluate(target, || async move {
+            let _semaphore = match APPLY_AUTO_TAGS_SEMAPHORE.acquire().await {
+                Ok(semaphore) => semaphore,
+                Err(e) => {
+                    log::error!("Failed to acquire semaphore for apply_auto_tags_task: {e}");
+                    return;
+                }
+            };
 
-        let connection = acquire_db_connection().await;
-        match connection {
-            Ok(mut connection) => {
-                let sentinel = LockedObjectsTaskSentinel::acquire_with_values(
-                    "apply_auto_tags_task",
-                    "pk",
-                    "locked_at",
-                    "true",
-                    task.pk,
-                )
-                .await;
-                let _sentinel = match sentinel {
-                    Ok(Some(sentinel)) => sentinel,
-                    Ok(None) => {
-                        log::info!(
-                            "Aborting task apply_auto_tags_task because task {task:?} has already been locked"
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "Failed to acquire LockedObjectsTaskSentinel for apply_auto_tags_task {}: {e}",
-                            task.pk
-                        );
-                        return;
-                    }
-                };
+            let connection = acquire_db_connection().await;
+            match connection {
+                Ok(mut connection) => {
+                    let sentinel = LockedObjectsTaskSentinel::acquire_with_values(
+                        "apply_auto_tags_task",
+                        "pk",
+                        "locked_at",
+                        "true",
+                        task.pk,
+                    ).await;
+                    let _sentinel = match sentinel {
+                        Ok(Some(sentinel)) => sentinel,
+                        Ok(None) => {
+                            log::info!(
+                                "Aborting task apply_auto_tags_task because task {task:?} has already been locked"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            log::error!(
+                                "Failed to acquire LockedObjectsTaskSentinel for apply_auto_tags_task {}: {e}",
+                                task.pk
+                            );
+                            return;
+                        }
+                    };
 
-                let res = run_serializable_transaction(&mut connection, async |connection| {
-                    run_apply_auto_tags_task(&task, connection).await
-                })
-                .await;
-                if let Err(e) = res {
-                    log::error!("Failed to apply auto tags for task {task:?}: {e}");
-                    let res = diesel::update(apply_auto_tags_task::table)
-                        .filter(apply_auto_tags_task::pk.eq(task.pk))
-                        .set(
-                            apply_auto_tags_task::fail_count
-                                .eq(apply_auto_tags_task::fail_count + 1),
-                        )
-                        .execute(&mut connection)
-                        .await;
+                    let res = run_serializable_transaction(&mut connection, async |connection| {
+                        run_apply_auto_tags_task(&task, connection).await
+                    }).await;
                     if let Err(e) = res {
-                        log::error!(
-                            "Failed to increment fail_count for apply_auto_tags_task {}: {e}",
-                            task.pk
-                        );
-                    }
-                } else {
-                    let delete_task_res = diesel::delete(apply_auto_tags_task::table)
-                        .filter(apply_auto_tags_task::pk.eq(task.pk))
-                        .execute(&mut connection)
-                        .await;
-                    if let Err(e) = delete_task_res {
-                        log::error!("Failed to delete apply_auto_tags_task {}: {e}", task.pk);
+                        log::error!("Failed to apply auto tags for task {task:?}: {e}");
+                        let res = diesel::update(apply_auto_tags_task::table)
+                            .filter(apply_auto_tags_task::pk.eq(task.pk))
+                            .set(
+                                apply_auto_tags_task::fail_count
+                                    .eq(apply_auto_tags_task::fail_count + 1),
+                            )
+                            .execute(&mut connection)
+                            .await;
+                        if let Err(e) = res {
+                            log::error!(
+                                "Failed to increment fail_count for apply_auto_tags_task {}: {e}",
+                                task.pk
+                            );
+                        }
+                    } else {
+                        let delete_task_res = diesel::delete(apply_auto_tags_task::table)
+                            .filter(apply_auto_tags_task::pk.eq(task.pk))
+                            .execute(&mut connection)
+                            .await;
+                        if let Err(e) = delete_task_res {
+                            log::error!("Failed to delete apply_auto_tags_task {}: {e}", task.pk);
+                        }
                     }
                 }
+                Err(e) => {
+                    log::error!("Failed to acquire database connection: {e}");
+                }
             }
-            Err(e) => {
-                log::error!("Failed to acquire database connection: {e}");
-            }
-        }
+        }).await;
     });
 }
 

@@ -4,7 +4,6 @@ use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{DateTime, Duration, offset::Utc};
 use diesel::{dsl::count, expression_methods::BoolExpressionMethods};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
-use exec_rs::sync::MutexSync;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use lazy_static::lazy_static;
 use passwords::PasswordGenerator;
@@ -457,10 +456,6 @@ async fn refresh_user_login_data(
         ))
     })
     .await
-}
-
-lazy_static! {
-    static ref USER_NAME_SYNC: MutexSync<String> = MutexSync::new();
 }
 
 /// Registers a user by creating a new User. This request receives a json that
