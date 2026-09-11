@@ -817,7 +817,7 @@ mod tests {
         assert!(expression_statement.is_some());
         let expression = &expression_statement.unwrap().expression_node;
         assert_binary_expression_node(
-            &expression,
+            expression,
             0,
             16,
             Operator::Equal,
@@ -1047,7 +1047,7 @@ mod tests {
     }
 
     fn assert_modifier_statement<'m>(
-        statement: &'m Box<Node<dyn StatementNode>>,
+        statement: &'m Node<dyn StatementNode>,
         start: usize,
         end: usize,
         identifier: &str,
