@@ -26,94 +26,166 @@ use crate::{
 
 pub fn append_secure_query_condition(
     where_expressions: &mut Vec<String>,
+    ctes: &mut Vec<String>,
     user: &Option<User>,
     query_parameters: &QueryParameters,
 ) {
-    let cond = (query_parameters.get_secure_query_condition)(user.as_ref(), query_parameters);
+    let cond = (query_parameters.get_secure_query_condition)(user.as_ref(), query_parameters, ctes);
     if let Some(cond) = cond {
         where_expressions.push(cond);
     }
 }
 
+pub fn get_secure_query_condition_string_post(
+    user: Option<&User>,
+    query_parameters: &QueryParameters,
+    ctes: &mut Vec<String>,
+) -> Option<String> {
+    get_secure_query_condition_string(
+        user,
+        query_parameters,
+        ctes,
+        Some(("post", "post_s3_object")),
+    )
+}
+
+pub fn get_secure_query_condition_string_collection(
+    user: Option<&User>,
+    query_parameters: &QueryParameters,
+    ctes: &mut Vec<String>,
+) -> Option<String> {
+    get_secure_query_condition_string(user, query_parameters, ctes, None)
+}
+
 pub fn get_secure_query_condition_string(
     user: Option<&User>,
     query_parameters: &QueryParameters,
+    ctes: &mut Vec<String>,
+    broker_access_src_dest: Option<(&str, &str)>,
 ) -> Option<String> {
-    if query_parameters.privileged || (user.is_some() && user.as_ref().unwrap().is_admin) {
+    if query_parameters.privileged || user.is_some_and(|user| user.is_admin) {
         return None;
     }
-    let user_key = user
-        .as_ref()
-        .map(|u| u.pk.to_string())
-        .unwrap_or_else(|| String::from("NULL"));
 
     let base_table_name = query_parameters.base_table_name;
-    let public_edit_cond = if query_parameters.writable_only {
+    let public_edit_condition = if query_parameters.writable_only {
         format!("{base_table_name}.public_edit")
     } else {
         String::from("TRUE")
     };
-    let group_access_write_cond = if query_parameters.writable_only {
+    let group_access_write_condition = if query_parameters.writable_only {
         format!("{base_table_name}_group_access.write")
     } else {
         String::from("TRUE")
     };
 
-    if user.is_some() {
-        let broker_admin_condition =
-            if let Some(broker_access_base_table) = query_parameters.broker_access_base_table {
-                format!(
-                    r#"
-                        {broker_access_base_table}.fk_broker IN(
-                            SELECT pk FROM broker
-                            WHERE broker.fk_owner = {user_key} OR EXISTS(
-                                SELECT * FROM broker_access
-                                WHERE broker_access.fk_broker = broker.pk
-                                AND broker_access.write
-                                AND broker_access.fk_granted_group IN(
-                                    SELECT pk FROM user_group
-                                    WHERE user_group.fk_owner = {user_key} OR EXISTS(
-                                        SELECT * FROM user_group_membership
-                                        WHERE user_group_membership.fk_group = user_group.pk
-                                        AND user_group_membership.fk_user = {user_key}
-                                        AND NOT user_group_membership.revoked
-                                        AND user_group_membership.administrator
-                                    )
-                                )
-                            )
-                        )
-                    "#
-                )
-            } else {
-                String::from("FALSE")
-            };
+    let Some(user) = user else {
+        return Some(format!(
+            "({base_table_name}.public AND {public_edit_condition})"
+        ));
+    };
 
-        Some(format!(
-            r#"
-            ({base_table_name}.fk_create_user = {user_key}
-            OR ({base_table_name}.public AND {public_edit_cond})
-            OR {broker_admin_condition}
-            OR EXISTS(
-                SELECT * FROM {base_table_name}_group_access
-                WHERE {base_table_name}_group_access.fk_{base_table_name} = {base_table_name}.pk
-                AND {group_access_write_cond}
-                AND {base_table_name}_group_access.fk_granted_group IN(
-                    SELECT pk FROM user_group
-                    WHERE fk_owner = {user_key}
-                    OR EXISTS(
-                        SELECT * FROM user_group_membership
-                        WHERE NOT revoked AND fk_user = {user_key} AND fk_group = user_group.pk
+    let user_key = user.pk;
+
+    ctes.push(format!(
+        r#"member_groups AS (
+            SELECT user_group.pk
+            FROM user_group
+            WHERE user_group.fk_owner = {user_key}
+
+            UNION
+
+            SELECT user_group_membership.fk_group
+            FROM user_group_membership
+            WHERE user_group_membership.fk_user = {user_key}
+                AND NOT user_group_membership.revoked
+        )"#
+    ));
+
+    let broker_admin_condition = if let Some((
+        broker_access_base_table,
+        broker_access_target_table,
+    )) = broker_access_src_dest
+    {
+        ctes.push(format!(
+            r#"admin_groups AS (
+                    SELECT user_group.pk
+                    FROM user_group
+                    WHERE user_group.fk_owner = {user_key}
+
+                    UNION
+
+                    SELECT user_group_membership.fk_group
+                    FROM user_group_membership
+                    WHERE user_group_membership.fk_user = {user_key}
+                    AND NOT user_group_membership.revoked
+                    AND user_group_membership.administrator
+                )"#
+        ));
+
+        ctes.push(format!(
+            r#"writable_brokers AS (
+                    SELECT broker.pk
+                    FROM broker
+                    WHERE broker.fk_owner = {user_key}
+
+                    UNION
+
+                    SELECT broker_access.fk_broker
+                    FROM broker_access
+                    INNER JOIN admin_groups
+                        ON admin_groups.pk = broker_access.fk_granted_group
+                    WHERE broker_access.write
+                )"#
+        ));
+
+        if query_parameters
+            .encountered_tables
+            .contains(broker_access_target_table)
+        {
+            format!(
+                r#"
+                    {broker_access_target_table}.fk_broker IN (
+                        SELECT pk
+                        FROM writable_brokers
                     )
-                )
-            ))"#
-        ))
+                "#
+            )
+        } else {
+            format!(
+                r#"
+                    EXISTS (
+                        SELECT *
+                        FROM writable_brokers
+                        WHERE EXISTS (
+                            SELECT *
+                            FROM s3_object
+                            WHERE s3_object.object_key = {broker_access_base_table}.s3_object
+                              AND s3_object.fk_broker = writable_brokers.pk
+                        )
+                    )
+                "#
+            )
+        }
     } else {
-        Some(format!(
-            r#"
-            ({base_table_name}.fk_create_user = {user_key}
-            OR ({base_table_name}.public AND {public_edit_cond}))"#
-        ))
-    }
+        String::from("FALSE")
+    };
+
+    Some(format!(
+        r#"(
+            {base_table_name}.fk_create_user = {user_key}
+            OR ({base_table_name}.public AND {public_edit_condition})
+            OR {broker_admin_condition}
+            OR EXISTS (
+                SELECT *
+                FROM {base_table_name}_group_access
+                INNER JOIN member_groups
+                    ON member_groups.pk = {base_table_name}_group_access.fk_granted_group
+                WHERE {base_table_name}_group_access.fk_{base_table_name} = {base_table_name}.pk
+                    AND {group_access_write_condition}
+            )
+        )"#
+    ))
 }
 
 macro_rules! get_group_membership_condition {

@@ -1,12 +1,13 @@
-use std::{cmp, collections::HashMap, str::FromStr};
-
 use chrono::{DateTime, Utc};
 use diesel::query_builder::{BoxedSelectStatement, QueryId};
 use diesel::query_dsl::methods::{OrderDsl, ThenOrderDsl};
 use diesel::sql_types::SingleValue;
 use diesel::{OptionalExtension, QueryDsl, QueryableByName};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::{cmp, collections::HashMap, str::FromStr};
 use validator::Validate;
 use warp::{Rejection, Reply};
 
@@ -133,16 +134,30 @@ pub struct QueryParameters {
     pub writable_only: bool,
     pub base_table_name: &'static str,
     pub select_statements: Vec<String>,
-    pub join_statements: Vec<String>,
+    pub join_statements: Vec<JoinStatement>,
     pub fallback_orderings: Vec<Ordering>,
     pub from_table_override: Option<&'static str>,
     pub predefined_where_conditions: Option<Vec<String>>,
     pub include_full_count: bool,
     pub privileged: bool,
-    pub get_secure_query_condition: fn(Option<&User>, &QueryParameters) -> Option<String>,
-    /// Specify name of base table alias that has an fk_broker, will be used by get_secure_query_condition_string
-    /// to give users with admin privileges on the related broker access to the object
-    pub broker_access_base_table: Option<&'static str>,
+    pub get_secure_query_condition:
+        fn(Option<&User>, &QueryParameters, &mut Vec<String>) -> Option<String>,
+    /// Table referenced by attribute usages encountered in source query
+    pub encountered_tables: HashSet<&'static str>,
+}
+
+impl QueryParameters {
+    fn build_join_statements(&self, skip_optional: bool) -> String {
+        self.join_statements
+            .iter()
+            .filter(|join_statement| {
+                !join_statement.optional
+                    || !skip_optional
+                    || self.encountered_tables.contains(join_statement.table_alias)
+            })
+            .map(|join_statement| &join_statement.statement)
+            .join(" ")
+    }
 }
 
 #[derive(Clone, Default)]
@@ -158,6 +173,12 @@ pub struct Ordering {
     pub direction: Direction,
     pub nullable: bool,
     pub table: &'static str,
+}
+
+pub struct JoinStatement {
+    pub statement: String,
+    pub table_alias: &'static str,
+    pub optional: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -924,15 +945,27 @@ pub fn prepare_query_parameters(
                 ]
             },
             join_statements: vec![
-                String::from(
-                    "INNER JOIN s3_object AS post_s3_object ON post_s3_object.object_key = post.s3_object",
-                ),
-                String::from(
-                    "INNER JOIN s3_object_metadata ON s3_object_metadata.object_key = post.s3_object",
-                ),
-                String::from(
-                    "INNER JOIN registered_user create_user ON create_user.pk = post.fk_create_user",
-                ),
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN s3_object AS post_s3_object ON post_s3_object.object_key = post.s3_object",
+                    ),
+                    table_alias: "post_s3_object",
+                    optional: true,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN s3_object_metadata ON s3_object_metadata.object_key = post.s3_object",
+                    ),
+                    table_alias: "s3_object_metadata",
+                    optional: true,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN registered_user create_user ON create_user.pk = post.fk_create_user",
+                    ),
+                    table_alias: "create_user",
+                    optional: true,
+                },
             ],
             fallback_orderings: vec![
                 Ordering {
@@ -952,8 +985,8 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: scope != &Scope::TagAutoMatchPost,
             privileged: scope == &Scope::TagAutoMatchPost,
-            get_secure_query_condition: perms::get_secure_query_condition_string,
-            broker_access_base_table: Some("post_s3_object"),
+            get_secure_query_condition: perms::get_secure_query_condition_string_post,
+            encountered_tables: HashSet::new(),
         }),
         Scope::Collection | Scope::TagAutoMatchCollection => Ok(QueryParameters {
             pagination: if scope == &Scope::TagAutoMatchCollection {
@@ -1038,12 +1071,20 @@ pub fn prepare_query_parameters(
                 ]
             },
             join_statements: vec![
-                String::from(
-                    "LEFT JOIN s3_object AS poster_object ON poster_object.object_key = post_collection.poster_object_key",
-                ),
-                String::from(
-                    "INNER JOIN registered_user create_user ON create_user.pk = post_collection.fk_create_user",
-                ),
+                JoinStatement {
+                    statement: String::from(
+                        "LEFT JOIN s3_object AS poster_object ON poster_object.object_key = post_collection.poster_object_key",
+                    ),
+                    table_alias: "poster_object",
+                    optional: true,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN registered_user create_user ON create_user.pk = post_collection.fk_create_user",
+                    ),
+                    table_alias: "create_user",
+                    optional: true,
+                },
             ],
             fallback_orderings: vec![Ordering {
                 expression: String::from("post_collection.pk"),
@@ -1055,8 +1096,8 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: scope != &Scope::TagAutoMatchCollection,
             privileged: scope == &Scope::TagAutoMatchCollection,
-            get_secure_query_condition: perms::get_secure_query_condition_string,
-            broker_access_base_table: None,
+            get_secure_query_condition: perms::get_secure_query_condition_string_collection,
+            encountered_tables: HashSet::new(),
         }),
         Scope::CollectionItem { collection_pk } => Ok(QueryParameters {
             pagination: Some(QueryBuilderPagination {
@@ -1285,28 +1326,62 @@ pub fn prepare_query_parameters(
                 ),
             ],
             join_statements: vec![
-                String::from("INNER JOIN post ON post_collection_item.fk_post = post.pk"),
-                String::from(
-                    "INNER JOIN post_collection ON post_collection_item.fk_post_collection = post_collection.pk",
-                ),
-                String::from(
-                    "INNER JOIN registered_user post_collection_item_added_user ON post_collection_item.fk_added_by = post_collection_item_added_user.pk",
-                ),
-                String::from(
-                    "INNER JOIN s3_object post_s3_object ON post_s3_object.object_key = post.s3_object",
-                ),
-                String::from(
-                    "INNER JOIN s3_object_metadata ON s3_object_metadata.object_key = post.s3_object",
-                ),
-                String::from(
-                    "INNER JOIN registered_user post_create_user ON post_create_user.pk = post.fk_create_user",
-                ),
-                String::from(
-                    "LEFT JOIN s3_object AS poster_object ON poster_object.object_key = post_collection.poster_object_key",
-                ),
-                String::from(
-                    "INNER JOIN registered_user post_collection_create_user ON post_collection_create_user.pk = post_collection.fk_create_user",
-                ),
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN post ON post_collection_item.fk_post = post.pk",
+                    ),
+                    table_alias: "post",
+                    optional: false,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN post_collection ON post_collection_item.fk_post_collection = post_collection.pk",
+                    ),
+                    table_alias: "post_collection",
+                    optional: false,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN registered_user post_collection_item_added_user ON post_collection_item.fk_added_by = post_collection_item_added_user.pk",
+                    ),
+                    table_alias: "post_collection_item_added_user",
+                    optional: true,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN s3_object post_s3_object ON post_s3_object.object_key = post.s3_object",
+                    ),
+                    table_alias: "post_s3_object",
+                    optional: true,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN s3_object_metadata ON s3_object_metadata.object_key = post.s3_object",
+                    ),
+                    table_alias: "s3_object_metadata",
+                    optional: true,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN registered_user post_create_user ON post_create_user.pk = post.fk_create_user",
+                    ),
+                    table_alias: "post_create_user",
+                    optional: true,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "LEFT JOIN s3_object AS poster_object ON poster_object.object_key = post_collection.poster_object_key",
+                    ),
+                    table_alias: "poster_object",
+                    optional: true,
+                },
+                JoinStatement {
+                    statement: String::from(
+                        "INNER JOIN registered_user post_collection_create_user ON post_collection_create_user.pk = post_collection.fk_create_user",
+                    ),
+                    table_alias: "post_collection_create_user",
+                    optional: true,
+                },
             ],
             fallback_orderings: vec![Ordering {
                 expression: String::from("post_collection_item.ordinal"),
@@ -1320,8 +1395,8 @@ pub fn prepare_query_parameters(
             )]),
             include_full_count: true,
             privileged: false,
-            get_secure_query_condition: perms::get_secure_query_condition_string,
-            broker_access_base_table: Some("post_s3_object"),
+            get_secure_query_condition: perms::get_secure_query_condition_string_post,
+            encountered_tables: HashSet::new(),
         }),
         Scope::UserGroup => Ok(QueryParameters {
             pagination: Some(QueryBuilderPagination {
@@ -1357,9 +1432,13 @@ pub fn prepare_query_parameters(
                 String::from("user_group.avatar_object_key AS user_group_avatar_object_key"),
                 String::from("user_group.edit_timestamp AS user_group_edit_timestamp"),
             ],
-            join_statements: vec![String::from(
-                "INNER JOIN registered_user user_group_owner_user ON user_group.fk_owner = user_group_owner_user.pk",
-            )],
+            join_statements: vec![JoinStatement {
+                statement: String::from(
+                    "INNER JOIN registered_user user_group_owner_user ON user_group.fk_owner = user_group_owner_user.pk",
+                ),
+                table_alias: "user_group_owner_user",
+                optional: true,
+            }],
             fallback_orderings: vec![Ordering {
                 expression: String::from("user_group.pk"),
                 direction: Direction::Descending,
@@ -1370,7 +1449,7 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: true,
             privileged: false,
-            get_secure_query_condition: |user, query_parameters| {
+            get_secure_query_condition: |user, query_parameters, _| {
                 if query_parameters.privileged
                     || (user.is_some() && user.as_ref().unwrap().is_admin)
                 {
@@ -1390,11 +1469,11 @@ pub fn prepare_query_parameters(
                 let membership_cond = if user.is_some() {
                     format!(
                         r#"
-                    EXISTS(
-                        SELECT * FROM user_group_membership
-                        WHERE NOT revoked AND fk_group = user_group.pk AND fk_user = {user_key} AND {group_access_write_cond}
-                    )
-                    "#
+                        EXISTS(
+                            SELECT * FROM user_group_membership
+                            WHERE NOT revoked AND fk_group = user_group.pk AND fk_user = {user_key} AND {group_access_write_cond}
+                        )
+                        "#
                     )
                 } else {
                     String::from("FALSE")
@@ -1404,7 +1483,7 @@ pub fn prepare_query_parameters(
                     "({public_cond} OR user_group.fk_owner = {user_key} OR {membership_cond})"
                 ))
             },
-            broker_access_base_table: None,
+            encountered_tables: HashSet::new(),
         }),
     }
 }
@@ -1524,7 +1603,7 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
     };
 
     let error = if log.errors.is_empty() {
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor {};
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         ast.accept(&mut semantic_analysis_visitor, &scope, &mut log);
         if !log.errors.is_empty() {
             Some(QueryCompilationError {

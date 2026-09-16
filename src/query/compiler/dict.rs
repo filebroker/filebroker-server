@@ -646,7 +646,7 @@ lazy_static! {
         (
             "broker",
             Arc::new(Attribute {
-                table: "s3_object",
+                table: "post_s3_object",
                 selection_expression: String::from("post_s3_object.fk_broker"),
                 return_type: Type::Number,
                 allow_sorting: false,

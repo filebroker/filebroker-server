@@ -1,0 +1,9 @@
+DROP INDEX post_collection_public_edit_pk_idx;
+DROP INDEX post_public_edit_pk_idx;
+DROP INDEX post_collection_public_pk_idx;
+DROP INDEX post_public_pk_idx;
+DROP INDEX user_group_membership_active_admin_user_idx;
+DROP INDEX user_group_membership_active_user_idx;
+DROP INDEX s3_object_fk_broker_covering_idx;
+DROP INDEX post_collection_group_access_covering_acl_idx;
+DROP INDEX post_group_access_covering_acl_idx;

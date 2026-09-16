@@ -1,7 +1,7 @@
-use std::{collections::HashMap, fmt::Debug};
-
 use downcast_rs::{Downcast, impl_downcast};
 use lazy_static::lazy_static;
+use std::collections::HashSet;
+use std::{collections::HashMap, fmt::Debug};
 
 use crate::query::{Direction, Ordering, QueryParameters};
 
@@ -308,7 +308,17 @@ pub trait Visitor {
     );
 }
 
-pub struct SemanticAnalysisVisitor {}
+pub struct SemanticAnalysisVisitor {
+    pub encountered_tables: HashSet<&'static str>,
+}
+
+impl SemanticAnalysisVisitor {
+    pub fn new() -> Self {
+        Self {
+            encountered_tables: HashSet::new(),
+        }
+    }
+}
 
 impl Visitor for SemanticAnalysisVisitor {
     fn visit_query_node(
@@ -550,11 +560,18 @@ impl Visitor for SemanticAnalysisVisitor {
         location: Location,
     ) {
         let identifier: &str = &attribute_node.identifier;
-        if !scope.get_attributes().contains_key(identifier) {
-            log.errors.push(Error {
-                location,
-                msg: format!("No such attribute '{identifier}'"),
-            });
+        let attributes = scope.get_attributes();
+        let attribute = attributes.get(identifier);
+        match attribute {
+            Some(attribute) => {
+                self.encountered_tables.insert(attribute.table);
+            }
+            None => {
+                log.errors.push(Error {
+                    location,
+                    msg: format!("No such attribute '{identifier}'"),
+                });
+            }
         }
     }
 
@@ -801,21 +818,43 @@ impl Visitor for QueryBuilderVisitor<'_> {
             .or_insert_with_key(|tag_name| Cte {
                 idx,
                 expression: format!(
-                    "cte{idx} AS (
-                        SELECT unnest(
-                            tag.pk
-                            || array(SELECT fk_target FROM tag_alias WHERE fk_source = tag.pk)
-                            || array(SELECT fk_source FROM tag_alias WHERE fk_target = tag.pk)
-                            || array(SELECT fk_child FROM tag_closure_table WHERE fk_parent = tag.pk)
-                        ) AS tag_keys
-                        FROM tag WHERE lower(tag.tag_name) = '{tag_name}'
-                    )"
+                    "tag_cte{idx} AS (
+                    WITH matched_tag AS (
+                        SELECT pk
+                        FROM tag
+                        WHERE lower(tag.tag_name) = '{tag_name}'
+                    )
+
+                    SELECT pk AS tag_key
+                    FROM matched_tag
+
+                    UNION
+
+                    SELECT tag_alias.fk_target
+                    FROM matched_tag
+                    INNER JOIN tag_alias
+                        ON tag_alias.fk_source = matched_tag.pk
+
+                    UNION
+
+                    SELECT tag_alias.fk_source
+                    FROM matched_tag
+                    INNER JOIN tag_alias
+                        ON tag_alias.fk_target = matched_tag.pk
+
+                    UNION
+
+                    SELECT tag_closure_table.fk_child
+                    FROM matched_tag
+                    INNER JOIN tag_closure_table
+                        ON tag_closure_table.fk_parent = matched_tag.pk
+                )"
                 ),
             });
 
-        let cte_idx = cte.idx;
+        let cte_name = format!("tag_cte{}", cte.idx);
         let base_table_name = self.query_parameters.base_table_name;
-        self.write_buff(&format!("EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN(SELECT tag_keys FROM cte{cte_idx}))"));
+        self.write_buff(&format!("EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN(SELECT tag_key FROM {cte_name}))"));
     }
 
     fn visit_binary_expression_node(

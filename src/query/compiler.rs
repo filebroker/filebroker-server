@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use lexer::Lexer;
-use std::{collections::HashMap, fmt};
+use std::fmt;
 
 use self::{
     ast::{Node, QueryBuilderVisitor, QueryNode, SemanticAnalysisVisitor},
@@ -76,7 +76,15 @@ pub fn compile_conditions(
     };
     let mut log = Log { errors: Vec::new() };
 
-    let mut root_node = compile_conditions_ast(conditions, junction, scope, &mut log)?;
+    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+    let mut root_node = compile_conditions_ast(
+        &mut semantic_analysis_visitor,
+        conditions,
+        junction,
+        scope,
+        &mut log,
+    )?;
+    query_parameters.encountered_tables = semantic_analysis_visitor.encountered_tables;
 
     let mut query_builder_visitor = QueryBuilderVisitor::new(&mut query_parameters);
     root_node.accept(&mut query_builder_visitor, scope, &mut log);
@@ -88,7 +96,11 @@ pub fn compile_conditions(
     }
 
     let sql_query = build_sql_string(
-        query_builder_visitor.ctes,
+        query_builder_visitor
+            .ctes
+            .into_values()
+            .map(|cte| cte.expression)
+            .collect(),
         query_builder_visitor.where_expressions,
         query_parameters,
         user,
@@ -105,6 +117,7 @@ pub fn compile_conditions(
 }
 
 pub fn compile_conditions_ast(
+    semantic_analysis_visitor: &mut SemanticAnalysisVisitor,
     conditions: Vec<String>,
     junction: Junction,
     scope: &Scope,
@@ -114,8 +127,7 @@ pub fn compile_conditions_ast(
 
     for condition in conditions {
         let mut ast = compile_ast(condition, log, true)?;
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor {};
-        ast.accept(&mut semantic_analysis_visitor, scope, log);
+        ast.accept(semantic_analysis_visitor, scope, log);
 
         let mut condition_expression = None;
         for statement in ast.node_type.statements {
@@ -198,7 +210,7 @@ pub fn compile_sql(
     let (ctes, where_expressions) = if let Some(query) = query {
         compile_expressions(query, &mut query_parameters, scope)?
     } else {
-        (HashMap::new(), Vec::new())
+        (Vec::new(), Vec::new())
     };
 
     let sql_query = build_sql_string(ctes, where_expressions, query_parameters, user)?;
@@ -214,7 +226,7 @@ pub fn compile_sql(
 }
 
 fn build_sql_string(
-    ctes: HashMap<String, Cte>,
+    mut ctes: Vec<String>,
     mut where_expressions: Vec<String>,
     mut query_parameters: QueryParameters,
     user: &Option<User>,
@@ -225,42 +237,92 @@ fn build_sql_string(
         .from_table_override
         .unwrap_or(query_parameters.base_table_name);
 
-    apply_ctes(&mut sql_query, &ctes)?;
-    if query_parameters.include_full_count {
-        if ctes.is_empty() {
-            sql_query.push_str("WITH ");
-        } else {
-            sql_query.push_str(", ");
-        }
+    perms::append_secure_query_condition(
+        &mut where_expressions,
+        &mut ctes,
+        user,
+        &query_parameters,
+    );
 
+    if query_parameters.include_full_count || query_parameters.shuffle {
         // Load a full set of PKs limited by MAX_FULL_LIMIT_STR (10000) to create a limited count of results
         // as well as a limited set of PKs to shuffle (shuffling is too slow for larger results)
-        sql_query.push_str("limitedPkSet AS (SELECT ");
-        sql_query.push_str(from_table_name);
-        sql_query.push_str(".pk FROM ");
-        sql_query.push_str(from_table_name);
+        let mut limited_pk_set = String::new();
+        limited_pk_set.push_str("limitedPkSet AS (SELECT ");
+        limited_pk_set.push_str(from_table_name);
+        limited_pk_set.push_str(".pk FROM ");
+        limited_pk_set.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
-            sql_query.push(' ');
-            sql_query.push_str(&query_parameters.join_statements.join(" "));
+            limited_pk_set.push(' ');
+            limited_pk_set.push_str(&query_parameters.build_join_statements(true));
         }
-        perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
-        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
-        sql_query.push_str(" LIMIT ");
-        sql_query.push_str(MAX_FULL_LIMIT_STR);
-        sql_query.push_str("), countCte AS (SELECT NULLIF((SELECT count(*) FROM limitedPkSet), ");
-        sql_query.push_str(MAX_FULL_LIMIT_STR);
-        sql_query.push_str(") AS full_count)");
+        apply_where_conditions(
+            &mut limited_pk_set,
+            &mut where_expressions,
+            &query_parameters,
+        );
+        limited_pk_set.push_str(" LIMIT ");
+        limited_pk_set.push_str(MAX_FULL_LIMIT_STR);
+        limited_pk_set.push(')');
+        ctes.push(limited_pk_set);
+        if query_parameters.include_full_count {
+            ctes.push(format!( "countCte AS (SELECT NULLIF((SELECT count(*) FROM limitedPkSet), {MAX_FULL_LIMIT_STR}) AS full_count)" ));
+        }
+    }
 
-        sql_query.push_str(" SELECT ");
-        sql_query.push_str(&query_parameters.select_statements.join(", "));
-        sql_query.push_str(", (SELECT full_count FROM countCte)");
-    } else {
-        if ctes.is_empty() {
-            sql_query.push_str("SELECT ");
+    let late_hydration = query_parameters.pagination.is_some();
+
+    if late_hydration {
+        let mut page_pk_set = String::new();
+        page_pk_set.push_str("pagePkSet AS MATERIALIZED (SELECT ");
+        if query_parameters.shuffle && query_parameters.include_full_count {
+            page_pk_set.push_str("pk FROM limitedPkSet ORDER BY RANDOM()");
         } else {
-            sql_query.push_str(" SELECT ");
+            page_pk_set.push_str(from_table_name);
+            page_pk_set.push_str(".pk FROM ");
+            page_pk_set.push_str(from_table_name);
+            if !query_parameters.join_statements.is_empty() {
+                page_pk_set.push(' ');
+                page_pk_set.push_str(&query_parameters.build_join_statements(true));
+            }
+            apply_where_conditions(&mut page_pk_set, &mut where_expressions, &query_parameters);
+            if query_parameters.shuffle {
+                page_pk_set.push_str(" ORDER BY RANDOM()");
+            } else {
+                let mut page_ordering = query_parameters.ordering.clone();
+                apply_ordering(
+                    &mut page_pk_set,
+                    &mut page_ordering,
+                    &query_parameters.fallback_orderings,
+                )?;
+            }
         }
-        sql_query.push_str(&query_parameters.select_statements.join(", "));
+        apply_pagination(&mut page_pk_set, &query_parameters, false)?;
+        page_pk_set.push(')');
+        ctes.push(page_pk_set);
+
+        let mut page_rows = String::new();
+        page_rows.push_str("pageRows AS MATERIALIZED (SELECT ");
+        page_rows.push_str(from_table_name);
+        page_rows.push_str(".* FROM ");
+        page_rows.push_str(from_table_name);
+        page_rows.push_str(" INNER JOIN pagePkSet ON pagePkSet.pk = ");
+        page_rows.push_str(from_table_name);
+        page_rows.push_str(".pk)");
+        ctes.push(page_rows);
+    }
+
+    apply_ctes(&mut sql_query, &ctes)?;
+
+    if ctes.is_empty() {
+        sql_query.push_str("SELECT ");
+    } else {
+        sql_query.push_str(" SELECT ");
+    }
+
+    sql_query.push_str(&query_parameters.select_statements.join(", "));
+    if query_parameters.include_full_count {
+        sql_query.push_str(", (SELECT full_count FROM countCte)");
     }
 
     // in case limit is not a constant expression (but e.g. a binary expression 50 + 10), evaluate the expression by selecting it
@@ -272,26 +334,48 @@ fn build_sql_string(
         sql_query.push_str(" AS evaluated_limit");
     }
 
-    sql_query.push_str(" FROM ");
-    sql_query.push_str(from_table_name);
-    if !query_parameters.join_statements.is_empty() {
-        sql_query.push(' ');
-        sql_query.push_str(&query_parameters.join_statements.join(" "));
-    }
-
-    if query_parameters.shuffle {
-        sql_query.push_str(" WHERE ");
+    if late_hydration {
+        sql_query.push_str(" FROM pageRows AS ");
         sql_query.push_str(from_table_name);
-        sql_query.push_str(".pk IN(SELECT pk FROM limitedPkSet) ORDER BY RANDOM()");
+
+        if !query_parameters.join_statements.is_empty() {
+            sql_query.push(' ');
+            sql_query.push_str(&query_parameters.build_join_statements(false));
+        }
+
+        if query_parameters.shuffle {
+            sql_query.push_str(" ORDER BY RANDOM()");
+        } else {
+            apply_ordering(
+                &mut sql_query,
+                &mut query_parameters.ordering,
+                &query_parameters.fallback_orderings,
+            )?;
+        }
     } else {
-        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
-        apply_ordering(
-            &mut sql_query,
-            &mut query_parameters.ordering,
-            &query_parameters.fallback_orderings,
-        )?;
+        sql_query.push_str(" FROM ");
+        sql_query.push_str(from_table_name);
+
+        if !query_parameters.join_statements.is_empty() {
+            sql_query.push(' ');
+            sql_query.push_str(&query_parameters.build_join_statements(false));
+        }
+
+        if query_parameters.shuffle {
+            sql_query.push_str(" WHERE ");
+            sql_query.push_str(from_table_name);
+            sql_query.push_str(".pk IN(SELECT pk FROM limitedPkSet) ORDER BY RANDOM()");
+        } else {
+            apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+            apply_ordering(
+                &mut sql_query,
+                &mut query_parameters.ordering,
+                &query_parameters.fallback_orderings,
+            )?;
+        }
+
+        apply_pagination(&mut sql_query, &query_parameters, false)?;
     }
-    apply_pagination(&mut sql_query, &query_parameters, false)?;
 
     Ok(sql_query)
 }
@@ -309,11 +393,18 @@ pub fn compile_window_query(
         (None, None)
     };
 
-    let (ctes, mut where_expressions) = if let Some(query) = query {
+    let (mut ctes, mut where_expressions) = if let Some(query) = query {
         compile_expressions(query, &mut query_parameters, scope)?
     } else {
-        (HashMap::new(), Vec::new())
+        (Vec::new(), Vec::new())
     };
+
+    perms::append_secure_query_condition(
+        &mut where_expressions,
+        &mut ctes,
+        user,
+        &query_parameters,
+    );
 
     let mut sql_query = String::new();
     apply_ctes(&mut sql_query, &ctes)?;
@@ -362,10 +453,9 @@ pub fn compile_window_query(
         sql_query.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
             sql_query.push(' ');
-            sql_query.push_str(&query_parameters.join_statements.join(" "));
+            sql_query.push_str(&query_parameters.build_join_statements(true));
         }
 
-        perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
         apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
         apply_ordering(
             &mut sql_query,
@@ -390,9 +480,8 @@ pub fn compile_window_query(
         sql_query.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
             sql_query.push(' ');
-            sql_query.push_str(&query_parameters.join_statements.join(" "));
+            sql_query.push_str(&query_parameters.build_join_statements(true));
         }
-        perms::append_secure_query_condition(&mut where_expressions, user, &query_parameters);
         apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
         apply_ordering(
             &mut sql_query,
@@ -411,7 +500,7 @@ pub fn compile_window_query(
         sql_query.push_str(from_table_name);
         if !query_parameters.join_statements.is_empty() {
             sql_query.push(' ');
-            sql_query.push_str(&query_parameters.join_statements.join(" "));
+            sql_query.push_str(&query_parameters.build_join_statements(true));
         }
         sql_query.push_str(" WHERE ");
         sql_query.push_str(from_table_name);
@@ -469,10 +558,10 @@ fn compile_expressions(
     query: String,
     query_parameters: &mut QueryParameters,
     scope: &Scope,
-) -> Result<(HashMap<String, Cte>, Vec<String>), crate::Error> {
+) -> Result<(Vec<String>, Vec<String>), crate::Error> {
     let mut log = Log { errors: Vec::new() };
     let mut ast = compile_ast(query, &mut log, true)?;
-    let mut semantic_analysis_visitor = SemanticAnalysisVisitor {};
+    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
     ast.accept(&mut semantic_analysis_visitor, scope, &mut log);
     if !log.errors.is_empty() {
         return Err(crate::Error::QueryCompilationError(
@@ -480,6 +569,8 @@ fn compile_expressions(
             log.errors,
         ));
     }
+
+    query_parameters.encountered_tables = semantic_analysis_visitor.encountered_tables;
 
     let mut query_builder_visitor = QueryBuilderVisitor::new(query_parameters);
     ast.accept(&mut query_builder_visitor, scope, &mut log);
@@ -491,12 +582,16 @@ fn compile_expressions(
     }
 
     Ok((
-        query_builder_visitor.ctes,
+        query_builder_visitor
+            .ctes
+            .into_values()
+            .map(|cte| cte.expression)
+            .collect(),
         query_builder_visitor.where_expressions,
     ))
 }
 
-pub fn apply_ctes(sql_query: &mut String, ctes: &HashMap<String, Cte>) -> Result<(), crate::Error> {
+pub fn apply_ctes(sql_query: &mut String, ctes: &[String]) -> Result<(), crate::Error> {
     let cte_len = ctes.len();
     if cte_len > 50 {
         return Err(crate::Error::IllegalQueryInputError(format!(
@@ -505,8 +600,8 @@ pub fn apply_ctes(sql_query: &mut String, ctes: &HashMap<String, Cte>) -> Result
     } else if cte_len > 0 {
         sql_query.push_str("WITH ");
 
-        for (i, cte) in ctes.values().enumerate() {
-            sql_query.push_str(&cte.expression);
+        for (i, cte) in ctes.iter().enumerate() {
+            sql_query.push_str(cte);
             if i < cte_len - 1 {
                 sql_query.push_str(", ");
             }
@@ -681,7 +776,7 @@ pub fn apply_pagination(
 mod tests {
     use crate::query::compiler::ast::{
         AttributeNode, BinaryExpressionNode, ExpressionStatement, Operator, PostTagNode,
-        VariableNode,
+        SemanticAnalysisVisitor, VariableNode,
     };
     use crate::query::compiler::dict::Scope;
     use crate::query::compiler::{Junction, Log, compile_conditions_ast};
@@ -689,7 +784,9 @@ mod tests {
     #[test]
     fn test_compile_single_condition() {
         let mut log = Log { errors: Vec::new() };
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         let ast = compile_conditions_ast(
+            &mut semantic_analysis_visitor,
             vec![String::from("Liara")],
             Junction::And,
             &Scope::Post,
@@ -713,7 +810,9 @@ mod tests {
     #[test]
     fn test_compile_single_condition_with_multiple_statements() {
         let mut log = Log { errors: Vec::new() };
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         let ast = compile_conditions_ast(
+            &mut semantic_analysis_visitor,
             vec![String::from("Liara tag2")],
             Junction::And,
             &Scope::Post,
@@ -756,7 +855,9 @@ mod tests {
     #[test]
     fn test_compile_multiple_conditions_with_single_statement() {
         let mut log = Log { errors: Vec::new() };
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         let ast = compile_conditions_ast(
+            &mut semantic_analysis_visitor,
             vec![String::from("Liara"), String::from("tag2")],
             Junction::And,
             &Scope::Post,
@@ -799,7 +900,9 @@ mod tests {
     #[test]
     fn test_compile_multiple_conditions_with_multiple_statements() {
         let mut log = Log { errors: Vec::new() };
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         let ast = compile_conditions_ast(
+            &mut semantic_analysis_visitor,
             vec![
                 String::from("Liara tag2"),
                 String::from("tag3 @uploader = :self"),
