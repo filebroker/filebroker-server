@@ -1,15 +1,13 @@
-use downcast_rs::{Downcast, impl_downcast};
-use lazy_static::lazy_static;
-use std::collections::HashSet;
-use std::{collections::HashMap, fmt::Debug};
-
-use crate::query::{Direction, Ordering, QueryParameters};
-
 use super::{
     Cte, Error, Location, Log,
     dict::{Scope, Type},
     lexer::Tag,
 };
+use crate::query::{Direction, Ordering, QueryParameters};
+use downcast_rs::{Downcast, impl_downcast};
+use itertools::Itertools;
+use lazy_static::lazy_static;
+use std::{collections::HashMap, fmt::Debug};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operator {
@@ -17,6 +15,7 @@ pub enum Operator {
     Divide,
     Equal,
     FuzzyEqual,
+    FuzzyMatch,
     Greater,
     GreaterEqual,
     Less,
@@ -61,6 +60,7 @@ impl Operator {
         match tag {
             Tag::Equal => Some(Operator::Equal),
             Tag::FuzzyEqual => Some(Operator::FuzzyEqual),
+            Tag::FuzzyMatch => Some(Operator::FuzzyMatch),
             Tag::Unequal => Some(Operator::Unequal),
             Tag::Less => Some(Operator::Less),
             Tag::LessEqual => Some(Operator::LessEqual),
@@ -81,7 +81,9 @@ impl Operator {
                     "="
                 }
             }
-            Self::FuzzyEqual => "LIKE",
+            // this has special handling BinaryExpressionNode rather than just printing the operator
+            Self::FuzzyMatch => "<<%",
+            Self::FuzzyEqual => "ILIKE",
             Self::Greater => ">",
             Self::GreaterEqual => ">=",
             Self::Less => "<",
@@ -116,6 +118,9 @@ impl Operator {
                 Some(Type::Boolean)
             }
             Self::FuzzyEqual if left == Type::String && right == Type::String => {
+                Some(Type::Boolean)
+            }
+            Self::FuzzyMatch if left == Type::String && right == Type::String => {
                 Some(Type::Boolean)
             }
             Self::Greater if both_of_type_or_null(left, right, Type::Number) => Some(Type::Boolean),
@@ -306,21 +311,27 @@ pub trait Visitor {
         log: &mut Log,
         location: Location,
     );
+
+    fn visit_fulltext_node(
+        &mut self,
+        fulltext_node: &mut FulltextNode,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    );
 }
 
-pub struct SemanticAnalysisVisitor {
-    pub encountered_tables: HashSet<&'static str>,
+pub struct SemanticAnalysisVisitor<'p> {
+    pub query_parameters: &'p mut QueryParameters,
 }
 
-impl SemanticAnalysisVisitor {
-    pub fn new() -> Self {
-        Self {
-            encountered_tables: HashSet::new(),
-        }
+impl<'p> SemanticAnalysisVisitor<'p> {
+    pub fn new(query_parameters: &'p mut QueryParameters) -> Self {
+        Self { query_parameters }
     }
 }
 
-impl Visitor for SemanticAnalysisVisitor {
+impl Visitor for SemanticAnalysisVisitor<'_> {
     fn visit_query_node(
         &mut self,
         query_node: &mut QueryNode,
@@ -564,7 +575,9 @@ impl Visitor for SemanticAnalysisVisitor {
         let attribute = attributes.get(identifier);
         match attribute {
             Some(attribute) => {
-                self.encountered_tables.insert(attribute.table);
+                self.query_parameters
+                    .encountered_tables
+                    .insert(attribute.table);
             }
             None => {
                 log.errors.push(Error {
@@ -633,6 +646,21 @@ impl Visitor for SemanticAnalysisVisitor {
             log.errors.push(Error {
                 location,
                 msg: format!("No such variable '{identifier}'"),
+            });
+        }
+    }
+
+    fn visit_fulltext_node(
+        &mut self,
+        _fulltext_node: &mut FulltextNode,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
+        if self.query_parameters.fulltext_table.is_none() {
+            log.errors.push(Error {
+                location,
+                msg: format!("No fulltext search available for scope: {scope}"),
             });
         }
     }
@@ -817,38 +845,9 @@ impl Visitor for QueryBuilderVisitor<'_> {
             .entry(tag_name)
             .or_insert_with_key(|tag_name| Cte {
                 idx,
-                expression: format!(
-                    "tag_cte{idx} AS (
-                    WITH matched_tag AS (
-                        SELECT pk
-                        FROM tag
-                        WHERE lower(tag.tag_name) = '{tag_name}'
-                    )
-
-                    SELECT pk AS tag_key
-                    FROM matched_tag
-
-                    UNION
-
-                    SELECT tag_alias.fk_target
-                    FROM matched_tag
-                    INNER JOIN tag_alias
-                        ON tag_alias.fk_source = matched_tag.pk
-
-                    UNION
-
-                    SELECT tag_alias.fk_source
-                    FROM matched_tag
-                    INNER JOIN tag_alias
-                        ON tag_alias.fk_target = matched_tag.pk
-
-                    UNION
-
-                    SELECT tag_closure_table.fk_child
-                    FROM matched_tag
-                    INNER JOIN tag_closure_table
-                        ON tag_closure_table.fk_parent = matched_tag.pk
-                )"
+                expression: build_tag_search_cte(
+                    &format!("tag_cte{idx}"),
+                    &format!("lower(tag.tag_name) = '{tag_name}'"),
                 ),
             });
 
@@ -891,12 +890,11 @@ impl Visitor for QueryBuilderVisitor<'_> {
             self.write_buff(op.get_sql_string(Some(binary_types)));
             self.write_buff(" interval ");
             right.accept(self, scope, log);
-        } else if op == Operator::FuzzyEqual
-            || ((op == Operator::Equal || op == Operator::Unequal)
-                && left_type == Type::String
-                && right_type == Type::String)
+        } else if (op == Operator::Equal || op == Operator::Unequal)
+            && left_type == Type::String
+            && right_type == Type::String
         {
-            // case insensitive matching for fuzzy equals and string equals
+            // case insensitive matching for string equals
             self.write_buff("LOWER(");
             left.accept(self, scope, log);
             self.write_buff(") ");
@@ -919,6 +917,30 @@ impl Visitor for QueryBuilderVisitor<'_> {
                 && (is_description_attribute(left) || is_description_attribute(right))
             {
                 self.write_buff(" AND LENGTH(description) < 2048");
+            }
+        } else if op == Operator::FuzzyMatch {
+            if let Some(string_literal) = right.node_type.downcast_mut::<StringLiteralNode>() {
+                let search_term = string_literal.val.split_whitespace().join(" ");
+                let use_trigram_search =
+                    search_term.chars().filter(|c| !c.is_whitespace()).count() >= 3;
+                let search_term = sanitize_string_literal(&search_term);
+                self.write_buff("to_tsvector('simple', coalesce(");
+                left.accept(self, scope, log);
+                self.write_buff(", '')) @@ plainto_tsquery('simple', '");
+                self.write_buff(&search_term);
+                self.write_buff("')");
+                if use_trigram_search {
+                    self.write_buff(" OR '");
+                    self.write_buff(&search_term);
+                    self.write_buff("' <<% ");
+                    left.accept(self, scope, log);
+                }
+            } else {
+                self.write_buff("to_tsvector('simple', coalesce(");
+                left.accept(self, scope, log);
+                self.write_buff(", '')) @@ plainto_tsquery('simple', ");
+                right.accept(self, scope, log);
+                self.write_buff(")");
             }
         } else {
             left.accept(self, scope, log);
@@ -1049,6 +1071,140 @@ impl Visitor for QueryBuilderVisitor<'_> {
             self.write_buff("NULL");
         }
     }
+
+    fn visit_fulltext_node(
+        &mut self,
+        fulltext_node: &mut FulltextNode,
+        _scope: &Scope,
+        _log: &mut Log,
+        _location: Location,
+    ) {
+        let search_term = fulltext_node.search_term.split_whitespace().join(" ");
+        let use_trigram_search = search_term.chars().filter(|c| !c.is_whitespace()).count() >= 3;
+
+        let idx = self.ctes.len();
+        let search_term = sanitize_string_literal(&search_term);
+        let key = format!("fts'tag:{search_term}");
+
+        let condition = if use_trigram_search {
+            format!("'{search_term}' <<% tag.tag_name")
+        } else {
+            format!("lower(tag.tag_name) = '{search_term}'")
+        };
+        let cte = self.ctes.entry(key).or_insert_with(|| Cte {
+            idx,
+            expression: build_tag_search_cte(&format!("tag_fuzzy_cte{idx}"), &condition),
+        });
+
+        let tag_cte_name = format!("tag_fuzzy_cte{}", cte.idx);
+        let base_table_name = self.query_parameters.base_table_name;
+        let fulltext_table = self
+            .query_parameters
+            .fulltext_table
+            .unwrap_or("--invalid--");
+
+        let fulltext_cte_idx = {
+            let idx = self.ctes.len();
+            let key = format!("fts'match:{base_table_name}:{search_term}");
+
+            self.ctes
+                .entry(key)
+                .or_insert_with(|| Cte {
+                    idx,
+                    expression: build_fulltext_match_cte(
+                        &format!("fulltext_match_cte{idx}"),
+                        base_table_name,
+                        fulltext_table,
+                        &tag_cte_name,
+                        &search_term,
+                        use_trigram_search,
+                    ),
+                })
+                .idx
+        };
+
+        let fulltext_cte_name = format!("fulltext_match_cte{fulltext_cte_idx}");
+        self.write_buff(&format!("EXISTS(SELECT * FROM {fulltext_cte_name} WHERE {fulltext_cte_name}.pk = {base_table_name}.pk)"));
+    }
+}
+
+fn build_fulltext_match_cte(
+    cte_name: &str,
+    base_table_name: &str,
+    fulltext_table: &str,
+    tag_cte_name: &str,
+    search_term: &str,
+    use_trigram_search: bool,
+) -> String {
+    let fuzzy_condition = if use_trigram_search {
+        format!(
+            "
+            UNION ALL
+
+            SELECT {fulltext_table}.fk_{base_table_name} AS pk
+            FROM {fulltext_table}
+            WHERE '{search_term}' <<% {fulltext_table}.search_text
+            "
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        "{cte_name} AS NOT MATERIALIZED (
+            SELECT {fulltext_table}.fk_{base_table_name} AS pk
+            FROM {fulltext_table}
+            WHERE {fulltext_table}.search_vector
+                @@ plainto_tsquery('simple', '{search_term}')
+
+            {fuzzy_condition}
+
+            UNION ALL
+
+            SELECT {base_table_name}_tag.fk_{base_table_name} AS pk
+            FROM {base_table_name}_tag
+            WHERE {base_table_name}_tag.fk_tag IN (
+                SELECT tag_key
+                FROM {tag_cte_name}
+            )
+        )"
+    )
+}
+
+fn build_tag_search_cte(cte_name: &str, condition: &str) -> String {
+    format!(
+        "{cte_name} AS (
+            WITH matched_tag AS (
+                SELECT pk
+                FROM tag
+                WHERE {condition}
+            )
+
+            SELECT pk AS tag_key
+            FROM matched_tag
+
+            UNION
+
+            SELECT tag_alias.fk_target
+            FROM matched_tag
+            INNER JOIN tag_alias
+                ON tag_alias.fk_source = matched_tag.pk
+
+            UNION
+
+            SELECT tag_alias.fk_source
+            FROM matched_tag
+            INNER JOIN tag_alias
+                ON tag_alias.fk_target = matched_tag.pk
+
+            UNION
+
+            SELECT tag_closure_table.fk_child
+            FROM matched_tag
+            INNER JOIN tag_closure_table
+                ON tag_closure_table.fk_parent = matched_tag.pk
+        )"
+    )
 }
 
 #[inline]
@@ -1648,6 +1804,38 @@ impl ExpressionNode for VariableNode {
             location: node.location,
             node_type: VariableNode {
                 identifier: self.identifier.clone(),
+            },
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct FulltextNode {
+    pub search_term: String,
+}
+
+impl NodeType for FulltextNode {
+    fn accept(
+        &mut self,
+        visitor: &mut dyn Visitor,
+        scope: &Scope,
+        log: &mut Log,
+        location: Location,
+    ) {
+        visitor.visit_fulltext_node(self, scope, log, location);
+    }
+}
+
+impl ExpressionNode for FulltextNode {
+    fn get_return_type(&self, _scope: &Scope) -> Type {
+        Type::Boolean
+    }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: FulltextNode {
+                search_term: self.search_term.clone(),
             },
         })
     }

@@ -10,6 +10,10 @@ pub mod sql_types {
     pub struct ObjectType;
 
     #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "tsvector", schema = "pg_catalog"))]
+    pub struct Tsvector;
+
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "user_group_audit_action"))]
     pub struct UserGroupAuditAction;
 }
@@ -286,6 +290,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::Tsvector;
+
+    post_collection_search_index (fk_post_collection) {
+        fk_post_collection -> Int8,
+        search_text -> Text,
+        search_vector -> Nullable<Tsvector>,
+    }
+}
+
+diesel::table! {
     post_collection_tag (fk_post_collection, fk_tag) {
         fk_post_collection -> Int8,
         fk_tag -> Int8,
@@ -344,6 +359,17 @@ diesel::table! {
         write -> Bool,
         fk_granted_by -> Int8,
         creation_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::Tsvector;
+
+    post_search_index (fk_post) {
+        fk_post -> Int8,
+        search_text -> Text,
+        search_vector -> Nullable<Tsvector>,
     }
 }
 
@@ -647,6 +673,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::Tsvector;
+
+    user_group_search_index (fk_user_group) {
+        fk_user_group -> Int8,
+        search_text -> Text,
+        search_vector -> Nullable<Tsvector>,
+    }
+}
+
+diesel::table! {
     user_group_tag (fk_user_group, fk_tag) {
         fk_user_group -> Int8,
         fk_tag -> Int8,
@@ -692,6 +729,7 @@ diesel::joinable!(post_collection_group_access -> user_group (fk_granted_group))
 diesel::joinable!(post_collection_item -> post (fk_post));
 diesel::joinable!(post_collection_item -> post_collection (fk_post_collection));
 diesel::joinable!(post_collection_item -> registered_user (fk_added_by));
+diesel::joinable!(post_collection_search_index -> post_collection (fk_post_collection));
 diesel::joinable!(post_collection_tag -> post_collection (fk_post_collection));
 diesel::joinable!(post_collection_tag -> tag (fk_tag));
 diesel::joinable!(post_edit_history -> post (fk_post));
@@ -704,6 +742,7 @@ diesel::joinable!(post_edit_history_tag -> tag (fk_tag));
 diesel::joinable!(post_group_access -> post (fk_post));
 diesel::joinable!(post_group_access -> registered_user (fk_granted_by));
 diesel::joinable!(post_group_access -> user_group (fk_granted_group));
+diesel::joinable!(post_search_index -> post (fk_post));
 diesel::joinable!(post_tag -> post (fk_post));
 diesel::joinable!(post_tag -> tag (fk_tag));
 diesel::joinable!(reconcile_broker_quota_usage_task -> broker (fk_broker));
@@ -727,6 +766,7 @@ diesel::joinable!(user_group_edit_history_tag -> tag (fk_tag));
 diesel::joinable!(user_group_edit_history_tag -> user_group_edit_history (fk_user_group_edit_history));
 diesel::joinable!(user_group_invite -> user_group (fk_user_group));
 diesel::joinable!(user_group_membership -> user_group (fk_group));
+diesel::joinable!(user_group_search_index -> user_group (fk_user_group));
 diesel::joinable!(user_group_tag -> tag (fk_tag));
 diesel::joinable!(user_group_tag -> user_group (fk_user_group));
 diesel::joinable!(user_preferences -> registered_user (fk_user));
@@ -749,11 +789,13 @@ diesel::allow_tables_to_appear_in_same_query!(
     post_collection_edit_history_tag,
     post_collection_group_access,
     post_collection_item,
+    post_collection_search_index,
     post_collection_tag,
     post_edit_history,
     post_edit_history_group_access,
     post_edit_history_tag,
     post_group_access,
+    post_search_index,
     post_tag,
     reconcile_broker_quota_usage_task,
     refresh_token,
@@ -774,6 +816,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     user_group_edit_history_tag,
     user_group_invite,
     user_group_membership,
+    user_group_search_index,
     user_group_tag,
     user_preferences,
 );

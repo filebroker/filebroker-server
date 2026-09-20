@@ -1,5 +1,3 @@
-use std::{iter::Peekable, mem, vec::IntoIter};
-
 use super::{
     Error, Location, Log,
     ast::{
@@ -10,6 +8,8 @@ use super::{
     },
     lexer::{ParsedToken, Tag, Token},
 };
+use crate::query::compiler::ast::FulltextNode;
+use std::{iter::Peekable, mem, vec::IntoIter};
 
 pub static ERROR_IDENTIFIER: &str = "$ERROR$";
 
@@ -218,6 +218,38 @@ impl Parser<'_> {
             let expression = self.parse_expression()?;
             self.check_curr_tag(Tag::CloseParenthesis);
             Ok(expression)
+        } else if self.curr_is_tag(Tag::Fulltext) {
+            self.next()?;
+            if let Some(Token {
+                parsed_token: ParsedToken::StringToken(ref mut val),
+                ..
+            }) = self.curr_tok
+            {
+                let val = mem::take(val);
+                self.advance();
+                Ok(Box::new(Node {
+                    location: Location {
+                        start,
+                        end: self.prev_end,
+                    },
+                    node_type: FulltextNode { search_term: val },
+                }))
+            } else {
+                self.report_error(format!(
+                    "Expected string literal after fulltext search operator but got {:?}",
+                    self.curr_tok
+                ));
+                self.advance();
+                Ok(Box::new(Node {
+                    location: Location {
+                        start,
+                        end: self.prev_end,
+                    },
+                    node_type: FulltextNode {
+                        search_term: String::default(),
+                    },
+                }))
+            }
         } else {
             self.parse_operand()
         }
@@ -536,6 +568,7 @@ impl ParserError {
 #[cfg(test)]
 mod tests {
 
+    use crate::query::compiler::ast::FulltextNode;
     use crate::query::compiler::{
         Location, Log,
         ast::{
@@ -965,6 +998,121 @@ mod tests {
             Node {
                 location: Location { start: 19, end: 23 },
                 node_type: BooleanLiteralNode { val: false },
+            },
+        );
+    }
+
+    #[test]
+    fn test_parse_fulltext_node() {
+        let query = parse(String::from("~\"South\""));
+        assert_eq!(query.location, Location { start: 0, end: 7 });
+        let query_node = query.node_type;
+        assert_eq!(query_node.statements.len(), 1);
+
+        let statement = &query_node.statements[0];
+        assert_eq!(statement.location, Location { start: 0, end: 7 });
+        let expression_statement = statement.node_type.downcast_ref::<ExpressionStatement>();
+        assert!(expression_statement.is_some());
+        let expression_node = &expression_statement.unwrap().expression_node;
+        assert_eq!(expression_node.location, Location { start: 0, end: 7 });
+        let fulltext_node = expression_node.node_type.downcast_ref::<FulltextNode>();
+        assert!(fulltext_node.is_some());
+        let fulltext_node = fulltext_node.unwrap();
+        assert_eq!(fulltext_node.search_term, String::from("South"));
+    }
+
+    #[test]
+    fn test_parse_fulltext_node_with_tag_node() {
+        let query = parse(String::from("Lara ~\"wallpaper\""));
+        assert_eq!(query.location, Location { start: 0, end: 16 });
+        let query_node = query.node_type;
+        assert_eq!(query_node.statements.len(), 2);
+
+        let statement1 = &query_node.statements[0];
+        assert_post_tag_statement(statement1, 0, 3, "lara");
+
+        let statement2 = &query_node.statements[1];
+        assert_eq!(statement2.location, Location { start: 5, end: 16 });
+        let expression_statement = statement2.node_type.downcast_ref::<ExpressionStatement>();
+        assert!(expression_statement.is_some());
+        let expression_node = &expression_statement.unwrap().expression_node;
+        assert_eq!(expression_node.location, Location { start: 5, end: 16 });
+        let fulltext_node = expression_node.node_type.downcast_ref::<FulltextNode>();
+        assert!(fulltext_node.is_some());
+        let fulltext_node = fulltext_node.unwrap();
+        assert_eq!(fulltext_node.search_term, String::from("wallpaper"));
+    }
+
+    #[test]
+    fn test_parse_binary_fuzzy_match_node() {
+        let query = parse(String::from("@genre ~~ \"rock\""));
+        assert_eq!(query.location, Location { start: 0, end: 15 });
+        let query_node = query.node_type;
+        assert_eq!(query_node.statements.len(), 1);
+
+        let statement = &query_node.statements[0];
+        assert_eq!(statement.location, Location { start: 0, end: 15 });
+        let expression_statement = statement.node_type.downcast_ref::<ExpressionStatement>();
+        assert!(expression_statement.is_some());
+
+        assert_binary_expression_node(
+            &expression_statement.unwrap().expression_node,
+            0,
+            15,
+            Operator::FuzzyMatch,
+            Node {
+                location: Location { start: 0, end: 5 },
+                node_type: AttributeNode {
+                    identifier: String::from("genre"),
+                },
+            },
+            Node {
+                location: Location { start: 10, end: 15 },
+                node_type: StringLiteralNode {
+                    val: String::from("rock"),
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn test_parse_fuzzy_match_fulltext_mix() {
+        let query = parse(String::from("~\"Linkin\" @artist ~~ \"Park\""));
+        assert_eq!(query.location, Location { start: 0, end: 26 });
+        let query_node = query.node_type;
+        assert_eq!(query_node.statements.len(), 2);
+
+        let statement1 = &query_node.statements[0];
+        assert_eq!(statement1.location, Location { start: 0, end: 8 });
+        let expression_statement1 = statement1.node_type.downcast_ref::<ExpressionStatement>();
+        assert!(expression_statement1.is_some());
+        let expression_node1 = &expression_statement1.unwrap().expression_node;
+        assert_eq!(expression_node1.location, Location { start: 0, end: 8 });
+        let fulltext_node = expression_node1.node_type.downcast_ref::<FulltextNode>();
+        assert!(fulltext_node.is_some());
+        let fulltext_node = fulltext_node.unwrap();
+        assert_eq!(fulltext_node.search_term, String::from("Linkin"));
+
+        let statement2 = &query_node.statements[1];
+        assert_eq!(statement2.location, Location { start: 10, end: 26 });
+        let expression_statement2 = statement2.node_type.downcast_ref::<ExpressionStatement>();
+        assert!(expression_statement2.is_some());
+        assert_binary_expression_node(
+            &expression_statement2.unwrap().expression_node,
+            10,
+            26,
+            Operator::FuzzyMatch,
+            Node {
+                location: Location { start: 10, end: 16 },
+                node_type: AttributeNode {
+                    identifier: String::from("artist"),
+                },
+            },
+            Node {
+                location: Location { start: 21, end: 26 },
+                node_type: StringLiteralNode {
+                    val: String::from("Park"),
+                },
             },
         );
     }

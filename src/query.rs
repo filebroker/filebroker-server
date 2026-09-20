@@ -2,7 +2,9 @@ use chrono::{DateTime, Utc};
 use diesel::query_builder::{BoxedSelectStatement, QueryId};
 use diesel::query_dsl::methods::{OrderDsl, ThenOrderDsl};
 use diesel::sql_types::SingleValue;
-use diesel::{OptionalExtension, QueryDsl, QueryableByName};
+use diesel::{
+    ExpressionMethods, OptionalExtension, PgTextExpressionMethods, QueryDsl, QueryableByName,
+};
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -20,7 +22,6 @@ use crate::post::PostCollectionGroupAccessDetailed;
 use crate::util::dedup_vec;
 use crate::{
     acquire_db_connection,
-    diesel::{ExpressionMethods, TextExpressionMethods},
     error::Error,
     model::{PostQueryObject, PostWindowQueryObject, S3Object, Tag, User},
     perms::{self, PostJoined},
@@ -38,7 +39,7 @@ use self::{
         dict::Scope,
         lexer,
     },
-    functions::{char_length, lower},
+    functions::char_length,
 };
 
 pub mod compiler;
@@ -113,7 +114,7 @@ use crate::data::{PRESIGNED_GET_EXPIRATION_SECS, create_bucket};
 use crate::tag::TagUsage;
 pub(crate) use load_and_report_missing_pks;
 
-#[derive(Deserialize, Validate)]
+#[derive(Default, Deserialize, Validate)]
 pub struct QueryParametersFilter {
     #[validate(range(min = 1, max = 100))]
     pub limit: Option<u32>,
@@ -144,6 +145,30 @@ pub struct QueryParameters {
         fn(Option<&User>, &QueryParameters, &mut Vec<String>) -> Option<String>,
     /// Table referenced by attribute usages encountered in source query
     pub encountered_tables: HashSet<&'static str>,
+    pub fulltext_table: Option<&'static str>,
+}
+
+impl Default for QueryParameters {
+    fn default() -> Self {
+        Self {
+            pagination: Default::default(),
+            ordering: Default::default(),
+            variables: Default::default(),
+            shuffle: Default::default(),
+            writable_only: Default::default(),
+            base_table_name: Default::default(),
+            select_statements: Default::default(),
+            join_statements: Default::default(),
+            fallback_orderings: Default::default(),
+            from_table_override: Default::default(),
+            predefined_where_conditions: Default::default(),
+            include_full_count: Default::default(),
+            privileged: Default::default(),
+            get_secure_query_condition: |_user, _query_parameters, _where_conditions| None,
+            encountered_tables: Default::default(),
+            fulltext_table: Default::default(),
+        }
+    }
 }
 
 impl QueryParameters {
@@ -987,6 +1012,7 @@ pub fn prepare_query_parameters(
             privileged: scope == &Scope::TagAutoMatchPost,
             get_secure_query_condition: perms::get_secure_query_condition_string_post,
             encountered_tables: HashSet::new(),
+            fulltext_table: Some("post_search_index"),
         }),
         Scope::Collection | Scope::TagAutoMatchCollection => Ok(QueryParameters {
             pagination: if scope == &Scope::TagAutoMatchCollection {
@@ -1098,6 +1124,7 @@ pub fn prepare_query_parameters(
             privileged: scope == &Scope::TagAutoMatchCollection,
             get_secure_query_condition: perms::get_secure_query_condition_string_collection,
             encountered_tables: HashSet::new(),
+            fulltext_table: Some("post_collection_search_index"),
         }),
         Scope::CollectionItem { collection_pk } => Ok(QueryParameters {
             pagination: Some(QueryBuilderPagination {
@@ -1397,6 +1424,7 @@ pub fn prepare_query_parameters(
             privileged: false,
             get_secure_query_condition: perms::get_secure_query_condition_string_post,
             encountered_tables: HashSet::new(),
+            fulltext_table: Some("post_search_index"),
         }),
         Scope::UserGroup => Ok(QueryParameters {
             pagination: Some(QueryBuilderPagination {
@@ -1484,6 +1512,7 @@ pub fn prepare_query_parameters(
                 ))
             },
             encountered_tables: HashSet::new(),
+            fulltext_table: Some("user_group_search_index"),
         }),
     }
 }
@@ -1603,7 +1632,10 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
     };
 
     let error = if log.errors.is_empty() {
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+        let mut query_parameters =
+            prepare_query_parameters(&QueryParametersFilter::default(), &None, &scope)
+                .unwrap_or_default();
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
         ast.accept(&mut semantic_analysis_visitor, &scope, &mut log);
         if !log.errors.is_empty() {
             Some(QueryCompilationError {
@@ -1638,9 +1670,7 @@ async fn find_expression_autocomplete_suggestions(
     if let Some(post_tag_node) = expression.node_type.downcast_ref::<PostTagNode>() {
         let mut connection = acquire_db_connection().await?;
         let found_tags = tag::table
-            .filter(
-                lower(tag::tag_name).like(format!("{}%", post_tag_node.identifier.to_lowercase())),
-            )
+            .filter(tag::tag_name.ilike(format!("{}%", post_tag_node.identifier)))
             .order_by((char_length(tag::tag_name).asc(), tag::tag_name.asc()))
             .limit(10)
             .load::<Tag>(&mut connection)

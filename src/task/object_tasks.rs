@@ -43,7 +43,7 @@ pub fn generate_missing_hls_streams(tokio_handle: Handle) -> Result<(), Error> {
                         WHERE NOT hls_disabled
                         AND NOT(obj.object_key = ANY($1))
                         AND hls_master_playlist IS NULL
-                        AND LOWER(mime_type) LIKE 'video/%'
+                        AND mime_type ILIKE 'video/%'
                         AND hls_locked_at IS NULL
                         AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)
                         AND EXISTS(SELECT * FROM broker WHERE pk = obj.fk_broker AND hls_enabled)
@@ -159,7 +159,7 @@ pub fn generate_missing_thumbnails(tokio_handle: Handle) -> Result<(), Error> {
                         SELECT * FROM s3_object AS obj
                         WHERE NOT thumbnail_disabled
                         AND thumbnail_object_key IS NULL
-                        AND (LOWER(mime_type) LIKE 'video/%' OR LOWER(mime_type) LIKE 'image/%' OR LOWER(mime_type) LIKE 'audio/%')
+                        AND (mime_type ILIKE 'video/%' OR mime_type ILIKE 'image/%' OR mime_type ILIKE 'audio/%')
                         AND thumbnail_locked_at IS NULL
                         AND NOT (object_key LIKE 'thumb_%')
                         AND EXISTS(SELECT * FROM post WHERE s3_object = obj.object_key)

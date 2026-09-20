@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, fmt, str::FromStr, sync::Arc};
 
 use super::{
     Error, Location, Log,
@@ -75,6 +75,22 @@ pub enum Scope {
     // Scopes for tag auto match conditions
     TagAutoMatchPost,
     TagAutoMatchCollection,
+}
+
+impl fmt::Display for Scope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Scope::Global => write!(f, "Global"),
+            Scope::Post => write!(f, "Post"),
+            Scope::Collection => write!(f, "Collection"),
+            Scope::CollectionItem { collection_pk } => {
+                write!(f, "Post of collection {}", collection_pk)
+            }
+            Scope::UserGroup => write!(f, "User Group"),
+            Scope::TagAutoMatchPost => write!(f, "tag_auto_match_post"),
+            Scope::TagAutoMatchCollection => write!(f, "tag_auto_match_collection"),
+        }
+    }
 }
 
 impl FromStr for Scope {
@@ -191,45 +207,6 @@ impl Scope {
 lazy_static! {
     pub static ref GLOBAL_FUNCTIONS: HashMap<&'static str, Arc<Function>> = HashMap::from([
         (
-            "avg",
-            Arc::new(Function {
-                params: vec![Parameter {
-                    parameter_type: ParameterType::Attribute(Type::Number)
-                }],
-                return_type: Type::Number,
-                accept_arguments,
-                write_expression_fn: |visitor, args, scope, _location, log| {
-                    write_post_aggregate_function_expr("AVG", visitor, args, scope, log)
-                }
-            })
-        ),
-        (
-            "max",
-            Arc::new(Function {
-                params: vec![Parameter {
-                    parameter_type: ParameterType::Attribute(Type::Number)
-                }],
-                return_type: Type::Number,
-                accept_arguments,
-                write_expression_fn: |visitor, args, scope, _location, log| {
-                    write_post_aggregate_function_expr("MAX", visitor, args, scope, log)
-                }
-            })
-        ),
-        (
-            "min",
-            Arc::new(Function {
-                params: vec![Parameter {
-                    parameter_type: ParameterType::Attribute(Type::Number)
-                }],
-                return_type: Type::Number,
-                accept_arguments,
-                write_expression_fn: |visitor, args, scope, _location, log| {
-                    write_post_aggregate_function_expr("MIN", visitor, args, scope, log)
-                }
-            })
-        ),
-        (
             "find_user",
             Arc::new(Function {
                 params: vec![Parameter {
@@ -308,16 +285,12 @@ lazy_static! {
 
                         let attribute_arg = &mut args[0];
                         visitor.write_buff("(");
-                        // check that the target attribute is not NULL
-                        attribute_arg.accept(visitor, scope, log);
-                        visitor.write_buff(" IS NOT NULL AND ");
                         // check that the value is contained in the target attribute at all,
                         // this is much faster because it can use trigram indexes, and if the value is not contained, the pattern does not match anyway
-                        visitor.write_buff("LOWER(");
                         attribute_arg.accept(visitor, scope, log);
-                        visitor.write_buff(") LIKE LOWER('%");
+                        visitor.write_buff(" ILIKE '%");
                         visitor.write_buff(&value);
-                        visitor.write_buff("%') AND ");
+                        visitor.write_buff("%' AND ");
                         // perform the regex match to see if the value is part of a ,&; separated list of values
                         attribute_arg.accept(visitor, scope, log);
                         visitor.write_buff(" ~* ");
@@ -861,29 +834,6 @@ fn write_subquery_function_expr(
     }
 
     visitor.write_buff(")");
-}
-
-fn write_post_aggregate_function_expr(
-    identifier: &str,
-    visitor: &mut QueryBuilderVisitor,
-    args: &mut [Box<Node<dyn ExpressionNode>>],
-    scope: &Scope,
-    log: &mut Log,
-) {
-    visitor.write_buff("(SELECT ");
-    visitor.write_buff(identifier);
-    visitor.write_buff("(");
-
-    let argument_count = args.len();
-    for (i, argument) in args.iter_mut().enumerate() {
-        argument.accept(visitor, scope, log);
-
-        if i < argument_count - 1 {
-            visitor.write_buff(", ");
-        }
-    }
-
-    visitor.write_buff(") FROM post)");
 }
 
 fn accept_sort_modifier_arguments(

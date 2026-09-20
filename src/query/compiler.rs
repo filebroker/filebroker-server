@@ -1,13 +1,13 @@
 use serde::Serialize;
 
-use lexer::Lexer;
-use std::fmt;
-
 use self::{
     ast::{Node, QueryBuilderVisitor, QueryNode, SemanticAnalysisVisitor},
     dict::Scope,
     parser::Parser,
 };
+use itertools::Itertools;
+use lexer::Lexer;
+use std::fmt;
 
 use super::{MAX_PAGE, QueryBuilderPagination, QueryParameters};
 
@@ -76,7 +76,7 @@ pub fn compile_conditions(
     };
     let mut log = Log { errors: Vec::new() };
 
-    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
     let mut root_node = compile_conditions_ast(
         &mut semantic_analysis_visitor,
         conditions,
@@ -84,7 +84,6 @@ pub fn compile_conditions(
         scope,
         &mut log,
     )?;
-    query_parameters.encountered_tables = semantic_analysis_visitor.encountered_tables;
 
     let mut query_builder_visitor = QueryBuilderVisitor::new(&mut query_parameters);
     root_node.accept(&mut query_builder_visitor, scope, &mut log);
@@ -99,6 +98,7 @@ pub fn compile_conditions(
         query_builder_visitor
             .ctes
             .into_values()
+            .sorted_by_key(|cte| cte.idx)
             .map(|cte| cte.expression)
             .collect(),
         query_builder_visitor.where_expressions,
@@ -561,7 +561,7 @@ fn compile_expressions(
 ) -> Result<(Vec<String>, Vec<String>), crate::Error> {
     let mut log = Log { errors: Vec::new() };
     let mut ast = compile_ast(query, &mut log, true)?;
-    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(query_parameters);
     ast.accept(&mut semantic_analysis_visitor, scope, &mut log);
     if !log.errors.is_empty() {
         return Err(crate::Error::QueryCompilationError(
@@ -569,8 +569,6 @@ fn compile_expressions(
             log.errors,
         ));
     }
-
-    query_parameters.encountered_tables = semantic_analysis_visitor.encountered_tables;
 
     let mut query_builder_visitor = QueryBuilderVisitor::new(query_parameters);
     ast.accept(&mut query_builder_visitor, scope, &mut log);
@@ -585,6 +583,7 @@ fn compile_expressions(
         query_builder_visitor
             .ctes
             .into_values()
+            .sorted_by_key(|cte| cte.idx)
             .map(|cte| cte.expression)
             .collect(),
         query_builder_visitor.where_expressions,
@@ -774,6 +773,7 @@ pub fn apply_pagination(
 
 #[cfg(test)]
 mod tests {
+    use crate::query::QueryParameters;
     use crate::query::compiler::ast::{
         AttributeNode, BinaryExpressionNode, ExpressionStatement, Operator, PostTagNode,
         SemanticAnalysisVisitor, VariableNode,
@@ -784,7 +784,8 @@ mod tests {
     #[test]
     fn test_compile_single_condition() {
         let mut log = Log { errors: Vec::new() };
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+        let mut query_parameters = QueryParameters::default();
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
         let ast = compile_conditions_ast(
             &mut semantic_analysis_visitor,
             vec![String::from("Liara")],
@@ -810,7 +811,8 @@ mod tests {
     #[test]
     fn test_compile_single_condition_with_multiple_statements() {
         let mut log = Log { errors: Vec::new() };
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+        let mut query_parameters = QueryParameters::default();
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
         let ast = compile_conditions_ast(
             &mut semantic_analysis_visitor,
             vec![String::from("Liara tag2")],
@@ -855,7 +857,8 @@ mod tests {
     #[test]
     fn test_compile_multiple_conditions_with_single_statement() {
         let mut log = Log { errors: Vec::new() };
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+        let mut query_parameters = QueryParameters::default();
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
         let ast = compile_conditions_ast(
             &mut semantic_analysis_visitor,
             vec![String::from("Liara"), String::from("tag2")],
@@ -900,7 +903,8 @@ mod tests {
     #[test]
     fn test_compile_multiple_conditions_with_multiple_statements() {
         let mut log = Log { errors: Vec::new() };
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+        let mut query_parameters = QueryParameters::default();
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
         let ast = compile_conditions_ast(
             &mut semantic_analysis_visitor,
             vec![

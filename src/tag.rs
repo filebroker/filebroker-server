@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use diesel::{
-    BoolExpressionMethods, ExpressionMethods, JoinOnDsl, OptionalExtension, QueryDsl,
-    TextExpressionMethods, dsl::exists,
+    BoolExpressionMethods, ExpressionMethods, JoinOnDsl, OptionalExtension,
+    PgTextExpressionMethods, QueryDsl, dsl::exists,
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
@@ -21,7 +21,7 @@ use crate::{
     error::{Error, TransactionRuntimeError},
     model::{NewTag, Tag, TagClosureTable, TagEdge},
     query::functions::{char_length, lower},
-    retry_on_constraint_violation,
+    retry_on_constraint_violation, run_repeatable_read_transaction,
     schema::{self, tag, tag_alias, tag_closure_table, tag_edge},
 };
 
@@ -136,7 +136,7 @@ pub async fn find_tag_handler(tag_name: String) -> Result<impl Reply, Rejection>
 
     let mut connection = acquire_db_connection().await?;
     let mut found_tags = tag::table
-        .filter(lower(tag::tag_name).like(format!("{}%", tag_name.to_lowercase())))
+        .filter(tag::tag_name.ilike(format!("{tag_name}%")))
         .order_by((char_length(tag::tag_name).asc(), tag::tag_name.asc()))
         .limit(10)
         .load::<Tag>(&mut connection)
@@ -332,40 +332,43 @@ pub async fn get_tags_handler(mut get_tags_filter: GetTagsFilter) -> Result<impl
         }
     }
 
-    let (tags, count) = if let Some(filter) = get_tags_filter.filter {
-        let tags = tag::table
-            .filter(lower(tag::tag_name).like(format!("%{}%", filter.to_lowercase())))
-            .order_by(lower(tag::tag_name).asc())
-            .limit(limit as i64)
-            .offset((page * limit) as i64)
-            .load::<Tag>(&mut connection)
-            .await
-            .map_err(Error::from)?;
+    let (tags, count) = run_repeatable_read_transaction(&mut connection, async |connection| {
+        if let Some(filter) = get_tags_filter.filter {
+            let tags = tag::table
+                .filter(tag::tag_name.ilike(format!("%{filter}%")))
+                .order_by(tag::tag_name.asc())
+                .limit(limit as i64)
+                .offset((page * limit) as i64)
+                .load::<Tag>(connection)
+                .await
+                .map_err(Error::from)?;
 
-        let count = tag::table
-            .filter(lower(tag::tag_name).like(format!("%{}%", filter.to_lowercase())))
-            .count()
-            .get_result::<i64>(&mut connection)
-            .await
-            .map_err(Error::from)?;
+            let count = tag::table
+                .filter(tag::tag_name.ilike(format!("%{filter}%")))
+                .count()
+                .get_result::<i64>(connection)
+                .await
+                .map_err(Error::from)?;
 
-        (tags, count)
-    } else {
-        let tags = tag::table
-            .order_by(lower(tag::tag_name).asc())
-            .limit(limit as i64)
-            .offset((page * limit) as i64)
-            .load::<Tag>(&mut connection)
-            .await
-            .map_err(Error::from)?;
+            Ok((tags, count))
+        } else {
+            let tags = tag::table
+                .order_by(tag::tag_name.asc())
+                .limit(limit as i64)
+                .offset((page * limit) as i64)
+                .load::<Tag>(connection)
+                .await
+                .map_err(Error::from)?;
 
-        let count = tag::table
-            .count()
-            .get_result::<i64>(&mut connection)
-            .await
-            .map_err(Error::from)?;
-        (tags, count)
-    };
+            let count = tag::table
+                .count()
+                .get_result::<i64>(connection)
+                .await
+                .map_err(Error::from)?;
+            Ok((tags, count))
+        }
+    })
+    .await?;
 
     Ok(warp::reply::json(&GetTagsResponse { tags, count }))
 }

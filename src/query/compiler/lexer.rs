@@ -15,7 +15,9 @@ pub enum Tag {
     At,
     Divide,
     Equal,
+    Fulltext,
     FuzzyEqual,
+    FuzzyMatch,
     Greater,
     GreaterEqual,
     Minus,
@@ -259,6 +261,7 @@ enum StateType {
         // tag if single operator
         single_tag: Option<Tag>,
     },
+    FuzzyState,
 }
 
 impl State {
@@ -412,6 +415,42 @@ impl State {
                     .handle_char(c, pos, token_stream, log, is_escaped)
                 }
             }
+            StateType::FuzzyState => {
+                if c == '=' && !is_escaped {
+                    token_stream.push(Token {
+                        location: Location {
+                            start: self.conception_idx,
+                            end: pos,
+                        },
+                        parsed_token: ParsedToken::StaticToken(Tag::FuzzyEqual),
+                    });
+
+                    State {
+                        conception_idx: pos + 1,
+                        state_type: StateType::ScanningState,
+                    }
+                } else if c == '~' && !is_escaped {
+                    token_stream.push(Token {
+                        location: Location {
+                            start: self.conception_idx,
+                            end: pos,
+                        },
+                        parsed_token: ParsedToken::StaticToken(Tag::FuzzyMatch),
+                    });
+
+                    State {
+                        conception_idx: pos + 1,
+                        state_type: StateType::ScanningState,
+                    }
+                } else {
+                    self.terminate(pos.saturating_sub(1), token_stream, log);
+                    State {
+                        conception_idx: pos,
+                        state_type: StateType::ScanningState,
+                    }
+                    .handle_char(c, pos, token_stream, log, is_escaped)
+                }
+            }
         }
     }
 
@@ -505,6 +544,13 @@ impl State {
                     })
                 }
             }
+            StateType::FuzzyState => token_stream.push(Token {
+                location: Location {
+                    start: self.conception_idx,
+                    end: pos,
+                },
+                parsed_token: ParsedToken::StaticToken(Tag::Fulltext),
+            }),
         }
     }
 
@@ -518,6 +564,7 @@ impl State {
             StateType::IntegerState(_) => false,
             StateType::StringState(_) => c != '\n' && c != '\r',
             StateType::EqualityState { .. } => c == '=',
+            StateType::FuzzyState => c == '=' || c == '~',
         }
     }
 }
@@ -537,10 +584,7 @@ impl StateType {
                 equality_tag: Tag::GreaterEqual,
                 single_tag: Some(Tag::Greater),
             }),
-            '~' => Some(StateType::EqualityState {
-                equality_tag: Tag::FuzzyEqual,
-                single_tag: None,
-            }),
+            '~' => Some(StateType::FuzzyState),
             _ => None,
         }
     }
@@ -976,6 +1020,51 @@ mod tests {
         );
 
         assert_eq!(token_stream.next(), None);
+    }
+
+    #[test]
+    fn test_fuzzy_match_equality_tag() {
+        let mut log = Log { errors: Vec::new() };
+
+        let lexer = Lexer::new_for_string(String::from("@genre ~~ \"rock\""), &mut log);
+        let mut token_stream = lexer.read_token_stream().into_iter();
+        assert!(log.errors.is_empty());
+
+        assert_token(token_stream.next(), 0, 0, StaticToken(Tag::At));
+
+        assert_token(
+            token_stream.next(),
+            1,
+            5,
+            IdentifierToken(String::from("genre")),
+        );
+
+        assert_token(token_stream.next(), 7, 8, StaticToken(Tag::FuzzyMatch));
+
+        assert_token(
+            token_stream.next(),
+            10,
+            15,
+            StringToken(String::from("rock")),
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_match_single_tag() {
+        let mut log = Log { errors: Vec::new() };
+
+        let lexer = Lexer::new_for_string(String::from("~\"Linkin Park\""), &mut log);
+        let mut token_stream = lexer.read_token_stream().into_iter();
+        assert!(log.errors.is_empty());
+
+        assert_token(token_stream.next(), 0, 0, StaticToken(Tag::Fulltext));
+
+        assert_token(
+            token_stream.next(),
+            1,
+            13,
+            StringToken(String::from("Linkin Park")),
+        );
     }
 
     #[inline]
