@@ -380,9 +380,20 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
     {
         log::info!("Running startup migration tasks");
         if let Err(e) = crate::run_startup_migration_tasks().await {
-            log::error!("Error running startup migration tasks: {e}");
-            crate::server::shutdown_server().await;
-            return;
+            match e {
+                Error::QueryCompilationError(s, e) => {
+                    log::error!(
+                        "Error running startup migration tasks: Failed to compile query due to error in phase {s}: {e:?}"
+                    );
+                    crate::server::shutdown_server().await;
+                    return;
+                }
+                _ => {
+                    log::error!("Error running startup migration tasks: {e}");
+                    crate::server::shutdown_server().await;
+                    return;
+                }
+            }
         }
         log::info!("Done running startup migration tasks");
     }
