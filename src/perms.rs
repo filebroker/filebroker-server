@@ -157,12 +157,12 @@ pub fn get_secure_query_condition_string(
                     EXISTS (
                         SELECT *
                         FROM writable_brokers
-                        WHERE EXISTS (
-                            SELECT *
-                            FROM s3_object
-                            WHERE s3_object.object_key = {broker_access_base_table}.s3_object
-                              AND s3_object.fk_broker = writable_brokers.pk
-                        )
+                    )
+                    AND EXISTS (
+                        SELECT *
+                        FROM s3_object
+                        INNER JOIN writable_brokers ON writable_brokers.pk = s3_object.fk_broker
+                        WHERE s3_object.object_key = {broker_access_base_table}.s3_object
                     )
                 "#
             )
