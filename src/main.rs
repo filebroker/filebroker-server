@@ -55,6 +55,10 @@ lazy_static! {
             .parse::<bool>()
             .expect("FILEBROKER_PG_ENABLE_SSL is not a valid boolean"))
         .unwrap_or_default();
+    pub static ref MAX_DB_CONNECTIONS: usize = std::env::var("FILEBROKER_MAX_DB_CONNECTIONS")
+        .unwrap_or_else(|_| String::from("25"))
+        .parse::<usize>()
+        .expect("FILEBROKER_MAX_DB_CONNECTIONS is not a valid usize");
     pub static ref CONNECTION_POOL: Pool<AsyncPgConnection> = {
         let database_connection_manager = if *PG_ENABLE_SSL {
             let mut config = ManagerConfig::default();
@@ -66,12 +70,8 @@ lazy_static! {
         } else {
             AsyncDieselConnectionManager::<AsyncPgConnection>::new(DATABASE_URL.clone())
         };
-        let max_db_connections = std::env::var("FILEBROKER_MAX_DB_CONNECTIONS")
-            .unwrap_or_else(|_| String::from("25"))
-            .parse::<usize>()
-            .expect("FILEBROKER_MAX_DB_CONNECTIONS is not a valid usize");
         Pool::builder(database_connection_manager)
-            .max_size(max_db_connections)
+            .max_size(*MAX_DB_CONNECTIONS)
             .build()
             .expect("Failed to initialise connection pool")
     };

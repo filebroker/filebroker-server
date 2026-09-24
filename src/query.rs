@@ -7,9 +7,11 @@ use diesel::{
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use itertools::Itertools;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::{cmp, collections::HashMap, str::FromStr};
+use tokio::sync::{Semaphore, SemaphorePermit};
 use validator::Validate;
 use warp::{Rejection, Reply};
 
@@ -21,7 +23,7 @@ use crate::perms::{PostCollectionItemJoined, PostCollectionJoined};
 use crate::post::PostCollectionGroupAccessDetailed;
 use crate::util::dedup_vec;
 use crate::{
-    acquire_db_connection,
+    MAX_DB_CONNECTIONS, acquire_db_connection,
     error::Error,
     model::{PostQueryObject, PostWindowQueryObject, S3Object, Tag, User},
     perms::{self, PostJoined},
@@ -111,8 +113,16 @@ macro_rules! load_and_report_missing_pks {
 }
 
 use crate::data::{PRESIGNED_GET_EXPIRATION_SECS, create_bucket};
+use crate::query::compiler::CompiledQuery;
 use crate::tag::TagUsage;
 pub(crate) use load_and_report_missing_pks;
+
+lazy_static! {
+    pub static ref EXPENSIVE_SEARCH_LIMIT: usize = (*MAX_DB_CONNECTIONS / 10).clamp(1, 4);
+    pub static ref SEARCH_LIMIT: usize = (*MAX_DB_CONNECTIONS * 2 / 3).max(1);
+    pub static ref EXPENSIVE_SEARCH_SEMAPHORE: Semaphore = Semaphore::new(*EXPENSIVE_SEARCH_LIMIT);
+    pub static ref SEARCH_SEMAPHORE: Semaphore = Semaphore::new(*SEARCH_LIMIT);
+}
 
 #[derive(Default, Deserialize, Validate)]
 pub struct QueryParametersFilter {
@@ -264,35 +274,84 @@ pub async fn search_handler(
     let query_parameters = prepare_query_parameters(&query_parameters_filter, &user, &scope)?;
     let max_limit = query_parameters.pagination.as_ref().map(|p| p.max_limit);
 
-    let sql_query = compiler::compile_sql(
+    let CompiledQuery {
+        source_query,
+        sql,
+        expensive,
+    } = compiler::compile_sql(
         query_parameters_filter.query,
         query_parameters,
         &scope,
         &user,
     )?;
+
+    let (_search_permit, _expensive_permit) = acquire_search_semaphore(expensive).await?;
+
     let mut connection = acquire_db_connection().await?;
-    match scope {
-        Scope::Global => Err(Error::BadRequestError(format!("Invalid scope '{scope:?}'")).into()),
-        Scope::Post | Scope::TagAutoMatchPost => Ok(warp::reply::json(
-            &get_search_result::<PostQueryObject>(sql_query, max_limit, &mut connection).await?,
-        )),
-        Scope::Collection | Scope::TagAutoMatchCollection => Ok(warp::reply::json(
-            &get_search_result::<PostCollectionQueryObject>(sql_query, max_limit, &mut connection)
-                .await?,
-        )),
-        Scope::CollectionItem { .. } => Ok(warp::reply::json(
-            &get_search_result::<PostCollectionItemQueryObject>(
-                sql_query,
+    let search_result = match scope {
+        Scope::Global => Err(Error::BadRequestError(format!("Invalid scope '{scope:?}'"))),
+        Scope::Post | Scope::TagAutoMatchPost => {
+            get_search_result::<PostQueryObject>(
+                source_query,
+                sql,
                 max_limit,
+                expensive,
                 &mut connection,
             )
-            .await?,
-        )),
-        Scope::UserGroup => Ok(warp::reply::json(
-            &get_search_result::<UserGroupQueryObject>(sql_query, max_limit, &mut connection)
-                .await?,
-        )),
-    }
+            .await
+        }
+        Scope::Collection | Scope::TagAutoMatchCollection => {
+            get_search_result::<PostCollectionQueryObject>(
+                source_query,
+                sql,
+                max_limit,
+                expensive,
+                &mut connection,
+            )
+            .await
+        }
+        Scope::CollectionItem { .. } => {
+            get_search_result::<PostCollectionItemQueryObject>(
+                source_query,
+                sql,
+                max_limit,
+                expensive,
+                &mut connection,
+            )
+            .await
+        }
+        Scope::UserGroup => {
+            get_search_result::<UserGroupQueryObject>(
+                source_query,
+                sql,
+                max_limit,
+                expensive,
+                &mut connection,
+            )
+            .await
+        }
+    }?;
+
+    Ok(warp::reply::json(&search_result))
+}
+
+async fn acquire_search_semaphore<'a>(
+    expensive: bool,
+) -> Result<(SemaphorePermit<'a>, Option<SemaphorePermit<'a>>), Error> {
+    let expensive_permit = if expensive {
+        Some(EXPENSIVE_SEARCH_SEMAPHORE.acquire().await.map_err(|e| {
+            Error::InternalError(format!("Failed to acquire expensive search permit: {e}"))
+        })?)
+    } else {
+        None
+    };
+
+    let search_permit = SEARCH_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|e| Error::InternalError(format!("Failed to acquire search permit: {e}")))?;
+
+    Ok((search_permit, expensive_permit))
 }
 
 #[derive(Serialize)]
@@ -686,7 +745,7 @@ pub async fn get_post_collection_handler(
     }))
 }
 
-/// Find all posts for the given query string, limited to 10000 results maximum
+/// Find all posts for the given query string, limited to 9999 results maximum
 pub async fn find_all_posts(
     query: String,
     user: &Option<User>,
@@ -706,24 +765,40 @@ pub async fn find_all_posts(
         page: None,
         max_limit: MAX_FULL_LIMIT,
     });
-    let sql_query = compiler::compile_sql(
+
+    let CompiledQuery {
+        source_query,
+        sql,
+        expensive,
+    } = compiler::compile_sql(
         query_parameters_filter.query,
         query_parameters,
         &scope,
         user,
     )?;
+
+    let (_search_permit, _expensive_permit) = acquire_search_semaphore(expensive).await?;
+
     let mut connection = acquire_db_connection().await?;
-    let search_result =
-        get_search_result::<PostQueryObject>(sql_query, Some(MAX_FULL_LIMIT), &mut connection)
-            .await?;
+    let search_result = get_search_result::<PostQueryObject>(
+        source_query,
+        sql,
+        Some(MAX_FULL_LIMIT),
+        expensive,
+        &mut connection,
+    )
+    .await?;
+
+    const MAX_FIND_ALL_RESULTS: u32 = MAX_FULL_LIMIT - 1;
+
     if search_result
         .full_count
-        .map(|count| count > MAX_FULL_LIMIT.into())
+        .map(|count| count >= MAX_FULL_LIMIT.into())
         .unwrap_or(true)
     {
         Err(Error::TooManyResultsError(
-            search_result.full_count.unwrap_or(100000) as u32,
-            MAX_FULL_LIMIT,
+            search_result.full_count.unwrap_or(MAX_FULL_LIMIT.into()) as u32,
+            MAX_FIND_ALL_RESULTS,
         ))
     } else {
         Ok(search_result.posts.unwrap_or_default())
@@ -774,8 +849,10 @@ pub trait SearchQueryResultObject {
 async fn get_search_result<
     T: SearchQueryResultObject + Send + QueryableByName<diesel::pg::Pg> + 'static,
 >(
+    source_query: String,
     sql_query: String,
     max_limit: Option<u32>,
+    expensive: bool,
     connection: &mut AsyncPgConnection,
 ) -> Result<SearchResult, Error> {
     let instant = std::time::Instant::now();
@@ -783,7 +860,18 @@ async fn get_search_result<
         .load::<T>(connection)
         .await
         .map_err(|e| Error::QueryError(e.to_string()))?;
-    log::debug!("Query took {}ms", instant.elapsed().as_millis());
+    let elapsed = instant.elapsed().as_millis();
+    if elapsed > 5000 {
+        log::warn!(
+            "Query [{source_query}] took {elapsed}ms to execute (estimate: {})",
+            if expensive { "expensive" } else { "cheap" }
+        );
+    } else {
+        log::debug!(
+            "Query [{source_query}] took {elapsed}ms to execute (estimate: {})",
+            if expensive { "expensive" } else { "cheap" }
+        );
+    }
 
     T::get_search_result(objects, max_limit)
 }

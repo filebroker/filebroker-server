@@ -195,34 +195,39 @@ pub fn compile_conditions_ast(
     Ok(root_node)
 }
 
+pub struct CompiledQuery {
+    pub source_query: String,
+    pub sql: String,
+    pub expensive: bool,
+}
+
 pub fn compile_sql(
     query: Option<String>,
     mut query_parameters: QueryParameters,
     scope: &Scope,
     user: &Option<User>,
-) -> Result<String, crate::Error> {
-    let (source_query, instant) = if log::log_enabled!(log::Level::Debug) {
-        (query.clone(), Some(std::time::Instant::now()))
-    } else {
-        (None, None)
-    };
+) -> Result<CompiledQuery, crate::Error> {
+    let source_query = query.clone().unwrap_or_default();
+    let instant = std::time::Instant::now();
 
-    let (ctes, where_expressions) = if let Some(query) = query {
+    let (ctes, where_expressions, expensive) = if let Some(query) = query {
         compile_expressions(query, &mut query_parameters, scope)?
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), false)
     };
 
-    let sql_query = build_sql_string(ctes, where_expressions, query_parameters, user)?;
+    let sql = build_sql_string(ctes, where_expressions, query_parameters, user)?;
     log::debug!(
-        "Compiled query [{}] (in {} microseconds) to sql {sql_query}",
-        source_query.as_deref().unwrap_or(""),
-        instant
-            .map(|instant| instant.elapsed().as_micros())
-            .unwrap_or(0)
+        "Compiled query [{source_query}] (in {} microseconds) to ({}) sql {sql}",
+        instant.elapsed().as_micros(),
+        if expensive { "expensive" } else { "cheap" }
     );
 
-    Ok(sql_query)
+    Ok(CompiledQuery {
+        source_query,
+        sql,
+        expensive,
+    })
 }
 
 fn build_sql_string(
@@ -393,10 +398,10 @@ pub fn compile_window_query(
         (None, None)
     };
 
-    let (mut ctes, mut where_expressions) = if let Some(query) = query {
+    let (mut ctes, mut where_expressions, _) = if let Some(query) = query {
         compile_expressions(query, &mut query_parameters, scope)?
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), false)
     };
 
     perms::append_secure_query_condition(
@@ -558,7 +563,7 @@ fn compile_expressions(
     query: String,
     query_parameters: &mut QueryParameters,
     scope: &Scope,
-) -> Result<(Vec<String>, Vec<String>), crate::Error> {
+) -> Result<(Vec<String>, Vec<String>, bool), crate::Error> {
     let mut log = Log { errors: Vec::new() };
     let mut ast = compile_ast(query, &mut log, true)?;
     let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(query_parameters);
@@ -569,6 +574,13 @@ fn compile_expressions(
             log.errors,
         ));
     }
+
+    let is_expensive = ast
+        .node_type
+        .statements
+        .iter()
+        .filter_map(|statement| statement.node_type.downcast_ref::<ExpressionStatement>())
+        .any(|statement| statement.expression_node.node_type.is_expensive(scope));
 
     let mut query_builder_visitor = QueryBuilderVisitor::new(query_parameters);
     ast.accept(&mut query_builder_visitor, scope, &mut log);
@@ -587,6 +599,7 @@ fn compile_expressions(
             .map(|cte| cte.expression)
             .collect(),
         query_builder_visitor.where_expressions,
+        is_expensive,
     ))
 }
 

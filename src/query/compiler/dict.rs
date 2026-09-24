@@ -1,12 +1,12 @@
-use std::{collections::HashMap, fmt, str::FromStr, sync::Arc};
-
 use super::{
     Error, Location, Log,
     ast::{AttributeNode, ExpressionNode, Node, QueryBuilderVisitor, StringLiteralNode},
 };
-use crate::query::compiler::ast::{VariableNode, sanitize_string_literal};
+use crate::query::compiler::ast::{ExpressionDependency, VariableNode, sanitize_string_literal};
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::collections::HashSet;
+use std::{collections::HashMap, fmt, str::FromStr, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Type {
@@ -34,6 +34,7 @@ pub struct Attribute {
 pub struct Function {
     pub params: Vec<Parameter>,
     pub return_type: Type,
+    pub intrinsic_dependencies: HashSet<ExpressionDependency>,
     pub accept_arguments:
         fn(&[Parameter], &[Box<Node<dyn ExpressionNode>>], &Scope, Location, &mut Log),
     pub write_expression_fn: fn(
@@ -213,6 +214,7 @@ lazy_static! {
                     parameter_type: ParameterType::Object(Type::String)
                 }],
                 return_type: Type::Number,
+                intrinsic_dependencies: HashSet::new(),
                 accept_arguments,
                 write_expression_fn: |visitor, args, scope, location, log| {
                     write_subquery_function_expr(
@@ -237,6 +239,7 @@ lazy_static! {
                     parameter_type: ParameterType::Object(Type::String)
                 }],
                 return_type: Type::Boolean,
+                intrinsic_dependencies: HashSet::new(),
                 accept_arguments: |params: &[Parameter], arguments: &[Box<Node<dyn ExpressionNode>>], scope: &Scope, location: Location, log: &mut Log| {
                     accept_arguments(params, arguments, scope, location, log);
                     if arguments.len() >= 2 {
@@ -313,6 +316,7 @@ lazy_static! {
                     parameter_type: ParameterType::Object(Type::Number),
                 }],
                 return_type: Type::Boolean,
+                intrinsic_dependencies: HashSet::from([ExpressionDependency::SharedWithGroup]),
                 accept_arguments,
                 write_expression_fn: |visitor, args, scope, _location, log| {
                     visitor.write_buff("EXISTS(SELECT * FROM post_group_access WHERE fk_post = post.pk AND fk_granted_group = ");
@@ -336,6 +340,7 @@ lazy_static! {
                     parameter_type: ParameterType::Object(Type::Number),
                 }],
                 return_type: Type::Boolean,
+                intrinsic_dependencies: HashSet::from([ExpressionDependency::SharedWithGroup]),
                 accept_arguments,
                 write_expression_fn: |visitor, args, scope, _location, log| {
                     visitor.write_buff("EXISTS(SELECT * FROM post_collection_group_access WHERE fk_post_collection = post_collection.pk AND fk_granted_group = ");
@@ -427,14 +432,6 @@ lazy_static! {
                     .unwrap_or_else(|| String::from("NULL"))
             })
         ),
-        (
-            "random",
-            Arc::new(Variable {
-                return_type: Type::Number,
-                get_value_plain_fn: |_vars| None,
-                get_expression_fn: |_vars| String::from("RANDOM()")
-            })
-        )
     ]);
 }
 

@@ -7,7 +7,10 @@ use crate::query::{Direction, Ordering, QueryParameters};
 use downcast_rs::{Downcast, impl_downcast};
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use std::{collections::HashMap, fmt::Debug};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operator {
@@ -210,6 +213,44 @@ fn is_type_or_null(s: Type, t: Type) -> bool {
 #[inline]
 fn both_of_type_or_null(l: Type, r: Type, t: Type) -> bool {
     is_type_or_null(l, t) && is_type_or_null(r, t)
+}
+
+/// Returns true when an ILIKE pattern contains at least one contiguous run
+/// of three literal characters.
+///
+/// PostgreSQL's trigram index needs an actual trigram to narrow the search.
+/// `%` and `_` break literal runs.
+///
+/// For fuzzy equals without explicit wildcards the compiler implicitly adds
+/// surrounding `%`, so:
+///
+///     "e"       -> "%e%"       -> false
+///     "ab"      -> "%ab%"      -> false
+///     "abc"     -> "%abc%"     -> true
+///     "%foo%"                  -> true
+///     "ab%cd"                  -> false
+///     "ab%cde"                 -> true
+fn fuzzy_equal_pattern_has_trigram(pattern: &str) -> bool {
+    let mut literal_run = 0;
+
+    for c in pattern.chars() {
+        if c == '%' || c == '_' {
+            literal_run = 0;
+        } else {
+            literal_run += 1;
+
+            if literal_run >= 3 {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Mirrors the existing FuzzyMatch decision for enabling its trigram part.
+fn fuzzy_match_term_is_selective(search_term: &str) -> bool {
+    search_term.chars().filter(|c| !c.is_whitespace()).count() >= 3
 }
 
 pub trait Visitor {
@@ -571,20 +612,11 @@ impl Visitor for SemanticAnalysisVisitor<'_> {
         location: Location,
     ) {
         let identifier: &str = &attribute_node.identifier;
-        let attributes = scope.get_attributes();
-        let attribute = attributes.get(identifier);
-        match attribute {
-            Some(attribute) => {
-                self.query_parameters
-                    .encountered_tables
-                    .insert(attribute.table);
-            }
-            None => {
-                log.errors.push(Error {
-                    location,
-                    msg: format!("No such attribute '{identifier}'"),
-                });
-            }
+        if !scope.get_attributes().contains_key(identifier) {
+            log.errors.push(Error {
+                location,
+                msg: format!("No such attribute '{identifier}'"),
+            });
         }
     }
 
@@ -671,6 +703,11 @@ pub struct QueryBuilderVisitor<'p> {
     pub where_expressions: Vec<String>,
     pub query_parameters: &'p mut QueryParameters,
     buffer: Option<String>,
+    // While rendering an OR-expansion candidate branch, referenced
+    // attribute tables must belong to that branch rather than leaking into
+    // query_parameters.encountered_tables for the outer query.
+    local_encountered_tables: Option<HashSet<&'static str>>,
+    allow_or_expansion: bool,
 }
 
 impl<'p> QueryBuilderVisitor<'p> {
@@ -680,6 +717,8 @@ impl<'p> QueryBuilderVisitor<'p> {
             where_expressions: Vec::new(),
             query_parameters,
             buffer: None,
+            local_encountered_tables: None,
+            allow_or_expansion: true,
         }
     }
 }
@@ -795,6 +834,164 @@ impl QueryBuilderVisitor<'_> {
         }
     }
 
+    fn write_or_expansion(
+        &mut self,
+        binary_expression_node: &mut BinaryExpressionNode,
+        scope: &Scope,
+        log: &mut Log,
+    ) {
+        let mut branches = Vec::new();
+
+        write_or_expansion_branches(
+            self,
+            &mut binary_expression_node.left,
+            scope,
+            log,
+            &mut branches,
+        );
+
+        write_or_expansion_branches(
+            self,
+            &mut binary_expression_node.right,
+            scope,
+            log,
+            &mut branches,
+        );
+
+        // Branch rendering may itself have produced tag/fulltext/nested-OR CTEs.
+        // Allocate this CTE afterwards, so all of its dependencies have lower indexes
+        // and are emitted before it.
+        let idx = self.ctes.len();
+        let cte_name = format!("or_expansion_cte{idx}");
+
+        self.ctes.insert(
+            format!("or'expansion:{idx}"),
+            Cte {
+                idx,
+                expression: format!(
+                    "{cte_name} AS NOT MATERIALIZED (\n{}\n)",
+                    branches.join("\n\nUNION ALL\n\n"),
+                ),
+            },
+        );
+
+        let root_table = self.root_table_name();
+
+        // UNION ALL duplicates are irrelevant because candidate membership
+        // is tested using EXISTS.
+        self.write_buff(&format!(
+            "EXISTS(SELECT * FROM {cte_name} WHERE {cte_name}.pk = {root_table}.pk)"
+        ));
+    }
+
+    /// Build the candidate branch FROM expression using all mandatory joins,
+    /// plus optional joins referenced by attributes which actually remained
+    /// in this branch after nested OR expansion.
+    fn build_from_and_joins_for_tables(&self, tables: &HashSet<&'static str>) -> String {
+        let root_table = self.root_table_name();
+
+        let joins = self
+            .query_parameters
+            .join_statements
+            .iter()
+            .filter(|join_statement| {
+                !join_statement.optional || tables.contains(join_statement.table_alias)
+            })
+            .map(|join_statement| join_statement.statement.as_str())
+            .join(" ");
+
+        if joins.is_empty() {
+            root_table.to_string()
+        } else {
+            format!("{root_table} {joins}")
+        }
+    }
+
+    // This is the table whose PK identifies a candidate row.
+    //
+    // Usually this is base_table_name, but CollectionItem queries use post_collection_item as their
+    // actual FROM/root table.
+    fn root_table_name(&self) -> &'static str {
+        self.query_parameters
+            .from_table_override
+            .unwrap_or(self.query_parameters.base_table_name)
+    }
+
+    // Attribute table references go either to the normal outer query or,
+    // while rendering an OR candidate branch, to that branch's local set.
+    fn encounter_table(&mut self, table: &'static str) {
+        if let Some(local_encountered_tables) = self.local_encountered_tables.as_mut() {
+            local_encountered_tables.insert(table);
+        } else {
+            self.query_parameters.encountered_tables.insert(table);
+        }
+    }
+
+    /// Render an expression into its own temporary buffer while collecting
+    /// only the direct attribute tables which remain in that rendered branch.
+    ///
+    /// This is nestable: if rendering this expression causes another OR expansion,
+    /// the nested candidate branch gets its own local table set and does not leak those tables
+    /// into this branch.
+    fn render_branch_expression(
+        &mut self,
+        expression: &mut Node<dyn ExpressionNode>,
+        scope: &Scope,
+        log: &mut Log,
+    ) -> (String, HashSet<&'static str>) {
+        let previous_buffer = self.buffer.replace(String::new());
+
+        let previous_local_encountered_tables =
+            self.local_encountered_tables.replace(HashSet::new());
+
+        expression.accept(self, scope, log);
+
+        let expression = self.buffer.take().expect("No current querybuilder buffer");
+
+        let encountered_tables = self
+            .local_encountered_tables
+            .take()
+            .expect("No local encountered table set");
+
+        // Restore the parent rendering context.
+        self.buffer = previous_buffer;
+        self.local_encountered_tables = previous_local_encountered_tables;
+
+        (expression, encountered_tables)
+    }
+
+    fn build_or_candidate_branch(
+        &mut self,
+        expression: &mut Node<dyn ExpressionNode>,
+        scope: &Scope,
+        log: &mut Log,
+    ) -> String {
+        let (predicate, encountered_tables) = self.render_branch_expression(expression, scope, log);
+
+        let root_table = self.root_table_name();
+        let from_and_joins = self.build_from_and_joins_for_tables(&encountered_tables);
+
+        // Include predefined conditions in the candidate branch.
+        //
+        // This is important for CollectionItem searches, where fk_post_collection limits the
+        // candidates to the current collection. The condition remains in the outer query as well;
+        // pushing it here simply avoids generating irrelevant candidates.
+        let mut conditions = self
+            .query_parameters
+            .predefined_where_conditions
+            .clone()
+            .unwrap_or_default();
+
+        conditions.push(predicate);
+
+        let where_clause = conditions
+            .iter()
+            .map(|condition| format!("({condition})"))
+            .join(" AND ");
+
+        format!("SELECT {root_table}.pk AS pk FROM {from_and_joins} WHERE {where_clause}")
+    }
+
     pub(crate) fn write_buff(&mut self, s: &str) {
         self.buffer
             .as_mut()
@@ -863,6 +1060,14 @@ impl Visitor for QueryBuilderVisitor<'_> {
         log: &mut Log,
         _location: Location,
     ) {
+        // Rewrite ORs with incompatible access paths across different tables
+        // which PostgreSQL cannot efficiently combine with a BitmapOr scan
+        // into independent candidate-producing UNION ALL branches.
+        if self.allow_or_expansion && binary_expression_node.should_expand_or(scope) {
+            self.write_or_expansion(binary_expression_node, scope, log);
+            return;
+        }
+
         let op = binary_expression_node.op;
         let left = &mut binary_expression_node.left;
         let left_type = left.node_type.get_return_type(scope);
@@ -1001,8 +1206,25 @@ impl Visitor for QueryBuilderVisitor<'_> {
     ) {
         self.write_buff(unary_expression_node.op.get_sql_string(None));
         self.write_buff(" (");
-        unary_expression_node.operand.accept(self, scope, log);
-        self.write_buff(")");
+        // Do not allow OR expansion in NOT expressions because it would change the boolean inversion
+        // semantics for null values
+        //
+        // e.g. this query: `!(@title = "foo" OR @artist = "bar")` should not include rows where title is null.
+        // `WHERE NOT(title = "foo")` does not return rows where title is null.
+        //
+        // However, when OR expansion converts `@title = "foo" OR @artist = "bar"` to a candidate CTE
+        // and adds a `WHERE NOT EXISTS(SELECT * FROM candidate_cte...)`, this would then include rows
+        // where title is null because those rows are not in the candidate set.
+        if unary_expression_node.op == Operator::Not {
+            let previous = self.allow_or_expansion;
+            self.allow_or_expansion = false;
+            unary_expression_node.operand.accept(self, scope, log);
+            self.write_buff(")");
+            self.allow_or_expansion = previous;
+        } else {
+            unary_expression_node.operand.accept(self, scope, log);
+            self.write_buff(")");
+        }
     }
 
     fn visit_attribute_node(
@@ -1014,6 +1236,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
     ) {
         let identifier: &str = &attribute_node.identifier;
         if let Some(attribute) = scope.get_attributes().get(identifier) {
+            self.encounter_table(attribute.table);
             self.write_buff(&attribute.selection_expression);
         } else {
             self.write_buff("NULL");
@@ -1330,6 +1553,82 @@ pub trait ExpressionNode: NodeType + Downcast + Send + Sync {
     }
 
     fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>>;
+
+    /// Get row-level dependencies for this expression. For example, [AttributeNode]s have a
+    /// [ExpressionDependency::Attribute] dependency on the table they reference, while correlated
+    /// lookups such as a [PostTagNode] or [FulltextNode] check if a result exists for the given row.
+    /// Static expressions such as constants and uncorrelated lookups like `.find_user()` do not have
+    /// row-level dependencies.
+    fn dependencies(&self, scope: &Scope) -> HashSet<ExpressionDependency>;
+
+    /// Static means "does not vary with the current row".
+    ///
+    /// This includes literals, variables and uncorrelated lookups such as `.find_user()`.
+    fn is_static(&self, scope: &Scope) -> bool {
+        self.dependencies(scope).is_empty()
+    }
+
+    /// Returns `true` if this expression compiles to a potentially expensive SQL query. For example,
+    /// this is the case for OR conditions across different tables, meaning postgres cannot use a
+    /// BitmapOr to combine indexes and must test all rows.
+    ///
+    /// Leaf nodes are cheap by default. Composite nodes override this where their operation can
+    /// introduce an expensive execution shape.
+    fn is_expensive(&self, _scope: &Scope) -> bool {
+        false
+    }
+
+    /// Returns `true` when this expression is suitable for producing a candidate set during OR expansion.
+    /// This is done to avoid creating an UNION ALL candidate set for expressions that are not selective
+    /// and would return a massive candidate set.
+    fn is_candidate_selective(&self, _scope: &Scope) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExpressionDependency {
+    /// Direct access through an AttributeNode.The value is Attribute.table.
+    Attribute(&'static str),
+
+    /// Correlated lookup to a tag CTE by a [PostTagNode].
+    PostTag,
+
+    /// Correlated lookup to a Fulltext CTE by a [FulltextNode].
+    Fulltext,
+
+    /// Correlated lookup performed by `.shared_with_group()`.
+    SharedWithGroup,
+}
+
+/// Returns true only if all row dependencies are ordinary attribute reads
+/// from the same table.
+///
+/// Empty dependencies are also true: a static expression is trivially
+/// compatible with a single-table expression.
+fn dependencies_use_single_direct_table(dependencies: &HashSet<ExpressionDependency>) -> bool {
+    let mut table = None;
+
+    for dependency in dependencies {
+        match dependency {
+            ExpressionDependency::Attribute(dependency_table) => match table {
+                None => table = Some(*dependency_table),
+
+                Some(table) if table == *dependency_table => {}
+
+                Some(_) => return false,
+            },
+
+            // A correlated lookup cannot participate in a normal BitmapOr against another expression.
+            ExpressionDependency::PostTag
+            | ExpressionDependency::Fulltext
+            | ExpressionDependency::SharedWithGroup => {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 pub fn combine_expressions(
@@ -1471,6 +1770,14 @@ impl ExpressionNode for PostTagNode {
             },
         })
     }
+
+    fn dependencies(&self, _scope: &Scope) -> HashSet<ExpressionDependency> {
+        HashSet::from([ExpressionDependency::PostTag])
+    }
+
+    fn is_candidate_selective(&self, _scope: &Scope) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1507,6 +1814,15 @@ impl ExpressionNode for AttributeNode {
                 identifier: self.identifier.clone(),
             },
         })
+    }
+
+    fn dependencies(&self, scope: &Scope) -> HashSet<ExpressionDependency> {
+        let identifier: &str = &self.identifier;
+        if let Some(attribute) = scope.get_attributes().get(identifier) {
+            HashSet::from([ExpressionDependency::Attribute(attribute.table)])
+        } else {
+            HashSet::new()
+        }
     }
 }
 
@@ -1558,6 +1874,50 @@ impl ExpressionNode for FunctionCallNode {
             },
         })
     }
+
+    fn dependencies(&self, scope: &Scope) -> HashSet<ExpressionDependency> {
+        let identifier: &str = &self.identifier;
+        let mut dependencies = if let Some(function) = scope.get_functions().get(identifier) {
+            function.intrinsic_dependencies.clone()
+        } else {
+            HashSet::new()
+        };
+
+        for argument in self.arguments.iter() {
+            dependencies.extend(argument.node_type.dependencies(scope));
+        }
+
+        dependencies
+    }
+
+    fn is_expensive(&self, scope: &Scope) -> bool {
+        // A function doesn't become expensive merely because it's correlated.
+        // shared_with_group() by itself is fine.
+        //
+        // But an already-expensive argument remains expensive.
+        self.arguments
+            .iter()
+            .any(|argument| argument.node_type.is_expensive(scope))
+    }
+
+    fn is_candidate_selective(&self, _scope: &Scope) -> bool {
+        match self.identifier.as_str() {
+            // Can safely assume a post being shared with a group is a selective condition.
+            // It's unlikely in practice for a significant % of posts to be shared with the same group.
+            "shared_with_group" => true,
+
+            // This has an ILIKE '%value%' precondition before the regex.
+            // Only treat a literal value as candidate-selective if that
+            // precondition contains a usable trigram.
+            "delimited_string_contains" => self
+                .arguments
+                .get(1)
+                .and_then(|argument| argument.node_type.downcast_ref::<StringLiteralNode>())
+                .is_some_and(|literal| fuzzy_equal_pattern_has_trigram(&literal.val)),
+
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1565,6 +1925,30 @@ pub struct BinaryExpressionNode {
     pub left: Box<Node<dyn ExpressionNode>>,
     pub op: Operator,
     pub right: Box<Node<dyn ExpressionNode>>,
+}
+
+impl BinaryExpressionNode {
+    /// Returns `true` if this OR expression has branches with incompatible access paths by having
+    /// expressions with different dependent tables, making cheap BitmapOr query plans impossible.
+    fn is_expensive_or_expression(&self, scope: &Scope) -> bool {
+        if self.op != Operator::Or {
+            return false;
+        }
+
+        !dependencies_use_single_direct_table(&self.dependencies(scope))
+    }
+
+    /// Returns `true` if this is [BinaryExpressionNode::is_expensive_or_expression] and neither side
+    /// is a static expression. A static boolean expression would produce no candidates or the entire
+    /// table, depending on whether it folds to `OR FALSE` or `OR TRUE`. Furthermore, only returns
+    /// `true` if we can assume that both sides produce a selective candidate set.
+    fn should_expand_or(&self, scope: &Scope) -> bool {
+        self.is_expensive_or_expression(scope)
+            && !self.left.node_type.is_static(scope)
+            && !self.right.node_type.is_static(scope)
+            && self.left.node_type.is_candidate_selective(scope)
+            && self.right.node_type.is_candidate_selective(scope)
+    }
 }
 
 impl NodeType for BinaryExpressionNode {
@@ -1607,6 +1991,160 @@ impl ExpressionNode for BinaryExpressionNode {
             },
         })
     }
+
+    fn dependencies(&self, scope: &Scope) -> HashSet<ExpressionDependency> {
+        let mut dependencies = self.left.node_type.dependencies(scope);
+
+        dependencies.extend(self.right.node_type.dependencies(scope));
+
+        dependencies
+    }
+
+    fn is_expensive(&self, scope: &Scope) -> bool {
+        let left_expensive = self.left.node_type.is_expensive(scope);
+        let right_expensive = self.right.node_type.is_expensive(scope);
+
+        if left_expensive || right_expensive {
+            return true;
+        }
+
+        let left_static = self.left.node_type.is_static(scope);
+        let right_static = self.right.node_type.is_static(scope);
+
+        match self.op {
+            Operator::FuzzyMatch | Operator::FuzzyEqual => {
+                // Fuzzy operators are asymmetric: the search/pattern operand on the
+                // right must be row-independent for the left-side attribute index to
+                // be useful.
+                !right_static
+            }
+
+            Operator::Equal | Operator::Unequal => {
+                // Static-vs-row is fine.
+                if left_static || right_static {
+                    return false;
+                }
+
+                // Row-vs-row equality is considered normal if all direct
+                // dependencies belong to one table.
+                //
+                // @title = @description -> normal
+                // @title = @artist      -> expensive
+                !dependencies_use_single_direct_table(&self.dependencies(scope))
+            }
+
+            Operator::Or => {
+                if left_static || right_static {
+                    false
+                } else {
+                    // An incompatible OR is only still expensive if we cannot
+                    // lower it into the candidate UNION ALL representation.
+                    self.is_expensive_or_expression(scope) && !self.should_expand_or(scope)
+                }
+            }
+
+            _ => false,
+        }
+    }
+
+    fn is_candidate_selective(&self, scope: &Scope) -> bool {
+        let left_static = self.left.node_type.is_static(scope);
+        let right_static = self.right.node_type.is_static(scope);
+
+        match self.op {
+            Operator::Equal => {
+                // IS NULL is generally broad and cannot be assumed to be selective without statistics.
+                if is_null_literal(&self.left) || is_null_literal(&self.right) {
+                    return false;
+                }
+
+                // Equality against a row-independent value is generally a good indexed candidate source.
+                //
+                // Row-vs-row equality can't be known to be selective without statistics.
+                //
+                // Static-vs-static equality matches all or none, let postgres optimize it.
+                left_static ^ right_static
+            }
+
+            Operator::Unequal => {
+                // != and IS NOT NULL are generally broad predicates.
+                false
+            }
+
+            Operator::FuzzyEqual => {
+                if !right_static {
+                    return false;
+                }
+
+                self.right
+                    .node_type
+                    .downcast_ref::<StringLiteralNode>()
+                    .is_some_and(|literal| fuzzy_equal_pattern_has_trigram(&literal.val))
+            }
+
+            Operator::FuzzyMatch => {
+                if !right_static {
+                    return false;
+                }
+
+                self.right
+                    .node_type
+                    .downcast_ref::<StringLiteralNode>()
+                    .is_some_and(|literal| fuzzy_match_term_is_selective(&literal.val))
+            }
+
+            Operator::And => {
+                // An AND node is selective if one of the conditions is selective.
+                self.left.node_type.is_candidate_selective(scope)
+                    || self.right.node_type.is_candidate_selective(scope)
+            }
+
+            Operator::Or => {
+                // If an OR survives as one candidate branch, every alternative needs to be suitable;
+                // one broad alternative dominates the candidate set.
+                self.left.node_type.is_candidate_selective(scope)
+                    && self.right.node_type.is_candidate_selective(scope)
+            }
+
+            // Range comparisons can't be determined to be selective without statistics.
+            Operator::Less | Operator::LessEqual | Operator::Greater | Operator::GreaterEqual => {
+                false
+            }
+
+            // Arithmetic expressions aren't useful Boolean candidate roots by themselves.
+            Operator::Plus
+            | Operator::Minus
+            | Operator::Times
+            | Operator::Divide
+            | Operator::Modulo
+            | Operator::Not => false,
+        }
+    }
+}
+
+fn write_or_expansion_branches(
+    visitor: &mut QueryBuilderVisitor,
+    node: &mut Node<dyn ExpressionNode>,
+    scope: &Scope,
+    log: &mut Log,
+    branches: &mut Vec<String>,
+) {
+    let should_flatten = node
+        .node_type
+        .downcast_ref::<BinaryExpressionNode>()
+        .is_some_and(|binary_node| binary_node.should_expand_or(scope));
+
+    if should_flatten {
+        let binary_node = node
+            .node_type
+            .downcast_mut::<BinaryExpressionNode>()
+            .unwrap();
+
+        write_or_expansion_branches(visitor, &mut binary_node.left, scope, log, branches);
+        write_or_expansion_branches(visitor, &mut binary_node.right, scope, log, branches);
+    } else {
+        branches.push(visitor.build_or_candidate_branch(node, scope, log));
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1636,6 +2174,10 @@ impl ExpressionNode for IntegerLiteralNode {
             location: node.location,
             node_type: IntegerLiteralNode { val: self.val },
         })
+    }
+
+    fn dependencies(&self, _scope: &Scope) -> HashSet<ExpressionDependency> {
+        HashSet::new()
     }
 }
 
@@ -1669,6 +2211,10 @@ impl ExpressionNode for StringLiteralNode {
             },
         })
     }
+
+    fn dependencies(&self, _scope: &Scope) -> HashSet<ExpressionDependency> {
+        HashSet::new()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1699,6 +2245,10 @@ impl ExpressionNode for BooleanLiteralNode {
             node_type: BooleanLiteralNode { val: self.val },
         })
     }
+
+    fn dependencies(&self, _scope: &Scope) -> HashSet<ExpressionDependency> {
+        HashSet::new()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1727,6 +2277,14 @@ impl ExpressionNode for NullLiteralNode {
             node_type: NullLiteralNode {},
         })
     }
+
+    fn dependencies(&self, _scope: &Scope) -> HashSet<ExpressionDependency> {
+        HashSet::new()
+    }
+}
+
+fn is_null_literal(node: &Node<dyn ExpressionNode>) -> bool {
+    node.node_type.downcast_ref::<NullLiteralNode>().is_some()
 }
 
 #[derive(Debug)]
@@ -1770,6 +2328,29 @@ impl ExpressionNode for UnaryExpressionNode {
             },
         })
     }
+
+    fn dependencies(&self, scope: &Scope) -> HashSet<ExpressionDependency> {
+        self.operand.node_type.dependencies(scope)
+    }
+
+    /// `NOT()` expression nodes are never expanded as that would change boolean inversion semantics
+    /// for null values, therefore they remain expensive. See [QueryBuilderVisitor::visit_unary_expression_node]
+    fn is_expensive(&self, scope: &Scope) -> bool {
+        self.operand.node_type.is_expensive(scope)
+            || (self.op == Operator::Not && contains_expandable_or(&self.operand, scope))
+    }
+}
+
+fn contains_expandable_or(node: &Node<dyn ExpressionNode>, scope: &Scope) -> bool {
+    if let Some(binary) = node.node_type.downcast_ref::<BinaryExpressionNode>()
+        && binary.should_expand_or(scope)
+    {
+        return true;
+    }
+
+    node.node_type
+        .unnest()
+        .any(|nested| contains_expandable_or(nested, scope))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1807,6 +2388,10 @@ impl ExpressionNode for VariableNode {
             },
         })
     }
+
+    fn dependencies(&self, _scope: &Scope) -> HashSet<ExpressionDependency> {
+        HashSet::new()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1838,5 +2423,13 @@ impl ExpressionNode for FulltextNode {
                 search_term: self.search_term.clone(),
             },
         })
+    }
+
+    fn dependencies(&self, _scope: &Scope) -> HashSet<ExpressionDependency> {
+        HashSet::from([ExpressionDependency::Fulltext])
+    }
+
+    fn is_candidate_selective(&self, _scope: &Scope) -> bool {
+        true
     }
 }
