@@ -135,11 +135,14 @@ pub struct QueryParametersFilter {
     pub exclude_window: Option<bool>,
     pub shuffle: Option<bool>,
     pub writable_only: Option<bool>,
+    #[validate(length(max = 1024))]
+    pub constriction: Option<String>,
 }
 
 pub struct QueryParameters {
     pub pagination: Option<QueryBuilderPagination>,
     pub ordering: Vec<Ordering>,
+    pub constriction: Option<String>,
     pub variables: HashMap<String, String>,
     pub shuffle: bool,
     pub writable_only: bool,
@@ -155,30 +158,6 @@ pub struct QueryParameters {
         fn(Option<&User>, &QueryParameters, &mut Vec<String>) -> Option<String>,
     /// Table referenced by attribute usages encountered in source query
     pub encountered_tables: HashSet<&'static str>,
-    pub fulltext_table: Option<&'static str>,
-}
-
-impl Default for QueryParameters {
-    fn default() -> Self {
-        Self {
-            pagination: Default::default(),
-            ordering: Default::default(),
-            variables: Default::default(),
-            shuffle: Default::default(),
-            writable_only: Default::default(),
-            base_table_name: Default::default(),
-            select_statements: Default::default(),
-            join_statements: Default::default(),
-            fallback_orderings: Default::default(),
-            from_table_override: Default::default(),
-            predefined_where_conditions: Default::default(),
-            include_full_count: Default::default(),
-            privileged: Default::default(),
-            get_secure_query_condition: |_user, _query_parameters, _where_conditions| None,
-            encountered_tables: Default::default(),
-            fulltext_table: Default::default(),
-        }
-    }
 }
 
 impl QueryParameters {
@@ -758,6 +737,7 @@ pub async fn find_all_posts(
         exclude_window: None,
         shuffle: None,
         writable_only: None,
+        constriction: None,
     };
     let mut query_parameters = prepare_query_parameters(&query_parameters_filter, user, &scope)?;
     query_parameters.pagination = Some(QueryBuilderPagination {
@@ -913,6 +893,7 @@ pub fn prepare_query_parameters(
                 })
             },
             ordering: Vec::new(),
+            constriction: query_parameters_filter.constriction.clone(),
             variables,
             shuffle: query_parameters_filter.shuffle.unwrap_or(false),
             writable_only: query_parameters_filter.writable_only.unwrap_or(false),
@@ -1100,7 +1081,6 @@ pub fn prepare_query_parameters(
             privileged: scope == &Scope::TagAutoMatchPost,
             get_secure_query_condition: perms::get_secure_query_condition_string_post,
             encountered_tables: HashSet::new(),
-            fulltext_table: Some("post_search_index"),
         }),
         Scope::Collection | Scope::TagAutoMatchCollection => Ok(QueryParameters {
             pagination: if scope == &Scope::TagAutoMatchCollection {
@@ -1113,6 +1093,7 @@ pub fn prepare_query_parameters(
                 })
             },
             ordering: Vec::new(),
+            constriction: query_parameters_filter.constriction.clone(),
             variables,
             shuffle: query_parameters_filter.shuffle.unwrap_or(false),
             writable_only: query_parameters_filter.writable_only.unwrap_or(false),
@@ -1212,7 +1193,6 @@ pub fn prepare_query_parameters(
             privileged: scope == &Scope::TagAutoMatchCollection,
             get_secure_query_condition: perms::get_secure_query_condition_string_collection,
             encountered_tables: HashSet::new(),
-            fulltext_table: Some("post_collection_search_index"),
         }),
         Scope::CollectionItem { collection_pk } => Ok(QueryParameters {
             pagination: Some(QueryBuilderPagination {
@@ -1221,6 +1201,7 @@ pub fn prepare_query_parameters(
                 max_limit: MAX_LIMIT,
             }),
             ordering: Vec::new(),
+            constriction: query_parameters_filter.constriction.clone(),
             variables,
             shuffle: query_parameters_filter.shuffle.unwrap_or(false),
             writable_only: query_parameters_filter.writable_only.unwrap_or(false),
@@ -1512,7 +1493,6 @@ pub fn prepare_query_parameters(
             privileged: false,
             get_secure_query_condition: perms::get_secure_query_condition_string_post,
             encountered_tables: HashSet::new(),
-            fulltext_table: Some("post_search_index"),
         }),
         Scope::UserGroup => Ok(QueryParameters {
             pagination: Some(QueryBuilderPagination {
@@ -1521,6 +1501,7 @@ pub fn prepare_query_parameters(
                 max_limit: MAX_LIMIT,
             }),
             ordering: Vec::new(),
+            constriction: query_parameters_filter.constriction.clone(),
             variables,
             shuffle: query_parameters_filter.shuffle.unwrap_or(false),
             writable_only: query_parameters_filter.writable_only.unwrap_or(false),
@@ -1600,7 +1581,6 @@ pub fn prepare_query_parameters(
                 ))
             },
             encountered_tables: HashSet::new(),
-            fulltext_table: Some("user_group_search_index"),
         }),
     }
 }
@@ -1720,10 +1700,7 @@ pub async fn analyze_query_handler(request: AnalyzeQueryRequest) -> Result<impl 
     };
 
     let error = if log.errors.is_empty() {
-        let mut query_parameters =
-            prepare_query_parameters(&QueryParametersFilter::default(), &None, &scope)
-                .unwrap_or_default();
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         ast.accept(&mut semantic_analysis_visitor, &scope, &mut log);
         if !log.errors.is_empty() {
             Some(QueryCompilationError {

@@ -203,6 +203,16 @@ impl Scope {
             }
         }
     }
+
+    pub fn get_fulltext_table(&self) -> Option<&'static str> {
+        match self {
+            Self::Global => None,
+            Self::Post | Self::TagAutoMatchPost => Some("post_search_index"),
+            Self::Collection | Self::TagAutoMatchCollection => Some("post_collection_search_index"),
+            Self::CollectionItem { .. } => Some("post_search_index"),
+            Self::UserGroup => Some("user_group_search_index"),
+        }
+    }
 }
 
 lazy_static! {

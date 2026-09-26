@@ -766,6 +766,7 @@ pub fn compile_auto_match_condition(
         exclude_window: None,
         shuffle: None,
         writable_only: None,
+        constriction: None,
     };
     let mut query_parameters = prepare_query_parameters(&query_parameters_filter, &None, &scope)?;
     query_parameters.privileged = true;

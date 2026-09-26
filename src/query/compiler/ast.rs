@@ -362,17 +362,15 @@ pub trait Visitor {
     );
 }
 
-pub struct SemanticAnalysisVisitor<'p> {
-    pub query_parameters: &'p mut QueryParameters,
-}
+pub struct SemanticAnalysisVisitor;
 
-impl<'p> SemanticAnalysisVisitor<'p> {
-    pub fn new(query_parameters: &'p mut QueryParameters) -> Self {
-        Self { query_parameters }
+impl SemanticAnalysisVisitor {
+    pub fn new() -> Self {
+        Self {}
     }
 }
 
-impl Visitor for SemanticAnalysisVisitor<'_> {
+impl Visitor for SemanticAnalysisVisitor {
     fn visit_query_node(
         &mut self,
         query_node: &mut QueryNode,
@@ -689,7 +687,7 @@ impl Visitor for SemanticAnalysisVisitor<'_> {
         log: &mut Log,
         location: Location,
     ) {
-        if self.query_parameters.fulltext_table.is_none() {
+        if scope.get_fulltext_table().is_none() {
             log.errors.push(Error {
                 location,
                 msg: format!("No fulltext search available for scope: {scope}"),
@@ -1298,7 +1296,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
     fn visit_fulltext_node(
         &mut self,
         fulltext_node: &mut FulltextNode,
-        _scope: &Scope,
+        scope: &Scope,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -1321,10 +1319,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
 
         let tag_cte_name = format!("tag_fuzzy_cte{}", cte.idx);
         let base_table_name = self.query_parameters.base_table_name;
-        let fulltext_table = self
-            .query_parameters
-            .fulltext_table
-            .unwrap_or("--invalid--");
+        let fulltext_table = scope.get_fulltext_table().unwrap_or("--invalid--");
 
         let fulltext_cte_idx = {
             let idx = self.ctes.len();

@@ -7,12 +7,12 @@ use self::{
 };
 use itertools::Itertools;
 use lexer::Lexer;
-use std::fmt;
+use std::{fmt, mem};
 
 use super::{MAX_PAGE, QueryBuilderPagination, QueryParameters};
 
 use crate::query::compiler::ast::{
-    ExpressionStatement, Operator, StatementNode, combine_expressions,
+    ExpressionNode, ExpressionStatement, Operator, StatementNode, combine_expressions,
 };
 use crate::query::compiler::dict::Type;
 use crate::{
@@ -75,8 +75,20 @@ pub fn compile_conditions(
         (None, None)
     };
     let mut log = Log { errors: Vec::new() };
+    let constriction = query_parameters.constriction.take();
+    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+    let mut query_builder_visitor = QueryBuilderVisitor::new(&mut query_parameters);
 
-    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
+    if let Some(constriction) = constriction {
+        compile_and_apply_constriction(
+            constriction,
+            &mut semantic_analysis_visitor,
+            &mut query_builder_visitor,
+            scope,
+            &mut log,
+        )?;
+    }
+
     let mut root_node = compile_conditions_ast(
         &mut semantic_analysis_visitor,
         conditions,
@@ -85,7 +97,6 @@ pub fn compile_conditions(
         &mut log,
     )?;
 
-    let mut query_builder_visitor = QueryBuilderVisitor::new(&mut query_parameters);
     root_node.accept(&mut query_builder_visitor, scope, &mut log);
     if !log.errors.is_empty() {
         return Err(crate::Error::QueryCompilationError(
@@ -129,30 +140,12 @@ pub fn compile_conditions_ast(
         let mut ast = compile_ast(condition, log, true)?;
         ast.accept(semantic_analysis_visitor, scope, log);
 
-        let mut condition_expression = None;
-        for statement in ast.node_type.statements {
-            let expression_statement = statement.node_type.downcast_ref::<ExpressionStatement>();
-            match expression_statement {
-                Some(expression_statement) if expression_statement.expression_node.node_type.get_return_type(scope) == Type::Boolean => {
-                    let expression_node = expression_statement.expression_node.clone_boxed_node();
-                    condition_expression = match condition_expression {
-                        None => Some(expression_node),
-                        Some(existing_expression) => Some(combine_expressions(existing_expression, expression_node, Operator::And)),
-                    };
-                }
-                _ => {
-                    log.errors.push(Error {
-                        location: statement.location,
-                        msg: format!("All statements used in FQL condition must be boolean expression but got {:?}", &statement.node_type),
-                    })
-                }
-            }
-        }
+        let condition_expression = combine_condition_statements(ast, scope, log);
 
         if !log.errors.is_empty() {
             return Err(crate::Error::QueryCompilationError(
                 String::from("semantic analysis"),
-                log.errors.clone(),
+                mem::take(&mut log.errors),
             ));
         }
 
@@ -175,14 +168,26 @@ pub fn compile_conditions_ast(
         }
     }
 
-    let root_node = Node {
-        location: Location { start: 0, end: 0 },
+    let root_node = create_root_node_for_expression(root_expression);
+
+    Ok(root_node)
+}
+
+fn create_root_node_for_expression(
+    root_expression: Option<Box<Node<dyn ExpressionNode>>>,
+) -> Node<QueryNode> {
+    let location = root_expression
+        .as_ref()
+        .map(|n| n.location)
+        .unwrap_or_default();
+    Node {
+        location,
         node_type: QueryNode {
             statements: root_expression
                 .into_iter()
                 .map(|root_expression| {
                     Box::new(Node {
-                        location: Location { start: 0, end: 0 },
+                        location,
                         node_type: ExpressionStatement {
                             expression_node: root_expression,
                         },
@@ -190,9 +195,46 @@ pub fn compile_conditions_ast(
                 })
                 .collect(),
         },
-    };
+    }
+}
 
-    Ok(root_node)
+fn combine_condition_statements(
+    ast: Node<QueryNode>,
+    scope: &Scope,
+    log: &mut Log,
+) -> Option<Box<Node<dyn ExpressionNode>>> {
+    let mut condition_expression = None;
+    for statement in ast.node_type.statements {
+        let expression_statement = statement.node_type.downcast_ref::<ExpressionStatement>();
+        match expression_statement {
+            Some(expression_statement)
+                if expression_statement
+                    .expression_node
+                    .node_type
+                    .get_return_type(scope)
+                    == Type::Boolean =>
+            {
+                let expression_node = expression_statement.expression_node.clone_boxed_node();
+                condition_expression = match condition_expression {
+                    None => Some(expression_node),
+                    Some(existing_expression) => Some(combine_expressions(
+                        existing_expression,
+                        expression_node,
+                        Operator::And,
+                    )),
+                };
+            }
+            _ => log.errors.push(Error {
+                location: statement.location,
+                msg: format!(
+                    "All statements used in FQL condition must be boolean expression but got {:?}",
+                    &statement.node_type
+                ),
+            }),
+        }
+    }
+
+    condition_expression
 }
 
 pub struct CompiledQuery {
@@ -210,11 +252,8 @@ pub fn compile_sql(
     let source_query = query.clone().unwrap_or_default();
     let instant = std::time::Instant::now();
 
-    let (ctes, where_expressions, expensive) = if let Some(query) = query {
-        compile_expressions(query, &mut query_parameters, scope)?
-    } else {
-        (Vec::new(), Vec::new(), false)
-    };
+    let (ctes, where_expressions, expensive) =
+        compile_expressions(query, &mut query_parameters, scope)?;
 
     let sql = build_sql_string(ctes, where_expressions, query_parameters, user)?;
     log::debug!(
@@ -398,11 +437,8 @@ pub fn compile_window_query(
         (None, None)
     };
 
-    let (mut ctes, mut where_expressions, _) = if let Some(query) = query {
-        compile_expressions(query, &mut query_parameters, scope)?
-    } else {
-        (Vec::new(), Vec::new(), false)
-    };
+    let (mut ctes, mut where_expressions, _) =
+        compile_expressions(query, &mut query_parameters, scope)?;
 
     perms::append_secure_query_condition(
         &mut where_expressions,
@@ -560,35 +596,50 @@ pub fn compile_ast(
 }
 
 fn compile_expressions(
-    query: String,
+    query: Option<String>,
     query_parameters: &mut QueryParameters,
     scope: &Scope,
 ) -> Result<(Vec<String>, Vec<String>, bool), crate::Error> {
     let mut log = Log { errors: Vec::new() };
-    let mut ast = compile_ast(query, &mut log, true)?;
-    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(query_parameters);
-    ast.accept(&mut semantic_analysis_visitor, scope, &mut log);
-    if !log.errors.is_empty() {
-        return Err(crate::Error::QueryCompilationError(
-            String::from("semantic analysis"),
-            log.errors,
-        ));
+    let constriction = query_parameters.constriction.take();
+    let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
+    let mut query_builder_visitor = QueryBuilderVisitor::new(query_parameters);
+    let mut is_expensive = false;
+
+    if let Some(constriction) = constriction {
+        is_expensive |= compile_and_apply_constriction(
+            constriction,
+            &mut semantic_analysis_visitor,
+            &mut query_builder_visitor,
+            scope,
+            &mut log,
+        )?;
     }
 
-    let is_expensive = ast
-        .node_type
-        .statements
-        .iter()
-        .filter_map(|statement| statement.node_type.downcast_ref::<ExpressionStatement>())
-        .any(|statement| statement.expression_node.node_type.is_expensive(scope));
+    if let Some(query) = query {
+        let mut ast = compile_ast(query, &mut log, true)?;
+        ast.accept(&mut semantic_analysis_visitor, scope, &mut log);
+        if !log.errors.is_empty() {
+            return Err(crate::Error::QueryCompilationError(
+                String::from("semantic analysis"),
+                log.errors,
+            ));
+        }
 
-    let mut query_builder_visitor = QueryBuilderVisitor::new(query_parameters);
-    ast.accept(&mut query_builder_visitor, scope, &mut log);
-    if !log.errors.is_empty() {
-        return Err(crate::Error::QueryCompilationError(
-            String::from("query builder"),
-            log.errors,
-        ));
+        is_expensive |= ast
+            .node_type
+            .statements
+            .iter()
+            .filter_map(|statement| statement.node_type.downcast_ref::<ExpressionStatement>())
+            .any(|statement| statement.expression_node.node_type.is_expensive(scope));
+
+        ast.accept(&mut query_builder_visitor, scope, &mut log);
+        if !log.errors.is_empty() {
+            return Err(crate::Error::QueryCompilationError(
+                String::from("query builder"),
+                log.errors,
+            ));
+        }
     }
 
     Ok((
@@ -601,6 +652,39 @@ fn compile_expressions(
         query_builder_visitor.where_expressions,
         is_expensive,
     ))
+}
+
+fn compile_and_apply_constriction(
+    constriction: String,
+    semantic_analysis_visitor: &mut SemanticAnalysisVisitor,
+    query_builder_visitor: &mut QueryBuilderVisitor,
+    scope: &Scope,
+    log: &mut Log,
+) -> Result<bool, crate::Error> {
+    let mut constriction_ast = compile_ast(constriction, log, true)?;
+    constriction_ast.accept(semantic_analysis_visitor, scope, log);
+    let constriction_expression = combine_condition_statements(constriction_ast, scope, log);
+    if !log.errors.is_empty() {
+        return Err(crate::Error::QueryCompilationError(
+            String::from("constriction: semantic analysis"),
+            mem::take(&mut log.errors),
+        ));
+    }
+
+    if let Some(constriction_expression) = constriction_expression {
+        let is_expensive = constriction_expression.node_type.is_expensive(scope);
+        let mut constriction_root = create_root_node_for_expression(Some(constriction_expression));
+        constriction_root.accept(query_builder_visitor, scope, log);
+        if !log.errors.is_empty() {
+            return Err(crate::Error::QueryCompilationError(
+                String::from("constriction: query builder"),
+                mem::take(&mut log.errors),
+            ));
+        }
+        Ok(is_expensive)
+    } else {
+        Ok(false)
+    }
 }
 
 pub fn apply_ctes(sql_query: &mut String, ctes: &[String]) -> Result<(), crate::Error> {
@@ -786,7 +870,6 @@ pub fn apply_pagination(
 
 #[cfg(test)]
 mod tests {
-    use crate::query::QueryParameters;
     use crate::query::compiler::ast::{
         AttributeNode, BinaryExpressionNode, ExpressionStatement, Operator, PostTagNode,
         SemanticAnalysisVisitor, VariableNode,
@@ -797,8 +880,7 @@ mod tests {
     #[test]
     fn test_compile_single_condition() {
         let mut log = Log { errors: Vec::new() };
-        let mut query_parameters = QueryParameters::default();
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         let ast = compile_conditions_ast(
             &mut semantic_analysis_visitor,
             vec![String::from("Liara")],
@@ -824,8 +906,7 @@ mod tests {
     #[test]
     fn test_compile_single_condition_with_multiple_statements() {
         let mut log = Log { errors: Vec::new() };
-        let mut query_parameters = QueryParameters::default();
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         let ast = compile_conditions_ast(
             &mut semantic_analysis_visitor,
             vec![String::from("Liara tag2")],
@@ -870,8 +951,7 @@ mod tests {
     #[test]
     fn test_compile_multiple_conditions_with_single_statement() {
         let mut log = Log { errors: Vec::new() };
-        let mut query_parameters = QueryParameters::default();
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         let ast = compile_conditions_ast(
             &mut semantic_analysis_visitor,
             vec![String::from("Liara"), String::from("tag2")],
@@ -916,8 +996,7 @@ mod tests {
     #[test]
     fn test_compile_multiple_conditions_with_multiple_statements() {
         let mut log = Log { errors: Vec::new() };
-        let mut query_parameters = QueryParameters::default();
-        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new(&mut query_parameters);
+        let mut semantic_analysis_visitor = SemanticAnalysisVisitor::new();
         let ast = compile_conditions_ast(
             &mut semantic_analysis_visitor,
             vec![
