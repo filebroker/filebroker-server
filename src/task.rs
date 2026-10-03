@@ -121,7 +121,7 @@ pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
 
         run_serializable_transaction(&mut connection, async |connection| {
             // clear locks older than 1 hour in case a task failed to release them due to unexpected termination
-            // locks are refreshed every 15 minutes, so locks older than 1 hour should be considered stale
+            // locks are refreshed every minute, so locks older than 1 hour should be considered stale
             diesel::sql_query("UPDATE s3_object SET hls_locked_at = NULL WHERE hls_locked_at < NOW() - interval '1 hour'")
                 .execute(connection)
                 .await
@@ -137,17 +137,17 @@ pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
                 .await
                 .map_err(retry_on_serialization_failure)?;
 
-            diesel::sql_query("UPDATE deferred_s3_object_deletion SET locked_at = NULL WHERE locked_at < NOW() - interval '1 day'")
+            diesel::sql_query("UPDATE deferred_s3_object_deletion SET locked_at = NULL WHERE locked_at < NOW() - interval '1 hour'")
                 .execute(connection)
                 .await
                 .map_err(retry_on_serialization_failure)?;
 
-            diesel::sql_query("UPDATE apply_auto_tags_task SET locked_at = NULL WHERE locked_at < NOW() - interval '1 day'")
+            diesel::sql_query("UPDATE apply_auto_tags_task SET locked_at = NULL WHERE locked_at < NOW() - interval '1 hour'")
                 .execute(connection)
                 .await
                 .map_err(retry_on_serialization_failure)?;
 
-            diesel::sql_query("UPDATE reconcile_broker_quota_usage_task SET locked_at = NULL WHERE locked_at < NOW() - interval '1 day' AND NOT(fail_count < 3)")
+            diesel::sql_query("UPDATE reconcile_broker_quota_usage_task SET locked_at = NULL WHERE locked_at < NOW() - interval '1 hour' AND NOT(fail_count < 3)")
                 .execute(connection)
                 .await
                 .map_err(retry_on_serialization_failure)?;
