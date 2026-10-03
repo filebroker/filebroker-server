@@ -58,9 +58,7 @@ pub fn run_apply_auto_tags_tasks(tokio_handle: Handle) -> Result<(), Error> {
                 }
 
                 let task_to_run = task.clone();
-                let res = run_serializable_transaction(&mut connection, async |connection| {
-                    run_apply_auto_tags_task(&task_to_run, connection).await
-                }).await;
+                let res = run_apply_auto_tags_task(&task_to_run, &mut connection).await;
 
                 if let Err(e) = res {
                     log::error!(

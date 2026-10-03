@@ -439,7 +439,7 @@ pub async fn edit_post_handler(
 
     let (post_detailed, apply_auto_tags_task) =
         run_serializable_transaction(&mut connection, async |connection| {
-            let (updated_post, apply_auto_tags_task) =
+            let (updated_post, _, apply_auto_tags_task) =
                 update_post(post_pk, &user, request.clone(), connection).await?;
             Ok((
                 load_post_detailed(updated_post, Some(&user), connection).await?,
@@ -460,7 +460,7 @@ pub async fn update_post(
     user: &User,
     mut request: EditPostRequest,
     connection: &mut AsyncPgConnection,
-) -> Result<(Post, Option<ApplyAutoTagsTask>), TransactionRuntimeError> {
+) -> Result<(Post, bool, Option<ApplyAutoTagsTask>), TransactionRuntimeError> {
     let curr_post = perms::load_post_secured(post_pk, connection, Some(user))
         .await?
         .post;
@@ -588,9 +588,9 @@ pub async fn update_post(
             Some(create_apply_auto_tags_for_post_task(updated_post.pk, connection).await?)
         };
 
-        Ok((updated_post, apply_auto_tags_task))
+        Ok((updated_post, true, apply_auto_tags_task))
     } else {
-        Ok((curr_post.clone(), None))
+        Ok((curr_post.clone(), false, None))
     }
 }
 
@@ -675,7 +675,7 @@ pub async fn edit_post_collection_handler(
 
     let (post_collection_detailed, apply_auto_tags_task) =
         run_serializable_transaction(&mut connection, async |connection| {
-            let (updated_post_collection, apply_auto_tags_task) =
+            let (updated_post_collection, _, apply_auto_tags_task) =
                 update_post_collection(post_collection_pk, &user, request.clone(), connection)
                     .await?;
             Ok((
@@ -698,7 +698,7 @@ pub async fn update_post_collection(
     user: &User,
     mut request: EditPostCollectionRequest,
     connection: &mut AsyncPgConnection,
-) -> Result<(PostCollection, Option<ApplyAutoTagsTask>), TransactionRuntimeError> {
+) -> Result<(PostCollection, bool, Option<ApplyAutoTagsTask>), TransactionRuntimeError> {
     let curr_post_collection =
         perms::load_post_collection_secured(post_collection_pk, connection, Some(user))
             .await?
@@ -1009,7 +1009,7 @@ pub async fn update_post_collection(
             )
         };
 
-        Ok((updated_post_collection, apply_auto_tags_task))
+        Ok((updated_post_collection, true, apply_auto_tags_task))
     } else if items_changed {
         let apply_auto_tags_task = if is_system_user(user) {
             // don't create apply_auto_tags_task for system user changes,
@@ -1021,8 +1021,8 @@ pub async fn update_post_collection(
                     .await?,
             )
         };
-        Ok((curr_post_collection.clone(), apply_auto_tags_task))
+        Ok((curr_post_collection.clone(), true, apply_auto_tags_task))
     } else {
-        Ok((curr_post_collection.clone(), None))
+        Ok((curr_post_collection.clone(), false, None))
     }
 }
