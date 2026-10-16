@@ -1,4 +1,4 @@
-use crate::data::encode::spawn_encode_task_blocking;
+use crate::data::encode::{NETWORK_IO_TIMEOUT_US, spawn_encode_task_blocking};
 use crate::error::Error;
 use crate::util::join_api_url;
 use serde::Deserialize;
@@ -66,6 +66,7 @@ where
     S: AsRef<OsStr>,
 {
     let ffprobe_process = Command::new("ffprobe")
+        .args(["-rw_timeout", NETWORK_IO_TIMEOUT_US])
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -280,6 +281,8 @@ pub async fn get_object_duration(object_url: &str) -> Result<ObjectDuration, Err
             "format=duration",
             "-of",
             "default=noprint_wrappers=1:nokey=1",
+            "-rw_timeout",
+            NETWORK_IO_TIMEOUT_US,
             object_url,
         ])
         .stdout(Stdio::piped())
@@ -323,6 +326,8 @@ pub async fn get_object_start_time(object_url: &str) -> Result<f64, Error> {
             "format=start_time",
             "-of",
             "default=noprint_wrappers=1:nokey=1",
+            "-rw_timeout",
+            NETWORK_IO_TIMEOUT_US,
             object_url,
         ])
         .stdout(Stdio::piped())

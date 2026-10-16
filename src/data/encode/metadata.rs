@@ -1,5 +1,5 @@
 use crate::data::encode::{
-    EXIF_DATE_FORMAT_REGEX,
+    EXIF_DATE_FORMAT_REGEX, NETWORK_IO_TIMEOUT_US,
     probe::{content_type_is_audio, content_type_is_image, content_type_is_video},
     spawn_encode_task_blocking,
 };
@@ -586,6 +586,8 @@ async fn load_ffprobe_media_metadata(object_url: &str) -> Result<FfprobeMediaMet
             "-show_format",
             "-print_format",
             "json",
+            "-rw_timeout",
+            NETWORK_IO_TIMEOUT_US,
             object_url,
         ])
         .stdout(Stdio::piped())

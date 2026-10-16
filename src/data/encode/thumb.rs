@@ -1,4 +1,5 @@
 use crate::data::encode::{
+    NETWORK_IO_TIMEOUT_US,
     probe::{content_type_is_audio, content_type_is_image, content_type_is_video, media_has_video},
     spawn_encode_task_blocking,
 };
@@ -73,6 +74,8 @@ pub async fn generate_thumbnail(
             thumbnail_extension = "webp";
             thumbnail_content_type = String::from("image/webp");
             vec![
+                String::from("-rw_timeout"),
+                NETWORK_IO_TIMEOUT_US.to_string(),
                 String::from("-i"),
                 object_url,
                 String::from("-vf"),
@@ -95,6 +98,8 @@ pub async fn generate_thumbnail(
             thumbnail_extension = "webp";
             thumbnail_content_type = String::from("image/webp");
             vec![
+                String::from("-rw_timeout"),
+                NETWORK_IO_TIMEOUT_US.to_string(),
                 String::from("-i"),
                 object_url,
                 String::from("-vf"),

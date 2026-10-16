@@ -1,5 +1,7 @@
 use crate::acquire_db_connection;
-use crate::data::encode::{probe::media_is_animated, spawn_encode_task_blocking};
+use crate::data::encode::{
+    NETWORK_IO_TIMEOUT_US, probe::media_is_animated, spawn_encode_task_blocking,
+};
 use crate::data::get_system_bucket;
 use crate::error::Error;
 use crate::model::{ObjectType, S3Object};
@@ -28,6 +30,8 @@ pub async fn generate_avatar(
     let is_animated = media_is_animated(&source_object_key).await?;
     let args = if is_animated {
         vec![
+            String::from("-rw_timeout"),
+            NETWORK_IO_TIMEOUT_US.to_string(),
             String::from("-i"),
             object_url,
             String::from("-vf"),
@@ -56,6 +60,8 @@ pub async fn generate_avatar(
         ]
     } else {
         vec![
+            String::from("-rw_timeout"),
+            NETWORK_IO_TIMEOUT_US.to_string(),
             String::from("-i"),
             object_url,
             String::from("-vf"),

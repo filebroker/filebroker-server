@@ -13,6 +13,8 @@ use tokio::sync::Semaphore;
 use crate::{CONCURRENT_VIDEO_TRANSCODE_LIMIT, error::Error};
 use lazy_static::lazy_static;
 
+const NETWORK_IO_TIMEOUT_US: &str = "60000000";
+
 lazy_static! {
     pub static ref ENCODE_POOL: ThreadPool = rusty_pool::Builder::new()
         .name(String::from("encode_pool"))

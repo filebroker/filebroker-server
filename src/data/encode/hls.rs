@@ -1,5 +1,5 @@
 use crate::data::encode::{
-    SUBMITTED_HLS_TRANSCODINGS, VIDEO_TRANSCODE_SEMAPHORE, output,
+    NETWORK_IO_TIMEOUT_US, SUBMITTED_HLS_TRANSCODINGS, VIDEO_TRANSCODE_SEMAPHORE, output,
     output::{HlsOutputStream, S3UploadResult, UploadedHlsStream},
     probe::{self, MediaStream, StreamType},
     spawn_encode_task_blocking,
@@ -257,6 +257,8 @@ pub async fn generate_hls_playlist(
     }
 
     let mut transcode_args = vec![
+        String::from("-rw_timeout"),
+        NETWORK_IO_TIMEOUT_US.to_string(),
         String::from("-i"),
         object_url.clone(),
         String::from("-v"),
@@ -689,6 +691,8 @@ async fn generate_hls_subtitle_outputs(
         String::from("-nostdin"),
         String::from("-v"),
         String::from("error"),
+        String::from("-rw_timeout"),
+        NETWORK_IO_TIMEOUT_US.to_string(),
         String::from("-i"),
         object_url.to_owned(),
     ];
