@@ -317,7 +317,7 @@ pub async fn get_object_duration(object_url: &str) -> Result<ObjectDuration, Err
     }
 }
 
-pub async fn get_object_start_time(object_url: &str) -> Result<f64, Error> {
+pub async fn get_object_start_time(object_url: &str) -> Result<Option<f64>, Error> {
     let process = Command::new("ffprobe")
         .args([
             "-v",
@@ -352,19 +352,18 @@ pub async fn get_object_start_time(object_url: &str) -> Result<f64, Error> {
 
     let output_string = String::from_utf8_lossy(&output.stdout);
 
-    let start_time = output_string.trim().parse::<f64>().map_err(|e| {
-        Error::FfmpegProcessError(format!(
-            "Received invalid start time from ffprobe '{}': {e}",
-            output_string.trim(),
-        ))
-    })?;
-
-    if !start_time.is_finite() || start_time < 0.0 {
-        return Err(Error::FfmpegProcessError(format!(
-            "ffprobe returned invalid start time '{}'",
-            output_string.trim(),
-        )));
+    match output_string.trim().parse::<f64>() {
+        Ok(start_time) if start_time.is_finite() => Ok(Some(start_time)),
+        Ok(start_time) => {
+            log::warn!("ffprobe returned unusable start time '{start_time}'",);
+            Ok(None)
+        }
+        Err(e) => {
+            log::warn!(
+                "Received invalid start time from ffprobe '{}': {e}",
+                output_string.trim(),
+            );
+            Ok(None)
+        }
     }
-
-    Ok(start_time)
 }

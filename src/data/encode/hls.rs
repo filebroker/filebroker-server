@@ -663,24 +663,13 @@ async fn generate_hls_subtitle_outputs(
         tokio::sync::watch::channel(FfmpegCompletion::Running);
 
     let video_stream_path = format!("{file_id}/stream_0.m4s");
-    let media_timestamp = match async {
-        let video_stream_url = bucket.presign_get(&video_stream_path, 300, None).await?;
-
-        let start_time_sec = probe::get_object_start_time(&video_stream_url).await?;
-
-        Ok::<_, Error>((start_time_sec * 90_000.0).round() as u64)
-    }
-    .await
-    {
-        Ok(media_timestamp) => Some(media_timestamp),
-        Err(error) => {
-            log::warn!(
-                "HLS transcode for {file_id}: Failed to determine HLS media start time for HLS subtitles, subtitles will be uploaded without X-TIMESTAMP-MAP: {error}"
-            );
-
-            None
-        }
-    };
+    let video_stream_url = bucket.presign_get(&video_stream_path, 300, None).await?;
+    let start_time_sec = probe::get_object_start_time(&video_stream_url).await?;
+    let media_timestamp = start_time_sec.map(|sec| {
+        const MPEGTS_WRAP: i64 = 1 << 33;
+        let timestamp = (sec * 90_000.0).round() as i64;
+        timestamp.rem_euclid(MPEGTS_WRAP) as u64
+    });
 
     let default_subtitle_index = subtitle_streams
         .iter()
