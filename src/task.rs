@@ -13,8 +13,6 @@ use diesel_async::RunQueryDsl;
 use rusty_pool::ThreadPool;
 use tokio::{runtime::Handle, sync::Mutex, task::JoinHandle};
 
-use lazy_static::lazy_static;
-
 use crate::{
     acquire_db_connection,
     diesel::{BoolExpressionMethods, ExpressionMethods},
@@ -22,6 +20,8 @@ use crate::{
     retry_on_serialization_failure, run_serializable_transaction,
     schema::{email_confirmation_token, one_time_password, refresh_token},
 };
+use lazy_static::lazy_static;
+use tokio_util::task::TaskTracker;
 
 lazy_static! {
     pub static ref TASK_POOL: ThreadPool = {
@@ -62,6 +62,7 @@ lazy_static! {
             .map(|s| pg_interval::Interval::from_iso(&s)
                 .expect("FILEBROKER_RECONCILE_QUOTA_GRACE_PERIOD is invalid"))
             .unwrap_or(pg_interval::Interval::new(0, 30, 0));
+    static ref BACKGROUND_TASK_TRACKER: TaskTracker = TaskTracker::new();
 }
 
 pub fn submit_task(
@@ -99,8 +100,31 @@ pub fn submit_task(
     })
 }
 
-pub fn shutdown_join() {
+pub fn spawn_background_task<F>(future: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    // drop JoinHandle explicitly, we don't want to await the future here and clippy warns about not using the future or using a non-binding `let` on a future
+    drop(BACKGROUND_TASK_TRACKER.spawn(future));
+}
+
+pub fn begin_shutdown() {
     IS_SHUTDOWN.store(true, Ordering::Relaxed);
+}
+
+pub async fn wait_for_background_tasks() {
+    BACKGROUND_TASK_TRACKER.close();
+
+    let task_count = BACKGROUND_TASK_TRACKER.len();
+    log::info!("Waiting for {task_count} background tasks to finish");
+
+    BACKGROUND_TASK_TRACKER.wait().await;
+
+    log::info!("Background tasks finished");
+}
+
+pub fn shutdown_join() {
+    begin_shutdown();
     TASK_POOL.join();
 }
 
@@ -408,7 +432,7 @@ where
     pub fn release_manually<F: Future + Send + 'static>(mut self, fut: F) {
         self.refresh_task_join_handle.abort();
         self.manually_released = true;
-        tokio::spawn(async move {
+        spawn_background_task(async move {
             let _mutex = self.update_mutex.lock().await;
             fut.await;
         });
@@ -431,7 +455,7 @@ where
         let table_name = self.table_name;
         let key_column = self.key_column;
         let lock_column = self.lock_column;
-        tokio::spawn(async move {
+        spawn_background_task(async move {
             let _update_mutex = update_mutex.lock().await;
             log::debug!(
                 "LockedObjectsTaskSentinel: Releasing lock {lock_column} on {table_name} for key {key_column} in {object_keys:?}"

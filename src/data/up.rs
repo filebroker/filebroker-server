@@ -20,6 +20,7 @@ use crate::{
     model::{Broker, BrokerAccess, ObjectType, S3Object, User},
     run_serializable_transaction,
     schema::s3_object,
+    task,
 };
 
 pub async fn upload_file<S>(
@@ -195,7 +196,7 @@ where
     let bucket_owned = bucket.clone();
     let broker_owned = broker.clone();
     let user_owned = user.clone();
-    tokio::spawn(async move {
+    task::spawn_background_task(async move {
         if let Err(e) = generate_thumbnail(
             bucket_owned,
             path.clone(),
@@ -212,7 +213,7 @@ where
     });
 
     let path = s3_object.object_key.clone();
-    tokio::spawn(async move {
+    task::spawn_background_task(async move {
         if let Err(e) = load_object_metadata(path.clone(), false).await {
             log::error!("Failed to load metadata for '{path}': {e}");
         }
@@ -223,7 +224,7 @@ where
     let broker_owned = broker.clone();
     let user_owned = user.clone();
     if is_video && broker_hls_enabled && !hls_transcoding_disabled {
-        tokio::spawn(async move {
+        task::spawn_background_task(async move {
             if let Err(e) = generate_hls_playlist(
                 bucket_owned,
                 path.clone(),

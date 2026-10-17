@@ -63,6 +63,7 @@ tokio-postgres = "0.7.18"
 tokio-postgres-rustls = "0.14.0"
 tokio-rustls = "0.26.6"
 tokio-stream = "0.1.19"
+tokio-util = { version = "0.7.20", features = ["rt"] }
 tower = "0.5.3"
 url = "2.5.8"
 uuid = { version = "1.26.1", features = ["v4", "serde"] }

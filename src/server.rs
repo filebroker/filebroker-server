@@ -120,7 +120,7 @@ where
     F::Extract: Send,
     <F::Future as TryFuture>::Ok: Reply + Send,
 {
-    futures::pin_mut!(incoming);
+    let mut incoming = Box::pin(incoming);
 
     let warp_service = warp::service(filter);
     let graceful = GracefulShutdown::new();
@@ -176,7 +176,9 @@ where
         }
     }
 
-    shutdown_server().await;
+    drop(incoming);
+
+    task::begin_shutdown();
 
     let open_connection_count = graceful.count();
     log::info!("Shutting down {open_connection_count} HTTP connections");
@@ -184,6 +186,8 @@ where
         Ok(()) => log::info!("HTTP connections drained"),
         Err(_) => log::warn!("Timed out waiting for HTTP connections to drain"),
     }
+
+    shutdown_server().await;
 
     Ok(())
 }
@@ -923,11 +927,18 @@ async fn shutdown_signal() {
 
 pub async fn shutdown_server() {
     log::info!("Shutting down server");
+
+    // Idempotent; also needed for callers that invoke shutdown_server() directly rather than going through run_server().
+    task::begin_shutdown();
+
     log::info!("Waiting for scheduled tasks to finish");
     tokio::runtime::Handle::current()
         .spawn_blocking(task::shutdown_join)
         .await
         .expect("Failed to join scheduled tasks");
+
+    task::wait_for_background_tasks().await;
+
     log::info!("Shutting down http server worker runtime");
 }
 
