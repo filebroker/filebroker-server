@@ -7,15 +7,15 @@ use crate::model::{
 use crate::query::compiler::dict::Scope;
 use crate::query::report_missing_pks;
 use crate::schema::{
-    tag, tag_alias, tag_category, tag_edge, tag_edit_history, tag_edit_history_alias,
-    tag_edit_history_parent,
+    tag, tag_alias, tag_category, tag_closure_table, tag_edge, tag_edit_history,
+    tag_edit_history_alias, tag_edit_history_parent,
 };
 use crate::tag::auto_matching::{
     AutoMatchTarget, compile_auto_match_condition, compile_tag_auto_match_condition,
     create_apply_auto_tag_task, create_apply_tag_category_auto_tags_task,
     spawn_apply_auto_tags_task,
 };
-use crate::tag::{TagDetailed, get_tag_aliases, load_tag_detailed, validate_tag};
+use crate::tag::{TagDetailed, load_tag_detailed, validate_tag};
 use crate::tag::{get_or_create_tag, get_tag_aliases_pks, get_tag_parents_pks, sanitize_tag};
 use crate::util::{dedup_vec_optional, dedup_vecs_optional, string_value_updated};
 use crate::{acquire_db_connection, retry_on_constraint_violation, run_serializable_transaction};
@@ -352,11 +352,11 @@ pub async fn update_tag(
     tag_pk: i64,
     user: &User,
     mut added_parent_pks: Option<Vec<i64>>,
-    mut parent_pks_overwrite: Option<Vec<i64>>,
+    parent_pks_overwrite: Option<Vec<i64>>,
     removed_parent_pks: Option<Vec<i64>>,
     mut added_alias_pks: Option<Vec<i64>>,
-    mut alias_pks_overwrite: Option<Vec<i64>>,
-    mut removed_alias_pks: Option<Vec<i64>>,
+    alias_pks_overwrite: Option<Vec<i64>>,
+    removed_alias_pks: Option<Vec<i64>>,
     tag_category: Option<String>,
     auto_match_condition_post: Option<String>,
     auto_match_condition_collection: Option<String>,
@@ -373,163 +373,273 @@ pub async fn update_tag(
     let mut parents_changed = false;
     let mut aliases_changed = false;
 
+    // Snapshot the original relationships for change detection and edit history.
     let curr_parent_pks = get_tag_parents_pks(tag.pk, connection).await?;
-    if let Some(ref mut parent_pks_overwrite) = parent_pks_overwrite {
-        // add parents that aren't already set to added_parent_pks
+    let curr_alias_pks = get_tag_aliases_pks(tag.pk, connection).await?;
+
+    // Overwrites and additions are additive to each other. The overwrite determines which
+    // existing relationships should be removed, while added values are additionally retained.
+    if let Some(ref parent_pks_overwrite) = parent_pks_overwrite {
         match added_parent_pks {
             Some(ref mut added_parent_pks) => {
-                added_parent_pks.append(&mut parent_pks_overwrite.clone())
+                added_parent_pks.extend(parent_pks_overwrite);
             }
             None => added_parent_pks = Some(parent_pks_overwrite.clone()),
         }
-        // remove current parents that aren't in the added set
-        let parents_to_remove = curr_parent_pks
-            .iter()
-            .filter(|tag_pk| !added_parent_pks.as_ref().unwrap().contains(tag_pk))
-            .collect::<Vec<_>>();
-
-        if !parents_to_remove.is_empty() {
-            diesel::delete(tag_edge::table)
-                .filter(
-                    tag_edge::fk_child
-                        .eq(tag.pk)
-                        .and(tag_edge::fk_parent.eq_any(&parents_to_remove)),
-                )
-                .execute(connection)
-                .await?;
-            parents_changed = true;
-        }
     }
 
-    if let Some(ref mut added_parent_pks) = added_parent_pks {
-        added_parent_pks.retain(|tag_pk| !curr_parent_pks.contains(tag_pk));
-        if !added_parent_pks.is_empty() {
-            if added_parent_pks.contains(&tag.pk) {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InvalidRequestInputError(format!(
-                        "Cannot set tag {} as its own parent",
-                        tag.pk
-                    )),
-                ));
+    if let Some(ref alias_pks_overwrite) = alias_pks_overwrite {
+        match added_alias_pks {
+            Some(ref mut added_alias_pks) => {
+                added_alias_pks.extend(alias_pks_overwrite);
             }
-            report_missing_pks!(tag, &*added_parent_pks, connection)??;
-            add_tag_parents(tag.pk, added_parent_pks, connection).await?;
-            parents_changed = true;
+            None => added_alias_pks = Some(alias_pks_overwrite.clone()),
         }
     }
 
-    if let Some(ref removed_parent_pks) = removed_parent_pks
-        && !removed_parent_pks.is_empty()
+    dedup_vec_optional(&mut added_parent_pks);
+    dedup_vec_optional(&mut added_alias_pks);
+
+    // Validate relationship additions before mutating anything.
+    if let Some(ref added_parent_pks) = added_parent_pks
+        && !added_parent_pks.is_empty()
     {
+        if added_parent_pks.contains(&tag.pk) {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InvalidRequestInputError(format!(
+                    "Cannot set tag {} as its own parent",
+                    tag.pk
+                )),
+            ));
+        }
+
+        report_missing_pks!(tag, added_parent_pks, connection)??;
+    }
+
+    if let Some(ref added_alias_pks) = added_alias_pks
+        && !added_alias_pks.is_empty()
+    {
+        if added_alias_pks.contains(&tag.pk) {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InvalidRequestInputError(format!(
+                    "Cannot set tag {} as an alias of itself",
+                    tag.pk
+                )),
+            ));
+        }
+
+        report_missing_pks!(tag, added_alias_pks, connection)??;
+    }
+
+    /*
+     * Keep the requested removals separate from the relationships that actually need deleting.
+     *
+     * The requested set is used to preserve the existing "removal wins over addition" semantics.
+     * The actual deletion set is restricted to relationships that currently exist so that, in
+     * particular, an unrelated PK in removed_alias_pks cannot dissolve some unrelated alias group.
+     */
+    let removed_parent_pks = removed_parent_pks.unwrap_or_default();
+    let removed_alias_pks = removed_alias_pks.unwrap_or_default();
+
+    let mut parent_pks_to_remove = removed_parent_pks
+        .iter()
+        .filter(|parent_pk| curr_parent_pks.contains(parent_pk))
+        .copied()
+        .collect::<Vec<_>>();
+
+    if parent_pks_overwrite.is_some() {
+        parent_pks_to_remove.extend(
+            curr_parent_pks
+                .iter()
+                .filter(|parent_pk| {
+                    !added_parent_pks
+                        .as_ref()
+                        .is_some_and(|added_parent_pks| added_parent_pks.contains(parent_pk))
+                })
+                .copied(),
+        );
+    }
+
+    parent_pks_to_remove.sort_unstable();
+    parent_pks_to_remove.dedup();
+
+    let mut alias_pks_to_remove = removed_alias_pks
+        .iter()
+        .filter(|alias_pk| curr_alias_pks.contains(alias_pk))
+        .copied()
+        .collect::<Vec<_>>();
+
+    if alias_pks_overwrite.is_some() {
+        alias_pks_to_remove.extend(
+            curr_alias_pks
+                .iter()
+                .filter(|alias_pk| {
+                    !added_alias_pks
+                        .as_ref()
+                        .is_some_and(|added_alias_pks| added_alias_pks.contains(alias_pk))
+                })
+                .copied(),
+        );
+    }
+
+    alias_pks_to_remove.sort_unstable();
+    alias_pks_to_remove.dedup();
+
+    // Keep the requested final alias set separately. added_alias_pks will later be reduced to
+    // aliases that actually need inserting, but this full set is required when removing aliases
+    // inherited from newly added alias groups.
+    let mut desired_alias_pks = added_alias_pks.clone().unwrap_or_default();
+    desired_alias_pks.retain(|alias_pk| !removed_alias_pks.contains(alias_pk));
+
+    // Preserve the existing behaviour that explicit removals win over additions.
+    if let Some(ref mut added_parent_pks) = added_parent_pks {
+        added_parent_pks.retain(|parent_pk| {
+            !curr_parent_pks.contains(parent_pk) && !removed_parent_pks.contains(parent_pk)
+        });
+    }
+
+    if let Some(ref mut added_alias_pks) = added_alias_pks {
+        added_alias_pks.retain(|alias_pk| {
+            !curr_alias_pks.contains(alias_pk) && !removed_alias_pks.contains(alias_pk)
+        });
+    }
+
+    // Remove aliases first so subsequent hierarchy mutations operate against the new alias
+    // groups rather than propagating through aliases that are being removed in this update.
+    if !alias_pks_to_remove.is_empty() {
+        // a tag cannot be the alias of another tag without also being an alias of all of that tag's other aliases
+        // thus, removing an alias means that tag loses all its aliases
+        diesel::delete(tag_alias::table)
+            .filter(
+                tag_alias::fk_target
+                    .eq_any(&alias_pks_to_remove)
+                    .or(tag_alias::fk_source.eq_any(&alias_pks_to_remove)),
+            )
+            .execute(connection)
+            .await?;
+
+        aliases_changed = true;
+    }
+
+    // Remove hierarchy relationships after alias removals so their deletion is only propagated
+    // across aliases that remain aliases after this update.
+    if !parent_pks_to_remove.is_empty() {
         diesel::delete(tag_edge::table)
             .filter(
                 tag_edge::fk_child
                     .eq(tag.pk)
-                    .and(tag_edge::fk_parent.eq_any(removed_parent_pks)),
+                    .and(tag_edge::fk_parent.eq_any(&parent_pks_to_remove)),
             )
             .execute(connection)
             .await?;
+
         parents_changed = true;
     }
 
-    if added_parent_pks
-        .as_ref()
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+    // Validate and add hierarchy relationships against the alias state after removals.
+    if let Some(ref added_parent_pks) = added_parent_pks
+        && !added_parent_pks.is_empty()
     {
+        let current_alias_pks = get_tag_aliases_pks(tag.pk, connection).await?;
+
+        if let Some(alias_parent_pk) = added_parent_pks
+            .iter()
+            .find(|parent_pk| current_alias_pks.contains(parent_pk))
+        {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InvalidRequestInputError(format!(
+                    "Cannot set tag {} as parent of tag {} because they are aliases",
+                    alias_parent_pk, tag.pk
+                )),
+            ));
+        }
+
+        add_tag_parents(tag.pk, added_parent_pks, connection).await?;
+        parents_changed = true;
+    }
+
+    // Validate alias additions against the hierarchy after all requested removals and parent
+    // additions have been applied.
+    if let Some(ref added_alias_pks) = added_alias_pks
+        && !added_alias_pks.is_empty()
+    {
+        // Adding aliases merges the complete existing alias groups, so check the complete set
+        // that would become one alias group rather than only the explicitly supplied tags.
+        let mut prospective_alias_group_pks = get_tag_aliases_pks(tag.pk, connection).await?;
+        prospective_alias_group_pks.push(tag.pk);
+
+        for alias_pk in added_alias_pks {
+            prospective_alias_group_pks.push(*alias_pk);
+            prospective_alias_group_pks.extend(get_tag_aliases_pks(*alias_pk, connection).await?);
+        }
+
+        prospective_alias_group_pks.sort_unstable();
+        prospective_alias_group_pks.dedup();
+
+        let hierarchy_conflict = tag_closure_table::table
+            .filter(
+                tag_closure_table::depth.gt(0).and(
+                    tag_closure_table::fk_parent
+                        .eq_any(&prospective_alias_group_pks)
+                        .and(tag_closure_table::fk_child.eq_any(&prospective_alias_group_pks)),
+                ),
+            )
+            .select((tag_closure_table::fk_parent, tag_closure_table::fk_child))
+            .first::<(i64, i64)>(connection)
+            .await
+            .optional()?;
+
+        if let Some((parent_pk, child_pk)) = hierarchy_conflict {
+            return Err(TransactionRuntimeError::Rollback(
+                Error::InvalidRequestInputError(format!(
+                    "Cannot create alias relationship because tags {} and {} have a hierarchy relationship",
+                    parent_pk, child_pk
+                )),
+            ));
+        }
+
+        add_tag_aliases(&tag, added_alias_pks, connection).await?;
+        aliases_changed = true;
+    }
+
+    // An added alias may itself have aliases. Alias synchronisation imports that entire group.
+    // For an overwrite request, remove any such inherited aliases that were not requested.
+    if alias_pks_overwrite.is_some() {
+        let inserted_alias_pks = get_tag_aliases_pks(tag.pk, connection).await?;
+        let inherited_alias_pks = inserted_alias_pks
+            .into_iter()
+            .filter(|alias_pk| !desired_alias_pks.contains(alias_pk))
+            .collect::<Vec<_>>();
+
+        if !inherited_alias_pks.is_empty() {
+            // a tag cannot be the alias of another tag without also being an alias of all of that tag's other aliases
+            // thus, removing an alias means that tag loses all its aliases
+            diesel::delete(tag_alias::table)
+                .filter(
+                    tag_alias::fk_target
+                        .eq_any(&inherited_alias_pks)
+                        .or(tag_alias::fk_source.eq_any(&inherited_alias_pks)),
+                )
+                .execute(connection)
+                .await?;
+
+            aliases_changed = true;
+        }
+    }
+
+    /*
+     * Validate the final relationship counts after all trigger-driven synchronisation has
+     * completed. In particular, adding an alias can import that alias group's parents, so checking
+     * the parent count before alias insertion would not validate the actual final state.
+     */
+    if parents_changed || aliases_changed {
         let curr_parents = get_tag_parents_pks(tag.pk, connection).await?;
         if curr_parents.len() > 25 {
             return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
                 String::from("Cannot set more than 25 parents"),
             )));
         }
-    }
 
-    let curr_alias_pks = get_tag_aliases_pks(tag.pk, connection).await?;
-    if let Some(ref mut alias_pks_overwrite) = alias_pks_overwrite {
-        // add aliases that aren't already set to added_alias_pks
-        match added_alias_pks {
-            Some(ref mut added_alias_pks) => {
-                added_alias_pks.append(&mut alias_pks_overwrite.clone())
-            }
-            None => added_alias_pks = Some(alias_pks_overwrite.clone()),
-        }
-
-        // remove current aliases that aren't in the added set
-        let aliases_to_remove = curr_alias_pks
-            .iter()
-            .filter(|tag_pk| !added_alias_pks.as_ref().unwrap().contains(tag_pk))
-            .collect::<Vec<_>>();
-
-        if !aliases_to_remove.is_empty() {
-            // a tag cannot be the alias of another tag without also being an alias of all of that tag's other aliases
-            // thus, removing an alias means that tag loses all its aliases
-            diesel::delete(tag_alias::table)
-                .filter(
-                    tag_alias::fk_target
-                        .eq_any(&aliases_to_remove)
-                        .or(tag_alias::fk_source.eq_any(&aliases_to_remove)),
-                )
-                .execute(connection)
-                .await?;
-            aliases_changed = true;
-        }
-    }
-
-    if let Some(ref mut added_alias_pks) = added_alias_pks {
-        added_alias_pks.retain(|tag_pk| !curr_alias_pks.contains(tag_pk));
-        if !added_alias_pks.is_empty() {
-            if added_alias_pks.contains(&tag.pk) {
-                return Err(TransactionRuntimeError::Rollback(
-                    Error::InvalidRequestInputError(format!(
-                        "Cannot set tag {} as an alias of itself",
-                        tag.pk
-                    )),
-                ));
-            }
-            report_missing_pks!(tag, &*added_alias_pks, connection)??;
-            add_tag_aliases(&tag, added_alias_pks, connection).await?;
-            aliases_changed = true;
-            // remove aliases inherited from one of the added aliases that was not included in the overwrite request
-            if alias_pks_overwrite.is_some() {
-                let inserted_aliases = get_tag_aliases(tag.pk, connection).await?;
-                let mut inherited_aliases = inserted_aliases
-                    .iter()
-                    .map(|t| t.pk)
-                    .filter(|alias_pk| !added_alias_pks.contains(alias_pk))
-                    .to_owned()
-                    .collect::<Vec<_>>();
-                match removed_alias_pks {
-                    Some(ref mut removed_alias_pks) => {
-                        removed_alias_pks.append(&mut inherited_aliases)
-                    }
-                    None => removed_alias_pks = Some(inherited_aliases),
-                }
-            }
-        }
-    }
-
-    if let Some(ref removed_alias_pks) = removed_alias_pks
-        && !removed_alias_pks.is_empty()
-    {
-        // a tag cannot be the alias of another tag without also being an alias of all of that tag's other aliases
-        // thus, removing an alias means that tag loses all its aliases
-        diesel::delete(tag_alias::table)
-            .filter(
-                tag_alias::fk_target
-                    .eq_any(removed_alias_pks)
-                    .or(tag_alias::fk_source.eq_any(removed_alias_pks)),
-            )
-            .execute(connection)
-            .await?;
-        aliases_changed = true;
-    }
-
-    if added_alias_pks
-        .as_ref()
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
         let curr_aliases = get_tag_aliases_pks(tag.pk, connection).await?;
         if curr_aliases.len() > 25 {
             return Err(TransactionRuntimeError::Rollback(Error::BadRequestError(
@@ -604,6 +714,7 @@ pub async fn update_tag(
                         .get_result::<TagCategory>(connection)
                         .await
                         .optional()?;
+
                     if let Some(found_tag_category) = found_tag_category {
                         Some(found_tag_category)
                     } else {
@@ -628,6 +739,7 @@ pub async fn update_tag(
         )?;
         update.compiled_auto_match_condition_post =
             Some(compiled_auto_match_condition_post.unwrap_or_else(|| String::from("")));
+
         let compiled_auto_match_condition_collection = compile_auto_match_condition(
             tag.tag_name.clone(),
             update.auto_match_condition_collection.clone(),
