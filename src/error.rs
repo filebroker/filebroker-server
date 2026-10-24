@@ -3,10 +3,10 @@ use std::fmt;
 use serde::Serialize;
 use thiserror::Error;
 use warp::{
-    http::{header, response, Response},
+    Rejection, Reply,
+    http::{Response, header, response},
     hyper::StatusCode,
     reject::Reject,
-    Rejection, Reply,
 };
 
 use crate::query::compiler;
@@ -73,6 +73,8 @@ pub enum Error {
     InaccessibleS3ObjectError(String),
     #[error("Cannot access objects with provided pks {0:?}")]
     InaccessibleObjectsError(Vec<i64>),
+    #[error("User must be admin to perform this action")]
+    UserNotAdmin,
 
     // 404
     #[error("The requested entity was not found")]
@@ -113,6 +115,8 @@ pub enum Error {
     ReqwestError(String),
     #[error("Error occurred in child process: {0}")]
     ChildProcessError(String),
+    #[error("Failed to parse m3u8 playlist: {0}")]
+    M3U8ParseError(String),
 
     #[error("Received error response code from S3: {0}")]
     S3ResponseError(u16),
@@ -126,7 +130,8 @@ impl Error {
             Error::NotFoundError => StatusCode::NOT_FOUND,
             Error::InaccessibleObjectError(_)
             | Error::InaccessibleS3ObjectError(_)
-            | Error::InaccessibleObjectsError(_) => StatusCode::FORBIDDEN,
+            | Error::InaccessibleObjectsError(_)
+            | Error::UserNotAdmin => StatusCode::FORBIDDEN,
             Error::InvalidCredentialsError
             | Error::MissingAuthHeaderError
             | Error::InvalidJwtError
@@ -165,7 +170,8 @@ impl Error {
             | Error::IoError(_)
             | Error::InvalidUrlError(_)
             | Error::ReqwestError(_)
-            | Error::ChildProcessError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | Error::ChildProcessError(_)
+            | Error::M3U8ParseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::IllegalRangeError(..) => StatusCode::RANGE_NOT_SATISFIABLE,
             Error::S3ResponseError(code) | Error::S3ResponseErrorMsg(code, _) => {
                 StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -204,6 +210,7 @@ impl Error {
             Self::InaccessibleObjectError(_) => 403_001,
             Self::InaccessibleS3ObjectError(_) => 403_002,
             Self::InaccessibleObjectsError(_) => 403_003,
+            Self::UserNotAdmin => 403_004,
 
             Self::NotFoundError => 404_001,
 
@@ -224,9 +231,10 @@ impl Error {
             Self::InvalidUrlError(_) => 500_013,
             Self::ReqwestError(_) => 500_014,
             Self::ChildProcessError(_) => 500_015,
+            Self::M3U8ParseError(_) => 500_016,
 
-            Self::S3ResponseError(_) => 600_001,
-            Self::S3ResponseErrorMsg(..) => 600_002,
+            Self::S3ResponseError(_) => 500_998,
+            Self::S3ResponseErrorMsg(..) => 500_999,
         }
     }
 
@@ -328,8 +336,10 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Rejection> {
         let message = e.to_string();
         let error_code = e.error_code();
 
-        if let StatusCode::INTERNAL_SERVER_ERROR = status_code {
-            log::error!("Encountered internal server error: {}", e);
+        if status_code.is_server_error() {
+            log::error!("Encountered internal server error ({error_code}): {e}");
+        } else if status_code.is_client_error() {
+            log::warn!("Encountered client error ({error_code}): {e}");
         }
 
         let compilation_errors = if let Error::QueryCompilationError(_, errors) = e {

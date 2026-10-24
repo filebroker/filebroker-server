@@ -4,26 +4,27 @@ use chrono::Utc;
 use clokwerk::Scheduler;
 use diesel::{ConnectionError, ConnectionResult};
 use diesel_async::{
+    AsyncPgConnection,
     pg::TransactionBuilder,
     pooled_connection::{
-        deadpool::{Object, Pool},
         AsyncDieselConnectionManager, ManagerConfig,
+        deadpool::{Object, Pool},
     },
     scoped_futures::ScopedBoxFuture,
-    AsyncPgConnection,
 };
 #[cfg(feature = "auto_migration")]
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
+use crate::util::OptFmt;
 use dotenvy::dotenv;
 use error::{Error, TransactionRuntimeError};
-use futures::{future::BoxFuture, Future, FutureExt, StreamExt, TryFuture};
+use futures::{Future, FutureExt, StreamExt, TryFuture, future::BoxFuture};
 use lazy_static::lazy_static;
 use mime::Mime;
 use query::{PaginationQueryParams, QueryParametersFilter};
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer},
     ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer},
 };
 use std::{
     convert::Infallible,
@@ -32,33 +33,30 @@ use std::{
     io,
     pin::Pin,
     str::FromStr,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
     thread::JoinHandle,
     time::Duration,
 };
-use tags::GetTagsFilter;
+use tag::GetTagsFilter;
 use tls_listener::{AsyncTls, TlsListener};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     runtime::Runtime,
 };
-use tokio_rustls::{server::TlsStream, TlsAcceptor};
+use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use url::Url;
 use warp::{
+    Filter, Reply,
     host::Authority,
     hyper::{
-        self,
+        self, Body, Request, Server,
         server::{
             accept::{self, Accept},
             conn::AddrIncoming,
         },
         service::Service,
-        Body, Request, Server,
     },
-    Filter, Reply,
 };
-
-use crate::util::OptFmt;
 
 mod auth;
 mod data;
@@ -69,7 +67,7 @@ mod perms;
 mod post;
 mod query;
 mod schema;
-mod tags;
+mod tag;
 mod task;
 mod util;
 
@@ -249,7 +247,9 @@ where
         match transaction_result {
             Err(TransactionRuntimeError::Retry(_)) if retry_count <= 10 => {
                 /* retry max 10 attempts */
-                log::debug!("Retrying transaction after serialization failure");
+                log::warn!(
+                    "Retrying transaction after serialization failure, constraint violation or other Retry Error"
+                );
             }
             Err(TransactionRuntimeError::Retry(e)) => break Err(e),
             Err(TransactionRuntimeError::Rollback(e)) => break Err(e),
@@ -281,9 +281,98 @@ pub fn retry_on_serialization_failure(e: diesel::result::Error) -> TransactionRu
     }
 }
 
+#[cfg(feature = "auto_migration")]
+async fn run_startup_migration_tasks() -> Result<(), Error> {
+    recompile_tag_auto_match_conditions().await?;
+    Ok(())
+}
+
+#[cfg(feature = "auto_migration")]
+async fn recompile_tag_auto_match_conditions() -> Result<(), Error> {
+    use crate::model::{Tag, TagCategory};
+    use crate::tag::auto_matching::{AutoMatchTarget, compile_tag_auto_match_condition};
+    use diesel::{BoolExpressionMethods, ExpressionMethods, QueryDsl};
+    use diesel_async::{RunQueryDsl, scoped_futures::ScopedFutureExt};
+
+    let mut connection = acquire_db_connection().await?;
+    run_serializable_transaction(&mut connection, |connection| {
+        async {
+            diesel::update(schema::tag::table)
+                .filter(
+                    schema::tag::compiled_auto_match_condition_post
+                        .is_not_null()
+                        .or(schema::tag::compiled_auto_match_condition_collection.is_not_null()),
+                )
+                .set((
+                    schema::tag::compiled_auto_match_condition_post.eq(None::<String>),
+                    schema::tag::compiled_auto_match_condition_collection.eq(None::<String>),
+                ))
+                .execute(connection)
+                .await?;
+
+            let tags_with_conditions = schema::tag::table
+                .left_join(schema::tag_category::table)
+                .filter(
+                    schema::tag::auto_match_condition_post
+                        .is_not_null()
+                        .or(schema::tag::auto_match_condition_collection.is_not_null())
+                        .or(schema::tag_category::auto_match_condition_post.is_not_null())
+                        .or(schema::tag_category::auto_match_condition_collection.is_not_null()),
+                )
+                .load::<(Tag, Option<TagCategory>)>(connection)
+                .await?;
+
+            for (tag, tag_category) in tags_with_conditions {
+                let tag_pk = tag.pk;
+                let compiled_tag_auto_match_condition_post = compile_tag_auto_match_condition(
+                    tag.clone(),
+                    tag_category.clone(),
+                    AutoMatchTarget::Post,
+                )?;
+                let compiled_tag_auto_match_condition_collection =
+                    compile_tag_auto_match_condition(
+                        tag,
+                        tag_category,
+                        AutoMatchTarget::Collection,
+                    )?;
+
+                if compiled_tag_auto_match_condition_post.is_some()
+                    || compiled_tag_auto_match_condition_collection.is_some()
+                {
+                    diesel::update(schema::tag::table)
+                        .filter(schema::tag::pk.eq(tag_pk))
+                        .set((
+                            schema::tag::compiled_auto_match_condition_post
+                                .eq(compiled_tag_auto_match_condition_post),
+                            schema::tag::compiled_auto_match_condition_collection
+                                .eq(compiled_tag_auto_match_condition_collection),
+                        ))
+                        .execute(connection)
+                        .await?;
+                }
+            }
+
+            Ok(())
+        }
+        .scope_boxed()
+    })
+    .await
+}
+
 /// Start a tokio runtime that runs a warp server.
 #[tokio::main(flavor = "current_thread")]
 async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
+    #[cfg(feature = "auto_migration")]
+    {
+        log::info!("Running startup migration tasks");
+        if let Err(e) = crate::run_startup_migration_tasks().await {
+            log::error!("Error running startup migration tasks: {e}");
+            shutdown_server().await;
+            return;
+        }
+        log::info!("Done running startup migration tasks");
+    }
+
     let login_route = warp::path("login")
         .and(warp::post())
         .and(warp::body::json())
@@ -337,13 +426,13 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .and(warp::post())
         .and(warp::body::json())
         .and(auth::with_user())
-        .and_then(tags::create_tags_handler);
+        .and_then(tag::create::create_tags_handler);
 
     let upsert_tag_route = warp::path("upsert-tag")
         .and(warp::post())
         .and(warp::body::json())
         .and(auth::with_user())
-        .and_then(tags::upsert_tag_handler);
+        .and_then(tag::update::upsert_tag_handler);
 
     let search_route = warp::path("search")
         .and(warp::get())
@@ -420,7 +509,7 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
     let find_tag_route = warp::path("find-tag")
         .and(warp::get())
         .and(warp::path::param())
-        .and_then(tags::find_tag_handler);
+        .and_then(tag::find_tag_handler);
 
     let create_user_group_route = warp::path("create-user-group")
         .and(warp::post())
@@ -526,24 +615,24 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
     let get_tag_route = warp::path("get-tag")
         .and(warp::get())
         .and(warp::path::param::<i64>())
-        .and_then(tags::get_tag_handler);
+        .and_then(tag::get_tag_handler);
 
     let get_tags_route = warp::path("get-tags")
         .and(warp::get())
         .and(warp::query::<GetTagsFilter>())
-        .and_then(tags::get_tags_handler);
+        .and_then(tag::get_tags_handler);
 
     let update_tag_route = warp::path("update-tag")
         .and(warp::post())
         .and(warp::path::param::<i64>())
         .and(warp::body::json())
         .and(auth::with_user())
-        .and_then(tags::update_tag_handler);
+        .and_then(tag::update::update_tag_handler);
 
     let get_tag_hierarchy_route = warp::path("get-tag-hierarchy")
         .and(warp::get())
         .and(warp::path::param::<i64>())
-        .and_then(tags::get_tag_hierarchy_handler);
+        .and_then(tag::get_tag_hierarchy_handler);
 
     let get_post_edit_history_route = warp::path("get-post-edit-history")
         .and(warp::get())
@@ -571,6 +660,39 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
             .and(warp::path::param())
             .and(auth::with_user())
             .and_then(post::history::rewind_post_collection_history_snapshot_handler);
+
+    let get_tag_categories_route = warp::path("get-tag-categories")
+        .and(warp::get())
+        .and_then(tag::get_tag_categories_handler);
+
+    let create_tag_category_route = warp::path("create-tag-category")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(tag::create::create_tag_category_handler);
+
+    let update_tag_category_route = warp::path("update-tag-category")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(tag::update::update_tag_category_handler);
+
+    let get_tag_edit_history_route = warp::path("get-tag-edit-history")
+        .and(warp::get())
+        .and(warp::query::<PaginationQueryParams>())
+        .and(warp::path::param())
+        .and_then(tag::history::get_tag_edit_history_handler);
+
+    let rewind_tag_history_snapshot_handler = warp::path("rewind-tag-history-snapshot")
+        .and(warp::post())
+        .and(warp::path::param())
+        .and(auth::with_user())
+        .and_then(tag::history::rewind_tag_history_snapshot_handler);
+
+    let get_presigned_hls_playlist_route = warp::path("get-presigned-hls-playlist")
+        .and(warp::get())
+        .and(warp::filters::path::peek())
+        .and_then(data::get_presigned_hls_playlist_handler);
 
     let routes = login_route
         .or(refresh_login_route)
@@ -625,7 +747,14 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         .or(get_post_edit_history_route)
         .or(get_post_collection_edit_history_route)
         .or(rewind_post_history_snapshot_route)
-        .or(rewind_post_collection_history_snapshot_route);
+        .or(rewind_post_collection_history_snapshot_route)
+        .or(get_tag_categories_route)
+        .boxed()
+        .or(create_tag_category_route)
+        .or(update_tag_category_route)
+        .or(get_tag_edit_history_route)
+        .or(rewind_tag_history_snapshot_handler)
+        .or(get_presigned_hls_playlist_route);
 
     let filter = routes
         .recover(error::handle_rejection)
@@ -770,15 +899,19 @@ where
         tokio::signal::ctrl_c()
             .await
             .expect("Failed to listen for ctrl-c signal");
-        log::info!("Shutting down server");
-        log::info!("Waiting for scheduled tasks to finish");
-        tokio::runtime::Handle::current()
-            .spawn_blocking(task::shutdown_join)
-            .await
-            .expect("Failed to join scheduled tasks");
-        log::info!("Shutting down http server worker runtime");
+        shutdown_server().await;
     });
     server.await
+}
+
+async fn shutdown_server() {
+    log::info!("Shutting down server");
+    log::info!("Waiting for scheduled tasks to finish");
+    tokio::runtime::Handle::current()
+        .spawn_blocking(task::shutdown_join)
+        .await
+        .expect("Failed to join scheduled tasks");
+    log::info!("Shutting down http server worker runtime");
 }
 
 fn load_certs(cert_path: &str) -> io::Result<Vec<CertificateDer<'static>>> {
@@ -797,10 +930,9 @@ fn load_private_key(key_path: &str) -> io::Result<PrivateKeyDer<'static>> {
         rustls_pemfile::rsa_private_keys(&mut reader).collect::<Vec<_>>();
 
     if keys.len() != 1 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            String::from("Expected a single private key"),
-        ));
+        return Err(io::Error::other(String::from(
+            "Expected a single private key",
+        )));
     }
 
     keys.pop().unwrap().map(|key| key.into())
@@ -904,6 +1036,9 @@ fn configure_scheduler() -> Scheduler<Utc> {
             task::execute_deferred_s3_object_deletions,
         );
     });
+    scheduler.every(clokwerk::Interval::Minutes(10)).run(|| {
+        task::submit_task("run_apply_auto_tags_tasks", task::run_apply_auto_tags_tasks);
+    });
 
     scheduler
 }
@@ -921,7 +1056,7 @@ fn start_task_scheduler_runtime(scheduler: Scheduler<Utc>) -> JoinHandle<()> {
             {
                 Ok(runtime) => runtime,
                 Err(e) => {
-                    eprintln!("Failed to start task scheduler runtime: {}", e);
+                    eprintln!("Failed to start task scheduler runtime: {e}");
                     std::process::exit(1);
                 }
             };

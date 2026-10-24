@@ -1,6 +1,6 @@
 use std::cmp;
 
-use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use rand::{Rng, distr::Alphanumeric};
 use s3::Bucket;
 use warp::hyper;
 
@@ -55,7 +55,7 @@ pub fn get_object_response(
         } else {
             // handle multipart byteranges
             check_range_overlap(&parsed_range, size)?;
-            let mut rng = thread_rng();
+            let mut rng = rand::rng();
             let boundary: String = (&mut rng)
                 .sample_iter(Alphanumeric)
                 .take(60)
@@ -132,7 +132,7 @@ fn parse_range(range: &str, size: u64) -> Result<Vec<(u64, u64)>, Error> {
     if byte_ranges.len() != 1 {
         return Err(Error::IllegalRangeError(
             size,
-            format!("Invalid range header '{}'", range),
+            format!("Invalid range header '{range}'"),
         ));
     }
 
@@ -150,7 +150,7 @@ fn parse_range(range: &str, size: u64) -> Result<Vec<(u64, u64)>, Error> {
             if !(parts.len() == 1 || parts.len() == 2) {
                 return Err(Error::IllegalRangeError(
                     size,
-                    format!("Invalid range '{}'", byte_range),
+                    format!("Invalid range '{byte_range}'"),
                 ));
             }
 
@@ -170,12 +170,12 @@ fn parse_range(range: &str, size: u64) -> Result<Vec<(u64, u64)>, Error> {
             if start >= size || end >= size {
                 return Err(Error::IllegalRangeError(
                     size,
-                    format!("Range {} - {} invalid for size {}", start, end, size),
+                    format!("Range {start} - {end} invalid for size {size}"),
                 ));
             } else if start > end {
                 return Err(Error::IllegalRangeError(
                     size,
-                    format!("Range {} - {} invalid", start, end),
+                    format!("Range {start} - {end} invalid"),
                 ));
             }
 
@@ -197,7 +197,7 @@ fn check_range_overlap(ranges: &[(u64, u64)], size: u64) -> Result<(), Error> {
             if range_i.0 <= range_j.1 && range_i.1 >= range_j.0 {
                 return Err(Error::IllegalRangeError(
                     size,
-                    format!("Overlapping ranges {:?} and {:?}", range_i, range_j),
+                    format!("Overlapping ranges {range_i:?} and {range_j:?}"),
                 ));
             }
         }

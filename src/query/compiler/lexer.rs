@@ -4,9 +4,9 @@ use std::fmt;
 use std::mem;
 
 use super::Error;
+use super::INTEGER_LIMIT;
 use super::Location;
 use super::Log;
-use super::INTEGER_LIMIT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tag {
@@ -112,10 +112,10 @@ impl fmt::Display for ParsedToken {
             f,
             "{}",
             match self {
-                ParsedToken::IdentifierToken(ref val) => format!("IDENTIFIER '{}'", val),
-                ParsedToken::IntegerToken(val) => format!("INTEGER {}", val),
-                ParsedToken::StaticToken(ref val) => format!("TOKEN {:?}", val),
-                ParsedToken::StringToken(ref val) => format!("STRING '{}'", val),
+                ParsedToken::IdentifierToken(val) => format!("IDENTIFIER '{val}'"),
+                ParsedToken::IntegerToken(val) => format!("INTEGER {val}"),
+                ParsedToken::StaticToken(val) => format!("TOKEN {val:?}"),
+                ParsedToken::StringToken(val) => format!("STRING '{val}'"),
             }
         )
     }
@@ -151,13 +151,19 @@ impl Lexer<'_> {
             let is_escaped = self.is_escaped;
             if is_escaped {
                 self.is_escaped = false;
-                if !(c == '`' || c == '\\' || c == '=' || c == ' ' || Tag::try_from(c).is_ok()) {
+                if !(c == '`'
+                    || c == '"'
+                    || c == '\\'
+                    || c == '='
+                    || c == ' '
+                    || Tag::try_from(c).is_ok())
+                {
                     self.log.errors.push(Error {
                         location: Location {
                             start: pos,
                             end: pos,
                         },
-                        msg: format!("Illegal escape character '{}'", c),
+                        msg: format!("Illegal escape character '{c}'"),
                     });
                 }
             } else if c == '\\' {
@@ -199,7 +205,7 @@ impl Lexer<'_> {
                             start: pos,
                             end: pos,
                         },
-                        msg: format!("Illegal char '{}'", c),
+                        msg: format!("Illegal char '{c}'"),
                     });
                 }
             }
@@ -271,7 +277,8 @@ impl State {
                     return State {
                         conception_idx: pos,
                         state_type: StateType::IdentifierState(String::new()),
-                    };
+                    }
+                    .handle_char(c, pos, token_stream, log, true);
                 } else if char::is_ascii_digit(&c) {
                     return State {
                         conception_idx: pos,
@@ -300,7 +307,7 @@ impl State {
                             start: self.conception_idx,
                             end: pos,
                         },
-                        msg: format!("Unexpected char '{}'", c),
+                        msg: format!("Unexpected char '{c}'"),
                     });
                 }
 
@@ -445,8 +452,7 @@ impl State {
                         Ordering::Greater => log.errors.push(Error {
                             location,
                             msg: format!(
-                                "Integer literal {} exceeds maximum size of {}",
-                                parsed_val, INTEGER_LIMIT
+                                "Integer literal {parsed_val} exceeds maximum size of {INTEGER_LIMIT}"
                             ),
                         }),
                         Ordering::Equal => {
@@ -469,7 +475,7 @@ impl State {
                 } else {
                     log.errors.push(Error {
                         location,
-                        msg: format!("Invalid integer literal '{}'", val),
+                        msg: format!("Invalid integer literal '{val}'"),
                     });
                 }
             }
@@ -544,8 +550,8 @@ impl StateType {
 mod tests {
 
     use crate::query::compiler::{
-        lexer::{Lexer, ParsedToken, ParsedToken::*, Tag, Token},
         Location, Log,
+        lexer::{Lexer, ParsedToken, ParsedToken::*, Tag, Token},
     };
 
     #[test]
@@ -801,7 +807,12 @@ mod tests {
     fn test_modifiers_functions_and_attributes() {
         let mut log = Log { errors: Vec::new() };
 
-        let lexer = Lexer::new_for_string(String::from("tag @creation_timestamp>=\"2022-06-03\" @score > .max(@score) - 10 %sort(@score, \"DESC\")"), &mut log);
+        let lexer = Lexer::new_for_string(
+            String::from(
+                "tag @creation_timestamp>=\"2022-06-03\" @score > .max(@score) - 10 %sort(@score, \"DESC\")",
+            ),
+            &mut log,
+        );
         let mut token_stream = lexer.read_token_stream().into_iter();
         assert!(log.errors.is_empty());
 

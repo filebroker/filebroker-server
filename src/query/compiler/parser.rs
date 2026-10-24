@@ -1,6 +1,7 @@
 use std::{iter::Peekable, mem, vec::IntoIter};
 
 use super::{
+    Error, Location, Log,
     ast::{
         AttributeNode, BinaryExpressionNode, BooleanLiteralNode, ExpressionNode,
         ExpressionStatement, FunctionCallNode, IntegerLiteralNode, ModifierNode, Node,
@@ -8,7 +9,6 @@ use super::{
         UnaryExpressionNode, VariableNode,
     },
     lexer::{ParsedToken, Tag, Token},
-    Error, Location, Log,
 };
 
 pub static ERROR_IDENTIFIER: &str = "$ERROR$";
@@ -539,6 +539,7 @@ impl ParserError {
 mod tests {
 
     use crate::query::compiler::{
+        Location, Log,
         ast::{
             AttributeNode, BinaryExpressionNode, BooleanLiteralNode, ExpressionNode,
             ExpressionStatement, IntegerLiteralNode, ModifierNode, Node, Operator, PostTagNode,
@@ -546,7 +547,6 @@ mod tests {
         },
         lexer::Lexer,
         parser::Parser,
-        Location, Log,
     };
 
     #[test]

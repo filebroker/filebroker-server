@@ -2,10 +2,10 @@ use std::{task::Poll, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{ready, stream::IntoAsyncRead, StreamExt, TryStream};
+use futures::{StreamExt, TryStream, ready, stream::IntoAsyncRead};
 use pin_project::pin_project;
 use ring::digest;
-use s3::{command::Command, error::S3Error, request::Reqwest, request_trait::Request, Bucket};
+use s3::{Bucket, command::Command, error::S3Error, request::Reqwest, request_trait::Request};
 use tokio::time::timeout;
 use warp::hyper;
 
@@ -124,7 +124,6 @@ impl ObjectWriter for ObjectRangeWriter {
             &mut sender,
         )
         .await
-        .map_err(Error::from)
         {
             Ok(status_code) if status_code < 300 => {}
             Ok(status_code) => {
@@ -179,8 +178,7 @@ impl MultipartByteRange {
             start,
             end,
             fields: format!(
-                "\r\n--{}\r\nContent-Type: {}\r\nContent-Range: bytes {}-{}/{}\r\n\r\n",
-                boundary, content_type, start, end, size
+                "\r\n--{boundary}\r\nContent-Type: {content_type}\r\nContent-Range: bytes {start}-{end}/{size}\r\n\r\n"
             ),
         }
     }
@@ -198,7 +196,7 @@ impl ObjectWriter for MultipartObjectWriter {
                 .send_data(Bytes::copy_from_slice(part.fields.as_bytes()))
                 .await
             {
-                log::debug!("Error writing part fields: {}", e);
+                log::debug!("Error writing part fields: {e}");
                 sender.abort();
                 return;
             }
@@ -252,7 +250,7 @@ impl ObjectWriter for MultipartObjectWriter {
             .send_data(Bytes::copy_from_slice(self.end_delimiter.as_bytes()))
             .await
         {
-            log::debug!("Error writing end delimiter: {}", e);
+            log::debug!("Error writing end delimiter: {e}");
             sender.abort();
             return;
         }
@@ -304,7 +302,9 @@ pub async fn get_object_stream(
         Err(S3CommandError::S3Error(e)) => Err(e.into()),
         Err(S3CommandError::SendError(e)) => Err(e.into()),
         Err(S3CommandError::SendTimeout { bytes_sent }) => {
-            log::debug!("Received timeout trying to send S3 response to reader for object {path}, going to retry with range {bytes_sent}- after reader becomes available");
+            log::debug!(
+                "Received timeout trying to send S3 response to reader for object {path}, going to retry with range {bytes_sent}- after reader becomes available"
+            );
             futures::future::poll_fn(|ctx| sender.poll_ready(ctx)).await?;
             get_object_range_stream(bucket, path, bytes_sent as u64, None, sender).await
         }
@@ -337,7 +337,7 @@ pub async fn get_command_stream(
             Err(_) => {
                 return Err(S3CommandError::SendTimeout {
                     bytes_sent: total_bytes,
-                })
+                });
             }
             Ok(Ok(_)) => {}
         }

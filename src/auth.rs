@@ -1,29 +1,30 @@
 use std::net::SocketAddr;
 
-use bcrypt::{hash, verify, DEFAULT_COST};
-use chrono::{offset::Utc, DateTime, Duration};
+use bcrypt::{DEFAULT_COST, hash, verify};
+use chrono::{DateTime, Duration, offset::Utc};
 use diesel::{dsl::count, expression_methods::BoolExpressionMethods};
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use exec_rs::sync::MutexSync;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use lazy_static::lazy_static;
 use passwords::PasswordGenerator;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use validator::Validate;
 use warp::{
+    Filter, Rejection, Reply,
     filters::header::headers_cloned,
     host::Authority,
     http::{
-        header::{self, HeaderMap},
         Response, StatusCode,
+        header::{self, HeaderMap},
     },
-    hyper, Filter, Rejection, Reply,
+    hyper,
 };
 use zxcvbn::zxcvbn;
 
 use crate::{
-    acquire_db_connection,
+    CERT_PATH, HOST_BASE_PATH, acquire_db_connection,
     diesel::{ExpressionMethods, OptionalExtension, QueryDsl},
     error::{Error, TransactionRuntimeError},
     mail,
@@ -31,7 +32,6 @@ use crate::{
     query::functions::lower,
     retry_on_constraint_violation, run_retryable_transaction,
     schema::{email_confirmation_token, one_time_password, refresh_token, registered_user},
-    CERT_PATH, HOST_BASE_PATH,
 };
 
 mod captcha;
@@ -256,12 +256,9 @@ async fn create_refresh_token_cookie(
 fn format_refresh_token_cookie(uuid: &str, expiry: &str) -> String {
     if cfg!(debug_assertions) {
         // unlike firefox, chrome (and postman and other chromium / electron based apps) does not allow setting Secure cookies on localhost
-        format!("refresh_token={}; Expires={}; HttpOnly", uuid, expiry)
+        format!("refresh_token={uuid}; Expires={expiry}; HttpOnly")
     } else {
-        format!(
-            "refresh_token={}; Expires={}; HttpOnly; Secure; SameSite=None",
-            uuid, expiry
-        )
+        format!("refresh_token={uuid}; Expires={expiry}; HttpOnly; Secure; SameSite=None")
     }
 }
 
@@ -474,8 +471,7 @@ pub async fn register_handler(
     }
     user_registration.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for UserRegistration: {}",
-            e
+            "Validation failed for UserRegistration: {e}"
         )))
     })?;
 
@@ -486,9 +482,8 @@ pub async fn register_handler(
     if let Some(ref display_name) = user_registration.display_name {
         zxcvbn_user_data.push(display_name.as_str());
     }
-    let entropy = zxcvbn(&user_registration.password, &zxcvbn_user_data)
-        .map_err(|e| Error::InternalError(e.to_string()))?;
-    if entropy.score() < 3 {
+    let entropy = zxcvbn(&user_registration.password, &zxcvbn_user_data);
+    if <u8>::from(entropy.score()) < 3 {
         return Err(warp::reject::custom(Error::WeakPasswordError));
     }
 
@@ -542,7 +537,7 @@ pub async fn register_handler(
                 Err(e) => {
                     return Err(TransactionRuntimeError::Rollback(Error::QueryError(
                         e.to_string(),
-                    )))
+                    )));
                 }
             };
 
@@ -608,23 +603,33 @@ pub async fn register_handler(
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserInfo {
+    pub pk: i64,
     pub user_name: String,
     pub email: Option<String>,
     pub avatar_url: Option<String>,
     pub creation_timestamp: DateTime<Utc>,
     pub email_confirmed: bool,
     pub display_name: Option<String>,
+    pub jwt_version: i32,
+    pub password_fail_count: i32,
+    pub is_admin: bool,
+    pub is_banned: bool,
 }
 
 impl From<User> for UserInfo {
     fn from(user: User) -> Self {
         Self {
+            pk: user.pk,
             user_name: user.user_name,
             email: user.email,
             avatar_url: user.avatar_url,
             creation_timestamp: user.creation_timestamp,
             email_confirmed: user.email_confirmed,
             display_name: user.display_name,
+            jwt_version: user.jwt_version,
+            password_fail_count: user.password_fail_count,
+            is_admin: user.is_admin,
+            is_banned: user.is_banned,
         }
     }
 }
@@ -792,8 +797,7 @@ pub async fn edit_user_handler(
     }
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for UpdateUserRequest: {}",
-            e
+            "Validation failed for UpdateUserRequest: {e}"
         )))
     })?;
     if cleared_mail {
@@ -921,7 +925,7 @@ pub async fn change_password_handler(
             }
         }
         None if captcha::CAPTCHA_SECRET.is_some() && user.password_fail_count >= 10 => {
-            return Err(warp::reject::custom(Error::InvalidCaptchaError))
+            return Err(warp::reject::custom(Error::InvalidCaptchaError));
         }
         None => {}
     };
@@ -953,9 +957,8 @@ pub async fn change_password_handler(
     if let Some(ref display_name) = user.display_name {
         zxcvbn_user_data.push(display_name.as_str());
     }
-    let entropy = zxcvbn(&request.new_password, &zxcvbn_user_data)
-        .map_err(|e| Error::InternalError(e.to_string()))?;
-    if entropy.score() < 3 {
+    let entropy = zxcvbn(&request.new_password, &zxcvbn_user_data);
+    if <u8>::from(entropy.score()) < 3 {
         return Err(warp::reject::custom(Error::WeakPasswordError));
     }
 
@@ -1000,8 +1003,7 @@ pub async fn send_password_reset_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for ChangePasswordRequest: {}",
-            e
+            "Validation failed for ChangePasswordRequest: {e}"
         )))
     })?;
 
@@ -1090,8 +1092,7 @@ pub async fn reset_password_handler(
 ) -> Result<impl Reply, Rejection> {
     request.validate().map_err(|e| {
         warp::reject::custom(Error::InvalidRequestInputError(format!(
-            "Validation failed for PasswordResetRequest: {}",
-            e
+            "Validation failed for PasswordResetRequest: {e}"
         )))
     })?;
 
@@ -1140,9 +1141,8 @@ pub async fn reset_password_handler(
             if let Some(ref display_name) = user.display_name {
                 zxcvbn_user_data.push(display_name.as_str());
             }
-            let entropy = zxcvbn(&request.new_password, &zxcvbn_user_data)
-                .map_err(|e| TransactionRuntimeError::from(Error::InternalError(e.to_string())))?;
-            if entropy.score() < 3 {
+            let entropy = zxcvbn(&request.new_password, &zxcvbn_user_data);
+            if <u8>::from(entropy.score()) < 3 {
                 return Err(TransactionRuntimeError::from(Error::WeakPasswordError));
             }
 

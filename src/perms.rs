@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
+use diesel::sql_types::Bool;
 use diesel::{
+    IntoSql, JoinOnDsl, NullableExpressionMethods, QueryDsl,
     dsl::{exists, not},
-    JoinOnDsl, NullableExpressionMethods, QueryDsl,
 };
-use diesel_async::{scoped_futures::ScopedFutureExt, AsyncPgConnection, RunQueryDsl};
+use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use serde::Deserialize;
 use warp::{Rejection, Reply};
 
@@ -30,6 +31,9 @@ pub fn append_secure_query_condition(
     user: &Option<User>,
     query_parameters: &QueryParameters,
 ) {
+    if query_parameters.privileged || (user.is_some() && user.as_ref().unwrap().is_admin) {
+        return;
+    }
     let user_key = user
         .as_ref()
         .map(|u| u.pk.to_string())
@@ -159,6 +163,7 @@ pub struct PostJoined {
     pub create_user: UserPublic,
     pub s3_object: S3Object,
     pub s3_object_metadata: S3ObjectMetadata,
+    pub broker: Broker,
     pub edit_user: UserPublic,
 }
 
@@ -192,24 +197,35 @@ pub async fn load_post_secured(
         .inner_join(
             s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
         )
+        .inner_join(broker::table.on(broker::pk.eq(s3_object::fk_broker)))
         .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::pk.eq(post_pk).and(
-                post::fk_create_user
-                    .nullable()
-                    .eq(&user_pk)
-                    .or(post::public)
-                    .or(exists(post_group_access::table.filter(
-                        get_group_access_condition!(
-                            post_group_access::fk_post,
-                            post::pk,
-                            &user_pk,
-                            post_group_access
-                        ),
-                    ))),
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post::fk_create_user
+                        .nullable()
+                        .eq(&user_pk)
+                        .or(post::public)
+                        .or(exists(post_group_access::table.filter(
+                            get_group_access_condition!(
+                                post_group_access::fk_post,
+                                post::pk,
+                                &user_pk,
+                                post_group_access
+                            ),
+                        )))),
             ),
         )
-        .get_result::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
+        .get_result::<(
+            Post,
+            UserPublic,
+            S3Object,
+            S3ObjectMetadata,
+            Broker,
+            UserPublic,
+        )>(connection)
         .await
         .optional()?
         .ok_or(Error::InaccessibleObjectError(post_pk))
@@ -218,7 +234,8 @@ pub async fn load_post_secured(
             create_user: tuple.1,
             s3_object: tuple.2,
             s3_object_metadata: tuple.3,
-            edit_user: tuple.4,
+            broker: tuple.4,
+            edit_user: tuple.5,
         })
 }
 
@@ -285,37 +302,44 @@ pub async fn load_post_collection_item_secured(
                 .field(s3_object::object_key)
                 .eq(s3_object_metadata::object_key)),
         )
+        .inner_join(broker::table.on(broker::pk.eq(post_s3_object.field(s3_object::fk_broker))))
         .filter(
             post_collection_item::pk
                 .eq(post_collection_item_pk)
                 .and(post_collection::pk.eq(post_collection_pk))
                 .and(
-                    post::fk_create_user
-                        .nullable()
-                        .eq(&user_pk)
-                        .or(post::public)
-                        .or(exists(post_group_access::table.filter(
-                            get_group_access_condition!(
-                                post_group_access::fk_post,
-                                post::pk,
-                                &user_pk,
-                                post_group_access
-                            ),
-                        ))),
+                    user.map(|u| u.is_admin)
+                        .unwrap_or(false)
+                        .into_sql::<Bool>()
+                        .or(post::fk_create_user
+                            .nullable()
+                            .eq(&user_pk)
+                            .or(post::public)
+                            .or(exists(post_group_access::table.filter(
+                                get_group_access_condition!(
+                                    post_group_access::fk_post,
+                                    post::pk,
+                                    &user_pk,
+                                    post_group_access
+                                ),
+                            )))),
                 )
                 .and(
-                    post_collection::fk_create_user
-                        .nullable()
-                        .eq(&user_pk)
-                        .or(post_collection::public)
-                        .or(exists(post_collection_group_access::table.filter(
-                            get_group_access_condition!(
-                                post_collection_group_access::fk_post_collection,
-                                post_collection::pk,
-                                &user_pk,
-                                post_collection_group_access
-                            ),
-                        ))),
+                    user.map(|u| u.is_admin)
+                        .unwrap_or(false)
+                        .into_sql::<Bool>()
+                        .or(post_collection::fk_create_user
+                            .nullable()
+                            .eq(&user_pk)
+                            .or(post_collection::public)
+                            .or(exists(post_collection_group_access::table.filter(
+                                get_group_access_condition!(
+                                    post_collection_group_access::fk_post_collection,
+                                    post_collection::pk,
+                                    &user_pk,
+                                    post_collection_group_access
+                                ),
+                            )))),
                 ),
         )
         .get_result::<(
@@ -330,6 +354,7 @@ pub async fn load_post_collection_item_secured(
             UserPublic,
             Option<S3Object>,
             S3ObjectMetadata,
+            Broker,
         )>(connection)
         .await
         .optional()?
@@ -342,6 +367,7 @@ pub async fn load_post_collection_item_secured(
                 create_user: tuple.3,
                 s3_object: tuple.5,
                 s3_object_metadata: tuple.10,
+                broker: tuple.11,
                 edit_user: tuple.4,
             },
             post_collection: PostCollectionJoined {
@@ -369,24 +395,35 @@ pub async fn load_posts_secured(
         .inner_join(
             s3_object_metadata::table.on(s3_object::object_key.eq(s3_object_metadata::object_key)),
         )
+        .inner_join(broker::table.on(broker::pk.eq(s3_object::fk_broker)))
         .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::pk.eq_any(post_pks).and(
-                post::fk_create_user
-                    .nullable()
-                    .eq(&user_pk)
-                    .or(post::public)
-                    .or(exists(post_group_access::table.filter(
-                        get_group_access_condition!(
-                            post_group_access::fk_post,
-                            post::pk,
-                            &user_pk,
-                            post_group_access
-                        ),
-                    ))),
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post::fk_create_user
+                        .nullable()
+                        .eq(&user_pk)
+                        .or(post::public)
+                        .or(exists(post_group_access::table.filter(
+                            get_group_access_condition!(
+                                post_group_access::fk_post,
+                                post::pk,
+                                &user_pk,
+                                post_group_access
+                            ),
+                        )))),
             ),
         )
-        .load::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
+        .load::<(
+            Post,
+            UserPublic,
+            S3Object,
+            S3ObjectMetadata,
+            Broker,
+            UserPublic,
+        )>(connection)
         .await?;
 
     let found_pks = results.iter().map(|res| res.0.pk).collect::<HashSet<_>>();
@@ -403,7 +440,8 @@ pub async fn load_posts_secured(
                 create_user: tuple.1,
                 s3_object: tuple.2,
                 s3_object_metadata: tuple.3,
-                edit_user: tuple.4,
+                broker: tuple.4,
+                edit_user: tuple.5,
             })
             .collect::<Vec<_>>())
     } else {
@@ -432,18 +470,21 @@ pub async fn load_post_collection_secured(
         )
         .filter(
             post_collection::pk.eq(post_collection_pk).and(
-                post_collection::fk_create_user
-                    .nullable()
-                    .eq(&user_pk)
-                    .or(post_collection::public)
-                    .or(exists(post_collection_group_access::table.filter(
-                        get_group_access_condition!(
-                            post_collection_group_access::fk_post_collection,
-                            post_collection::pk,
-                            &user_pk,
-                            post_collection_group_access
-                        ),
-                    ))),
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post_collection::fk_create_user
+                        .nullable()
+                        .eq(&user_pk)
+                        .or(post_collection::public)
+                        .or(exists(post_collection_group_access::table.filter(
+                            get_group_access_condition!(
+                                post_collection_group_access::fk_post_collection,
+                                post_collection::pk,
+                                &user_pk,
+                                post_collection_group_access
+                            ),
+                        )))),
             ),
         )
         .get_result::<(PostCollection, UserPublic, Option<S3Object>, UserPublic)>(connection)
@@ -468,9 +509,10 @@ pub struct PostJoinedS3Object {
 
 pub async fn load_s3_object_posts(
     s3_object_key: &str,
-    user_pk: i64,
+    user: Option<&User>,
     connection: &mut AsyncPgConnection,
 ) -> Result<Vec<PostJoinedS3Object>, Error> {
+    let user_pk = user.map(|u| u.pk);
     let (create_user, edit_user) = diesel::alias!(
         schema::registered_user as create_user,
         schema::registered_user as edit_user,
@@ -484,18 +526,21 @@ pub async fn load_s3_object_posts(
         .inner_join(edit_user.on(post::fk_edit_user.eq(edit_user.field(registered_user::pk))))
         .filter(
             post::s3_object.eq(s3_object_key).and(
-                post::fk_create_user
-                    .nullable()
-                    .eq(user_pk)
-                    .or(post::public)
-                    .or(exists(post_group_access::table.filter(
-                        get_group_access_condition!(
-                            post_group_access::fk_post,
-                            post::pk,
-                            user_pk,
-                            post_group_access
-                        ),
-                    ))),
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post::fk_create_user
+                        .nullable()
+                        .eq(user_pk)
+                        .or(post::public)
+                        .or(exists(post_group_access::table.filter(
+                            get_group_access_condition!(
+                                post_group_access::fk_post,
+                                post::pk,
+                                user_pk,
+                                post_group_access
+                            ),
+                        )))),
             ),
         )
         .load::<(Post, UserPublic, S3Object, S3ObjectMetadata, UserPublic)>(connection)
@@ -572,7 +617,11 @@ pub async fn get_user_groups_secured(
 ) -> Result<Vec<UserGroup>, Error> {
     let user_pk = user.map(|u| u.pk);
     user_group::table
-        .filter(not(user_group::hidden).or(get_group_membership_condition!(user_pk)))
+        .filter(
+            not(user_group::hidden)
+                .or(user.map(|u| u.is_admin).unwrap_or(false).into_sql::<Bool>())
+                .or(get_group_membership_condition!(user_pk)),
+        )
         .load::<UserGroup>(connection)
         .await
         .map_err(|e| Error::QueryError(e.to_string()))
@@ -594,6 +643,9 @@ pub async fn is_post_editable(
     user: Option<&User>,
     post_pk: i64,
 ) -> Result<bool, Error> {
+    if user.map(|u| u.is_admin).unwrap_or(false) {
+        return Ok(true);
+    }
     let user_pk = user.map(|user| user.pk);
     post::table
         .filter(
@@ -627,16 +679,19 @@ pub async fn filter_posts_editable(
         .select(post::pk)
         .filter(
             post::pk.eq_any(post_pks).and(
-                post::public_edit
-                    .or(post::fk_create_user.nullable().eq(user_pk))
-                    .or(exists(post_group_access::table.filter(
-                        get_group_access_write_condition!(
-                            post_group_access::fk_post,
-                            post::pk,
-                            &user_pk,
-                            post_group_access
-                        ),
-                    ))),
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post::public_edit
+                        .or(post::fk_create_user.nullable().eq(user_pk))
+                        .or(exists(post_group_access::table.filter(
+                            get_group_access_write_condition!(
+                                post_group_access::fk_post,
+                                post::pk,
+                                &user_pk,
+                                post_group_access
+                            ),
+                        )))),
             ),
         )
         .load::<i64>(connection)
@@ -649,6 +704,9 @@ pub async fn is_post_deletable(
     user: Option<&User>,
     post_pk: i64,
 ) -> Result<bool, Error> {
+    if user.map(|u| u.is_admin).unwrap_or(false) {
+        return Ok(true);
+    }
     let user_pk = user.map(|user| user.pk);
     post::table
         .left_join(s3_object::table)
@@ -685,17 +743,18 @@ pub async fn filter_posts_deletable(
         .left_join(broker::table.on(s3_object::fk_broker.eq(broker::pk)))
         .select(post::pk)
         .filter(
-            post::pk
-                .eq_any(post_pks)
-                .and(
-                    post::fk_create_user
+            post::pk.eq_any(post_pks).and(
+                user.map(|u| u.is_admin)
+                    .unwrap_or(false)
+                    .into_sql::<Bool>()
+                    .or(post::fk_create_user
                         .nullable()
                         .eq(user_pk)
                         .or(broker::fk_owner.nullable().eq(user_pk).or(exists(
                             broker_access::table
                                 .filter(get_broker_group_access_write_condition!(user_pk)),
-                        ))),
-                ),
+                        )))),
+            ),
         )
         .load::<i64>(connection)
         .await
@@ -707,6 +766,9 @@ pub async fn is_post_collection_editable(
     user: Option<&User>,
     post_collection_pk: i64,
 ) -> Result<bool, Error> {
+    if user.map(|u| u.is_admin).unwrap_or(false) {
+        return Ok(true);
+    }
     let user_pk = user.map(|user| user.pk);
     post_collection::table
         .filter(
@@ -735,6 +797,9 @@ pub async fn is_post_collection_deletable(
     user: Option<&User>,
     post_collection_pk: i64,
 ) -> Result<bool, Error> {
+    if user.map(|u| u.is_admin).unwrap_or(false) {
+        return Ok(true);
+    }
     let user_pk = user.map(|user| user.pk);
     post_collection::table
         .select(post_collection::pk)
@@ -784,8 +849,7 @@ pub async fn create_user_group_handler(
         }
         .scope_boxed()
     })
-    .await
-    .map_err(Error::from)?;
+    .await?;
 
     Ok(warp::reply::json(&user_group))
 }

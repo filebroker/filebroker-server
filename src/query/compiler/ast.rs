@@ -1,14 +1,14 @@
 use std::{collections::HashMap, fmt::Debug};
 
-use downcast_rs::{impl_downcast, Downcast};
+use downcast_rs::{Downcast, impl_downcast};
 use lazy_static::lazy_static;
 
 use crate::query::{Direction, Ordering, QueryParameters};
 
 use super::{
+    Cte, Error, Location, Log,
     dict::{Scope, Type},
     lexer::Tag,
-    Cte, Error, Location, Log,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -340,7 +340,7 @@ impl Visitor for SemanticAnalysisVisitor {
         if return_type != Type::Boolean && return_type != Type::Null {
             log.errors.push(Error {
                 location,
-                msg: format!("Expressions used as statement must evaluate to a boolean value but got type {:?}", return_type)
+                msg: format!("Expressions used as statement must evaluate to a boolean value but got type {return_type:?}")
             });
         }
     }
@@ -539,8 +539,7 @@ impl Visitor for SemanticAnalysisVisitor {
             log.errors.push(Error {
                 location,
                 msg: format!(
-                    "Operator {:?} cannot be applied to unary expression of type {:?}",
-                    op, expression_type
+                    "Operator {op:?} cannot be applied to unary expression of type {expression_type:?}"
                 ),
             });
         }
@@ -557,7 +556,7 @@ impl Visitor for SemanticAnalysisVisitor {
         if !scope.get_attributes().contains_key(identifier) {
             log.errors.push(Error {
                 location,
-                msg: format!("No such attribute '{}'", identifier),
+                msg: format!("No such attribute '{identifier}'"),
             });
         }
     }
@@ -580,7 +579,7 @@ impl Visitor for SemanticAnalysisVisitor {
         } else {
             log.errors.push(Error {
                 location,
-                msg: format!("No such function '{}'", identifier),
+                msg: format!("No such function '{identifier}'"),
             });
         }
     }
@@ -603,7 +602,7 @@ impl Visitor for SemanticAnalysisVisitor {
         } else {
             log.errors.push(Error {
                 location,
-                msg: format!("No such modifier '{}'", identifier),
+                msg: format!("No such modifier '{identifier}'"),
             });
         }
     }
@@ -619,7 +618,7 @@ impl Visitor for SemanticAnalysisVisitor {
         if !scope.get_variables().contains_key(identifier) {
             log.errors.push(Error {
                 location,
-                msg: format!("No such variable '{}'", identifier),
+                msg: format!("No such variable '{identifier}'"),
             });
         }
     }
@@ -653,7 +652,10 @@ impl QueryBuilderVisitor<'_> {
         if !arguments.is_empty() {
             self.buffer = Some(String::new());
             arguments[0].accept(self, scope, log);
-            self.query_parameters.limit = self.buffer.take();
+            self.query_parameters
+                .pagination
+                .get_or_insert_default()
+                .limit = self.buffer.take();
         }
     }
 
@@ -683,7 +685,7 @@ impl QueryBuilderVisitor<'_> {
             let is_string = attr_arg.node_type.get_return_type(scope) == Type::String;
             let nullable = attribute
                 .as_ref()
-                .map_or(false, |attribute| attribute.nullable);
+                .is_some_and(|attribute| attribute.nullable);
             let table = attribute.map_or("--invalid--", |attribute| attribute.table);
             if !self.query_parameters.ordering.is_empty() {
                 let last_ordering = &self.query_parameters.ordering[0];
@@ -996,7 +998,7 @@ pub fn sanitize_string_literal(val: &str) -> String {
     val.replace('\'', "''")
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Node<T: NodeType + Send + ?Sized> {
     pub location: Location,
     pub node_type: T,
@@ -1008,7 +1010,13 @@ impl<T: NodeType + Send + ?Sized> Node<T> {
     }
 }
 
-pub trait NodeType: Downcast + Debug {
+impl Node<dyn ExpressionNode> {
+    pub fn clone_boxed_node(&self) -> Box<Node<dyn ExpressionNode>> {
+        self.node_type.clone_boxed_node(self)
+    }
+}
+
+pub trait NodeType: Downcast + Debug + Send {
     fn accept(
         &mut self,
         visitor: &mut dyn Visitor,
@@ -1106,6 +1114,22 @@ pub trait ExpressionNode: NodeType + Downcast + Send + Sync {
     fn unnest(&self) -> UnnestIter<'_> {
         UnnestIter::Empty
     }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>>;
+}
+
+pub fn combine_expressions(
+    left: Box<Node<dyn ExpressionNode>>,
+    right: Box<Node<dyn ExpressionNode>>,
+    op: Operator,
+) -> Box<Node<dyn ExpressionNode>> {
+    Box::new(Node {
+        location: Location {
+            start: left.location.start,
+            end: right.location.end,
+        },
+        node_type: BinaryExpressionNode { left, op, right },
+    })
 }
 
 impl_downcast!(ExpressionNode);
@@ -1224,6 +1248,15 @@ impl ExpressionNode for PostTagNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Boolean
     }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: PostTagNode {
+                identifier: self.identifier.clone(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1251,6 +1284,15 @@ impl ExpressionNode for AttributeNode {
         } else {
             Type::Void
         }
+    }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: AttributeNode {
+                identifier: self.identifier.clone(),
+            },
+        })
     }
 }
 
@@ -1287,6 +1329,20 @@ impl ExpressionNode for FunctionCallNode {
             function_call_node: self,
             idx: 0,
         }
+    }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: FunctionCallNode {
+                identifier: self.identifier.clone(),
+                arguments: self
+                    .arguments
+                    .iter()
+                    .map(|arg| arg.clone_boxed_node())
+                    .collect(),
+            },
+        })
     }
 }
 
@@ -1326,6 +1382,17 @@ impl ExpressionNode for BinaryExpressionNode {
             yielded_right: false,
         }
     }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: BinaryExpressionNode {
+                left: self.left.clone_boxed_node(),
+                op: self.op,
+                right: self.right.clone_boxed_node(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1348,6 +1415,13 @@ impl NodeType for IntegerLiteralNode {
 impl ExpressionNode for IntegerLiteralNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Number
+    }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: IntegerLiteralNode { val: self.val },
+        })
     }
 }
 
@@ -1372,6 +1446,15 @@ impl ExpressionNode for StringLiteralNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::String
     }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: StringLiteralNode {
+                val: self.val.clone(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1395,6 +1478,13 @@ impl ExpressionNode for BooleanLiteralNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Boolean
     }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: BooleanLiteralNode { val: self.val },
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1415,6 +1505,13 @@ impl NodeType for NullLiteralNode {
 impl ExpressionNode for NullLiteralNode {
     fn get_return_type(&self, _scope: &Scope) -> Type {
         Type::Null
+    }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: NullLiteralNode {},
+        })
     }
 }
 
@@ -1449,6 +1546,16 @@ impl ExpressionNode for UnaryExpressionNode {
             yielded: false,
         }
     }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: UnaryExpressionNode {
+                op: self.op,
+                operand: self.operand.clone_boxed_node(),
+            },
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1476,5 +1583,14 @@ impl ExpressionNode for VariableNode {
         } else {
             Type::Void
         }
+    }
+
+    fn clone_boxed_node(&self, node: &Node<dyn ExpressionNode>) -> Box<Node<dyn ExpressionNode>> {
+        Box::new(Node {
+            location: node.location,
+            node_type: VariableNode {
+                identifier: self.identifier.clone(),
+            },
+        })
     }
 }

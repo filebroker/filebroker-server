@@ -3,15 +3,11 @@ use std::{
     collections::HashSet,
     fmt::Write,
     process::{Command, Output, Stdio},
-    sync::Arc,
 };
 
 use chrono::{DateTime, Utc};
-use diesel::{
-    sql_types::{Text, VarChar},
-    BoolExpressionMethods, NullableExpressionMethods, OptionalExtension, QueryDsl,
-};
-use diesel_async::{scoped_futures::ScopedFutureExt, RunQueryDsl};
+use diesel::{BoolExpressionMethods, NullableExpressionMethods, QueryDsl, sql_types::Text};
+use diesel_async::{RunQueryDsl, scoped_futures::ScopedFutureExt};
 use futures::{future::try_join_all, ready};
 use itertools::Itertools;
 use pin_project::pin_project;
@@ -19,17 +15,16 @@ use regex::Regex;
 use rusty_pool::ThreadPool;
 use s3::Bucket;
 use serde::Deserialize;
-use tokio::{
-    sync::{Mutex, Semaphore},
-    task::JoinHandle,
-};
+use tokio::{sync::Semaphore, task::JoinHandle};
 use uuid::Uuid;
 
 use lazy_static::lazy_static;
 
 use crate::error::TransactionRuntimeError;
+use crate::tag::auto_matching::{create_apply_auto_tags_for_post_task, spawn_apply_auto_tags_task};
+use crate::task::LockedObjectsTaskSentinel;
 use crate::{
-    acquire_db_connection,
+    CONCURRENT_VIDEO_TRANSCODE_LIMIT, acquire_db_connection,
     diesel::ExpressionMethods,
     error::Error,
     model::{
@@ -39,10 +34,9 @@ use crate::{
     retry_on_serialization_failure, run_retryable_transaction, run_serializable_transaction,
     schema::{hls_stream, post, s3_object, s3_object_metadata},
     util::{
-        deserialize_string_from_number, format_duration, join_api_url, DeStringOrArray,
-        DeserializeOrDefault,
+        DeStringOrArray, DeserializeOrDefault, deserialize_string_from_number, format_duration,
+        join_api_url,
     },
-    CONCURRENT_VIDEO_TRANSCODE_LIMIT,
 };
 
 static VIDEO_TRANSCODE_RESOLUTIONS: [TranscodeResolution; 5] = [
@@ -152,7 +146,7 @@ pub async fn generate_hls_playlist(
             .await
             .map_err(|_| Error::CancellationError)?;
 
-        match LockedObjectTaskSentinel::new(
+        match LockedObjectsTaskSentinel::acquire(
             "hls_locked_at",
             "hls_master_playlist",
             source_object_key.clone(),
@@ -408,7 +402,9 @@ pub async fn generate_hls_playlist(
     )
     .await
     {
-        log::error!("Failed to await and persist HLS transcode results to db with error: {e}. Going to delete created objects");
+        log::error!(
+            "Failed to await and persist HLS transcode results to db with error: {e}. Going to delete created objects"
+        );
         // ignore deletion results for files that have never been created
         let _ = bucket
             .delete_object(&format!("{}/master.m3u8", &file_id))
@@ -466,7 +462,9 @@ async fn get_video_resolution(source_object_key: &str, object_url: &str) -> Resu
             if !process_output.status.success() || !process_output.stderr.is_empty() {
                 let error_msg = String::from_utf8_lossy(&process_output.stderr);
                 if process_output.status.success() {
-                    log::warn!("ffprobe reported error while getting resolution for {source_object_key}, going to check output validity: {error_msg}");
+                    log::warn!(
+                        "ffprobe reported error while getting resolution for {source_object_key}, going to check output validity: {error_msg}"
+                    );
                 } else {
                     return Err(Error::FfmpegProcessError(format!(
                         "ffprobe failed with status {}: {}",
@@ -531,7 +529,9 @@ async fn media_has_stream(stream: &str, object_url: &str) -> Result<bool, Error>
                     // it should be fine to ignore reported errors if the process exits successfully in this case
                     // (unlike ffmpeg video transcoding where the process exits successfully if the transcoding fails
                     // halfway through) but log the error as a warning just in case
-                    log::warn!("ffprobe reported error selecting streams for {object_url} but the process finished successfully, proceeding: {error_msg}");
+                    log::warn!(
+                        "ffprobe reported error selecting streams for {object_url} but the process finished successfully, proceeding: {error_msg}"
+                    );
                 } else {
                     return Err(Error::FfmpegProcessError(format!(
                         "ffprobe failed with status {}: {}",
@@ -580,7 +580,7 @@ pub async fn generate_thumbnail(
         let _locked_object_task_sentinel = if thumbnail_lock_acquired {
             None
         } else {
-            match LockedObjectTaskSentinel::new(
+            match LockedObjectsTaskSentinel::acquire(
                 "thumbnail_locked_at",
                 "thumbnail_object_key",
                 source_object_key.clone(),
@@ -589,7 +589,10 @@ pub async fn generate_thumbnail(
             {
                 Some(sentinel) => Some(sentinel),
                 None => {
-                    log::info!("Aborting thumbnail generation for object {} because it has already been locked", &source_object_key);
+                    log::info!(
+                        "Aborting thumbnail generation for object {} because it has already been locked",
+                        &source_object_key
+                    );
                     return Ok(());
                 }
             }
@@ -643,10 +646,7 @@ pub async fn generate_thumbnail(
             ]
         };
 
-        log::info!(
-            "Spawning ffmpeg process to generate thumbnail for {}",
-            source_object_key
-        );
+        log::info!("Spawning ffmpeg process to generate thumbnail for {source_object_key}");
         let process = Command::new("ffmpeg")
             .args(args)
             .stdout(Stdio::piped())
@@ -667,11 +667,13 @@ pub async fn generate_thumbnail(
         if !process_output.status.success() || !process_output.stderr.is_empty() {
             let error_msg = String::from_utf8_lossy(&process_output.stderr);
             if process_output.status.success() {
-                log::warn!("ffmpeg reported error generating thumbnail for {source_object_key}, going to check output for valid webp: {error_msg}");
+                log::warn!(
+                    "ffmpeg reported error generating thumbnail for {source_object_key}, going to check output for valid webp: {error_msg}"
+                );
                 if webp::Decoder::new(&thumb_bytes).decode().is_none() {
                     return Err(Error::FfmpegProcessError(format!(
-                            "ffmpeg output contains invalid webp data for thumbnail of {source_object_key}"
-                        )));
+                        "ffmpeg output contains invalid webp data for thumbnail of {source_object_key}"
+                    )));
                 }
             } else {
                 return Err(Error::FfmpegProcessError(format!(
@@ -682,7 +684,7 @@ pub async fn generate_thumbnail(
         }
 
         if thumb_bytes.is_empty() {
-            log::warn!("Received 0 bytes for thumbnail {}", file_id);
+            log::warn!("Received 0 bytes for thumbnail {file_id}");
             return Ok(());
         }
 
@@ -733,12 +735,9 @@ pub async fn generate_thumbnail(
 
                 if update_count == 0 {
                     // object no longer exists, delete thumb
-                    log::info!("Created thumbnail for object {} that no longer exists, deleting created thumbnail {}", source_object_key, thumb_path);
+                    log::info!("Created thumbnail for object {source_object_key} that no longer exists, deleting created thumbnail {thumb_path}");
                     return Err(TransactionRuntimeError::Rollback(Error::QueryError(
-                        format!(
-                            "Source object {} for thumbnail no longer exists",
-                            source_object_key
-                        ),
+                        format!("Source object {source_object_key} for thumbnail no longer exists"),
                     )));
                 }
 
@@ -750,19 +749,18 @@ pub async fn generate_thumbnail(
         drop(connection);
 
         if let Err(e) = persist_result {
-            log::error!("Failed to await and persist thumbnail object to db with error: {e}. Going to delete created object");
+            log::error!(
+                "Failed to await and persist thumbnail object to db with error: {e}. Going to delete created object"
+            );
             if let Err(e) = bucket.delete_object(&thumb_path).await {
-                log::error!("Failed to delete obsolete thumbnail {}: {}", thumb_path, e);
+                log::error!("Failed to delete obsolete thumbnail {thumb_path}: {e}");
             }
             return Err(e);
         }
 
         Ok(())
     } else {
-        log::debug!(
-            "Not creating thumbnail for unsupported content type '{}'",
-            content_type
-        );
+        log::debug!("Not creating thumbnail for unsupported content type '{content_type}'");
         Ok(())
     }
 }
@@ -877,7 +875,7 @@ pub async fn load_object_metadata(
     let _locked_object_task_sentinel = if metadata_lock_acquired {
         None
     } else {
-        match LockedObjectTaskSentinel::new_with_condition(
+        match LockedObjectsTaskSentinel::acquire_with_condition(
             "metadata_locked_at",
             "NOT EXISTS(SELECT * FROM s3_object_metadata WHERE object_key = s3_object.object_key AND loaded)",
             source_object_key.clone(),
@@ -1031,10 +1029,7 @@ pub async fn load_object_metadata(
                     let minute = &caps[5];
                     let second = caps.get(6).map_or(":00", |m| m.as_str()); // Fallback to ":00" if $6 / seconds is not present
                     let timezone = caps.get(7).map_or("Z", |m| m.as_str()); // Fallback to Z if $7 / timezone is not present
-                    format!(
-                        "{}-{}-{} {}:{}{}{}",
-                        year, month, day, hour, minute, second, timezone
-                    )
+                    format!("{year}-{month}-{day} {hour}:{minute}{second}{timezone}")
                 })
                 .to_string();
             let parsed_date = DateTime::parse_from_str(&postgres_date, "%Y-%m-%d %H:%M:%S%.f%#z")?;
@@ -1084,7 +1079,7 @@ pub async fn load_object_metadata(
             Err(e) => {
                 if let Some(ffprobe_duration) = duration_secs {
                     let pg_interval = diesel::sql_query("SELECT $1::interval AS pg_interval")
-                        .bind::<Text, _>(format!("{}s", ffprobe_duration))
+                        .bind::<Text, _>(format!("{ffprobe_duration}s"))
                         .get_result::<PgIntervalQuery>(&mut connection)
                         .await;
                     match pg_interval {
@@ -1155,113 +1150,132 @@ pub async fn load_object_metadata(
         &source_object_key,
     );
 
-    let s3_object_metadata = run_retryable_transaction(&mut connection, |connection| {
-        async move {
-            let object = s3_object::table
-                .filter(s3_object::object_key.eq(&source_object_key))
-                .get_result::<S3Object>(connection)
-                .await?;
-
-            let metadata_to_insert = S3ObjectMetadata {
-                object_key: object.object_key,
-                file_type: exif_output.file_type.into_inner(),
-                file_type_extension: exif_output.file_type_extension.into_inner(),
-                mime_type: exif_output
-                    .mime_type
-                    .into_inner()
-                    .or(Some(object.mime_type)),
-                title: exif_output
-                    .title
-                    .into_inner()
-                    .or(ffprobe_tags.title.into_inner()),
-                artist: exif_output
-                    .artist
-                    .into_inner()
-                    .map(DeStringOrArray::into_inner)
-                    .or(ffprobe_tags.artist.into_inner()),
-                album: exif_output
-                    .album
-                    .into_inner()
-                    .or(ffprobe_tags.album.into_inner()),
-                album_artist: exif_output
-                    .album_artist
-                    .into_inner()
-                    .or(ffprobe_tags.album_artist.into_inner()),
-                composer: exif_output
-                    .composer
-                    .into_inner()
-                    .or(ffprobe_tags.composer.into_inner()),
-                genre: exif_output
-                    .genre
-                    .into_inner()
-                    .map(DeStringOrArray::into_inner)
-                    .or(ffprobe_tags.genre.into_inner()),
-                date,
-                track_number,
-                disc_number,
-                duration: duration.map(PgIntervalWrapper),
-                width: *exif_output.width,
-                height: *exif_output.height,
-                size: size.or(Some(object.size_bytes)),
-                bit_rate,
-                format_name,
-                format_long_name,
-                video_stream_count,
-                video_codec_name,
-                video_codec_long_name,
-                video_frame_rate: (*exif_output.frame_rate).or(video_frame_rate),
-                video_bit_rate_max,
-                audio_stream_count,
-                audio_codec_name,
-                audio_codec_long_name,
-                audio_sample_rate: exif_output
-                    .audio_sample_rate
-                    .or(exif_output.sample_rate.into_inner()),
-                audio_channels: *exif_output.audio_channels,
-                audio_bit_rate_max,
-                raw,
-                loaded: true,
-                track_count,
-                disc_count,
-            };
-
-            let s3_object_metadata = diesel::insert_into(s3_object_metadata::table)
-                .values(&metadata_to_insert)
-                .on_conflict(s3_object_metadata::object_key)
-                .do_update()
-                .set(&metadata_to_insert)
-                .get_result::<S3ObjectMetadata>(connection)
-                .await?;
-
-            if let Some(ref title) = s3_object_metadata.title {
-                let post_update_count = diesel::update(post::table)
-                    .filter(
-                        post::s3_object
-                            .eq(&s3_object_metadata.object_key)
-                            .and(post::title.is_null()),
-                    )
-                    .set(post::title.eq(substring(title, 1, 300).nullable()))
-                    .execute(connection)
+    let (s3_object_metadata, apply_auto_tags_tasks) =
+        run_retryable_transaction(&mut connection, |connection| {
+            async move {
+                let object = s3_object::table
+                    .filter(s3_object::object_key.eq(&source_object_key))
+                    .get_result::<S3Object>(connection)
                     .await?;
 
-                if post_update_count > 0 {
-                    log::info!(
-                        "Updated {} posts with title from metadata for object {}",
-                        post_update_count,
-                        &s3_object_metadata.object_key
-                    );
+                let metadata_to_insert = S3ObjectMetadata {
+                    object_key: object.object_key,
+                    file_type: exif_output.file_type.into_inner(),
+                    file_type_extension: exif_output.file_type_extension.into_inner(),
+                    mime_type: exif_output
+                        .mime_type
+                        .into_inner()
+                        .or(Some(object.mime_type)),
+                    title: exif_output
+                        .title
+                        .into_inner()
+                        .or(ffprobe_tags.title.into_inner()),
+                    artist: exif_output
+                        .artist
+                        .into_inner()
+                        .map(DeStringOrArray::into_inner)
+                        .or(ffprobe_tags.artist.into_inner()),
+                    album: exif_output
+                        .album
+                        .into_inner()
+                        .or(ffprobe_tags.album.into_inner()),
+                    album_artist: exif_output
+                        .album_artist
+                        .into_inner()
+                        .or(ffprobe_tags.album_artist.into_inner()),
+                    composer: exif_output
+                        .composer
+                        .into_inner()
+                        .or(ffprobe_tags.composer.into_inner()),
+                    genre: exif_output
+                        .genre
+                        .into_inner()
+                        .map(DeStringOrArray::into_inner)
+                        .or(ffprobe_tags.genre.into_inner()),
+                    date,
+                    track_number,
+                    disc_number,
+                    duration: duration.map(PgIntervalWrapper),
+                    width: *exif_output.width,
+                    height: *exif_output.height,
+                    size: size.or(Some(object.size_bytes)),
+                    bit_rate,
+                    format_name,
+                    format_long_name,
+                    video_stream_count,
+                    video_codec_name,
+                    video_codec_long_name,
+                    video_frame_rate: (*exif_output.frame_rate).or(video_frame_rate),
+                    video_bit_rate_max,
+                    audio_stream_count,
+                    audio_codec_name,
+                    audio_codec_long_name,
+                    audio_sample_rate: exif_output
+                        .audio_sample_rate
+                        .or(exif_output.sample_rate.into_inner()),
+                    audio_channels: *exif_output.audio_channels,
+                    audio_bit_rate_max,
+                    raw,
+                    loaded: true,
+                    track_count,
+                    disc_count,
+                };
+
+                let s3_object_metadata = diesel::insert_into(s3_object_metadata::table)
+                    .values(&metadata_to_insert)
+                    .on_conflict(s3_object_metadata::object_key)
+                    .do_update()
+                    .set(&metadata_to_insert)
+                    .get_result::<S3ObjectMetadata>(connection)
+                    .await?;
+
+                if let Some(ref title) = s3_object_metadata.title {
+                    let post_update_count = diesel::update(post::table)
+                        .filter(
+                            post::s3_object
+                                .eq(&s3_object_metadata.object_key)
+                                .and(post::title.is_null()),
+                        )
+                        .set(post::title.eq(substring(title, 1, 300).nullable()))
+                        .execute(connection)
+                        .await?;
+
+                    if post_update_count > 0 {
+                        log::info!(
+                            "Updated {} posts with title from metadata for object {}",
+                            post_update_count,
+                            &s3_object_metadata.object_key
+                        );
+                    }
                 }
+
+                let mut apply_auto_tags_tasks = Vec::new();
+
+                let related_posts = post::table
+                    .select(post::pk)
+                    .filter(post::s3_object.eq(&s3_object_metadata.object_key))
+                    .load::<i64>(connection)
+                    .await?;
+
+                for post_pk in related_posts {
+                    let apply_auto_tags_task =
+                        create_apply_auto_tags_for_post_task(post_pk, connection).await?;
+                    apply_auto_tags_tasks.push(apply_auto_tags_task);
+                }
+                Ok((s3_object_metadata, apply_auto_tags_tasks))
             }
-            Ok(s3_object_metadata)
-        }
-        .scope_boxed()
-    })
-    .await?;
+            .scope_boxed()
+        })
+        .await?;
 
     log::info!(
         "Completed metadata extraction for {}",
         &s3_object_metadata.object_key
     );
+
+    for apply_auto_tags_task in apply_auto_tags_tasks {
+        spawn_apply_auto_tags_task(apply_auto_tags_task);
+    }
 
     Ok(())
 }
@@ -1606,8 +1620,7 @@ async fn persist_hls_transcode_results(
                 // source object no longer exists, delete HLS transcode
                 return Err(TransactionRuntimeError::Rollback(Error::QueryError(
                     format!(
-                        "Source object {} for HLS transcoding no longer exists",
-                        source_object_key
+                        "Source object {source_object_key} for HLS transcoding no longer exists"
                     ),
                 )));
             }
@@ -1621,7 +1634,9 @@ async fn persist_hls_transcode_results(
 
     if !process_output.stderr.is_empty() {
         let error_msg = String::from_utf8_lossy(&process_output.stderr);
-        log::warn!("ffmpeg reported error during HLS transcoding of object '{source_object_key}', going to check if output video duration matches input: {error_msg}");
+        log::warn!(
+            "ffmpeg reported error during HLS transcoding of object '{source_object_key}', going to check if output video duration matches input: {error_msg}"
+        );
 
         let object_url = join_api_url(["get-object", source_object_key])?.to_string();
         let mut hls_path = vec!["get-object"];
@@ -1671,10 +1686,13 @@ async fn persist_hls_transcode_results(
                 delete_created_objects(source_object_key, &s3_objects, &master_playlist_result.path)
                     .await
             {
-                log::error!("Failed to delete created database objects after determining that HLS stream for '{source_object_key}' is invalid: {e}");
+                log::error!(
+                    "Failed to delete created database objects after determining that HLS stream for '{source_object_key}' is invalid: {e}"
+                );
             }
             return Err(Error::FfmpegProcessError(format!(
-                "HLS video duration mismatch for object '{source_object_key}', expected {} but got {}. Reported error: {error_msg}", object_duration.duration_str, hls_duration.duration_str
+                "HLS video duration mismatch for object '{source_object_key}', expected {} but got {}. Reported error: {error_msg}",
+                object_duration.duration_str, hls_duration.duration_str
             )));
         }
     }
@@ -1705,7 +1723,7 @@ async fn get_object_duration(object_url: &str) -> Result<ObjectDuration, Error> 
     let ffprobe_output = spawn_blocking(|| {
         process
             .wait_with_output()
-            .map_err(|e| Error::FfmpegProcessError(format!("ffprobe failed: {}", e)))
+            .map_err(|e| Error::FfmpegProcessError(format!("ffprobe failed: {e}")))
     })
     .await?;
 
@@ -1744,12 +1762,12 @@ fn spawn_hls_output_reader(
 
     let hls_stream_pipe = fifo_dir
         .path()
-        .join(hls_stream.stream_file.split('/').last().unwrap());
+        .join(hls_stream.stream_file.split('/').next_back().unwrap());
     nix::unistd::mkfifo(&hls_stream_pipe, nix::sys::stat::Mode::S_IRWXU)
         .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
     let hls_playlist_pipe = fifo_dir
         .path()
-        .join(hls_stream.stream_playlist.split('/').last().unwrap());
+        .join(hls_stream.stream_playlist.split('/').next_back().unwrap());
     nix::unistd::mkfifo(&hls_playlist_pipe, nix::sys::stat::Mode::S_IRWXU)
         .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
 
@@ -1820,7 +1838,7 @@ fn spawn_hls_master_playlist_reader(
 ) -> Result<JoinHandle<Result<S3UploadResult, Error>>, Error> {
     let master_playlist_pipe = fifo_dir
         .path()
-        .join(master_playlist_path.split('/').last().unwrap());
+        .join(master_playlist_path.split('/').next_back().unwrap());
     nix::unistd::mkfifo(&master_playlist_pipe, nix::sys::stat::Mode::S_IRWXU)
         .map_err(|e| Error::IoError(format!("Failed mkfifo: {e}")))?;
 
@@ -1887,113 +1905,6 @@ fn upload_tokio_file(
                 response_status: res,
             })
         })
-}
-
-struct LockedObjectTaskSentinel {
-    lock_column: &'static str,
-    object_key: String,
-    refresh_task_join_handle: JoinHandle<()>,
-    update_mutex: Arc<Mutex<()>>,
-}
-
-impl LockedObjectTaskSentinel {
-    /// Try to acquire a hls_lock or thumbnail_lock, returning `None` if already locked
-    async fn new(
-        lock_column: &'static str,
-        locked_column: &'static str,
-        object_key: String,
-    ) -> Result<Option<Self>, Error> {
-        Self::new_with_condition(lock_column, &format!("{locked_column} IS NULL"), object_key).await
-    }
-
-    async fn new_with_condition(
-        lock_column: &'static str,
-        condition: &str,
-        object_key: String,
-    ) -> Result<Option<Self>, Error> {
-        let mut connection = acquire_db_connection().await?;
-        let update_result = diesel::sql_query(format!(
-            "UPDATE s3_object SET {lock_column} = NOW() WHERE object_key = $1 AND {lock_column} IS NULL AND {condition} RETURNING *",
-        ))
-        .bind::<VarChar, _>(&object_key)
-        .get_result::<S3Object>(&mut connection)
-        .await
-        .optional()?;
-
-        if update_result.is_none() {
-            return Ok(None);
-        }
-
-        let key_to_refresh = object_key.clone();
-        let update_mutex = Arc::new(Mutex::new(()));
-        let background_mutex = update_mutex.clone();
-        let refresh_task_join_handle = tokio::spawn(async move {
-            // refresh lock every 15 minutes
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60 * 15)).await;
-                let _mutex_guard = background_mutex.lock().await;
-                match acquire_db_connection().await {
-                    Ok(mut connection) => {
-                        if let Err(e) = diesel::sql_query(format!(
-                            "UPDATE s3_object SET {} = NOW() WHERE object_key = $1",
-                            lock_column
-                        ))
-                        .bind::<VarChar, _>(&key_to_refresh)
-                        .execute(&mut connection)
-                        .await
-                        {
-                            log::error!(
-                                "Failed to refresh {lock_column} for object {}: {e}",
-                                &key_to_refresh
-                            );
-                        }
-                    }
-                    Err(e) => log::error!(
-                        "Failed to refresh {lock_column} for object {}: {e}",
-                        &key_to_refresh
-                    ),
-                }
-            }
-        });
-
-        Ok(Some(Self {
-            lock_column,
-            object_key,
-            refresh_task_join_handle,
-            update_mutex,
-        }))
-    }
-}
-
-impl Drop for LockedObjectTaskSentinel {
-    fn drop(&mut self) {
-        self.refresh_task_join_handle.abort();
-        let update_mutex = self.update_mutex.clone();
-        let object_key = std::mem::take(&mut self.object_key);
-        let lock_column = self.lock_column;
-        tokio::spawn(async move {
-            let _update_mutex = update_mutex.lock().await;
-            let mut connection = match acquire_db_connection().await {
-                Ok(connection) => connection,
-                Err(e) => {
-                    log::error!("Could not unlock object {}: {e}", &object_key);
-                    return;
-                }
-            };
-
-            let res = diesel::sql_query(format!(
-                "UPDATE s3_object SET {} = NULL WHERE object_key = $1",
-                lock_column
-            ))
-            .bind::<VarChar, _>(&object_key)
-            .execute(&mut connection)
-            .await;
-
-            if let Err(e) = res {
-                log::error!("Could not unlock object {}: {e}", &object_key);
-            }
-        });
-    }
 }
 
 struct SubmittedHlsTranscodingSentinel<'a> {
