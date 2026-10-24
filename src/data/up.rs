@@ -4,7 +4,7 @@ use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
 use diesel::{
     NullableExpressionMethods, OptionalExtension, PgSortExpressionMethods, QueryDsl,
-    dsl::{exists, not, sum},
+    dsl::{exists, not},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl, scoped_futures::ScopedFutureExt};
 use futures::{TryStream, stream::IntoAsyncRead};
@@ -281,7 +281,7 @@ pub async fn check_broker_quota_usage(
 
     if let Some(quota) = access.quota {
         let used_quota: BigDecimal = s3_object::table
-            .select(sum(s3_object::size_bytes))
+            .select(diesel::dsl::sum(s3_object::size_bytes))
             .filter(
                 s3_object::fk_broker
                     .eq(broker.pk)

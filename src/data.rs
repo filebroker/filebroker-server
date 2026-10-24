@@ -1,7 +1,7 @@
 use bigdecimal::{BigDecimal, ToPrimitive};
 use diesel::{
     BoolExpressionMethods, JoinOnDsl, NullableExpressionMethods, QueryDsl,
-    dsl::{exists, max, not, sum},
+    dsl::{exists, not},
 };
 use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use futures::{Stream, TryStreamExt};
@@ -515,7 +515,7 @@ pub async fn get_brokers_handler(user: User) -> Result<impl Reply, Rejection> {
 
     let broker_usages = s3_object::table
         .group_by(s3_object::fk_broker)
-        .select((s3_object::fk_broker, sum(s3_object::size_bytes)))
+        .select((s3_object::fk_broker, diesel::dsl::sum(s3_object::size_bytes)))
         .filter(
             s3_object::fk_uploader
                 .eq(user.pk)
@@ -564,7 +564,7 @@ pub async fn get_brokers_handler(user: User) -> Result<impl Reply, Rejection> {
             .and(broker_access::quota.is_not_null())),
         )
         .group_by(broker::pk)
-        .select((broker::pk, max(broker_access::quota)))
+        .select((broker::pk, diesel::dsl::max(broker_access::quota)))
         .filter(
             broker::pk
                 .eq_any(&broker_pks)
