@@ -161,7 +161,7 @@ pub struct QueryParameters {
 }
 
 impl QueryParameters {
-    fn build_join_statements(&self, skip_optional: bool) -> String {
+    pub fn build_join_statements(&self, skip_optional: bool) -> String {
         self.join_statements
             .iter()
             .filter(|join_statement| {

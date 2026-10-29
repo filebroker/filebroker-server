@@ -1220,6 +1220,9 @@ pub struct Tag {
     pub compiled_auto_match_condition_post: Option<String>,
     #[serde(skip_serializing)]
     pub compiled_auto_match_condition_collection: Option<String>,
+    pub matching_post_count: i64,
+    pub matching_post_collection_count: i64,
+    pub matching_user_group_count: i64,
 }
 
 #[derive(Clone, Deserialize, Identifiable, Insertable, Queryable, Serialize, Validate)]
@@ -2157,4 +2160,20 @@ pub struct ReconcileBrokerQuotaUsageTask {
 pub struct NewReconcileBrokerQuotaUsageTask {
     pub fk_user: i64,
     pub fk_broker: i64,
+}
+
+#[derive(Clone, Debug, Identifiable, Queryable, QueryableByName)]
+#[diesel(table_name = reconcile_tag_matching_counts_task)]
+#[diesel(primary_key(pk))]
+pub struct ReconcileTagMatchingCountsTask {
+    pub pk: i64,
+    pub fk_tag: i64,
+    pub creation_timestamp: DateTime<Utc>,
+    pub reconcile_post_count: bool,
+    pub reconcile_post_collection_count: bool,
+    pub reconcile_user_group_count: bool,
+    pub invalidation_version: i64,
+    pub topology_version: i64,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub fail_count: i32,
 }

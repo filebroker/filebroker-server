@@ -492,6 +492,12 @@ fn configure_scheduler() -> Scheduler<Utc> {
             task::tag_tasks::run_apply_auto_tags_tasks,
         );
     });
+    scheduler.every(clokwerk::Interval::Minutes(10)).run(|| {
+        task::submit_task(
+            "run_reconcile_tag_matching_counts_tasks",
+            task::tag_tasks::run_reconcile_tag_matching_counts_tasks,
+        );
+    });
     scheduler
         .every(clokwerk::Interval::Days(1))
         .at("03:00")

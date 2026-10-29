@@ -42,6 +42,7 @@ macro_rules! get_source_object_tag {
 pub mod auto_matching;
 pub mod create;
 pub mod history;
+pub mod match_counting;
 pub mod update;
 
 use crate::model::{TagCategory, User, UserPublic};
@@ -224,6 +225,9 @@ pub struct TagDetailed {
     pub tag_category: Option<TagCategory>,
     pub auto_match_condition_post: Option<String>,
     pub auto_match_condition_collection: Option<String>,
+    pub matching_post_count: i64,
+    pub matching_post_collection_count: i64,
+    pub matching_user_group_count: i64,
     pub parents: Vec<Tag>,
     pub aliases: Vec<Tag>,
 }
@@ -262,6 +266,9 @@ pub async fn load_tag_detailed(
         tag_category,
         auto_match_condition_post: tag.auto_match_condition_post,
         auto_match_condition_collection: tag.auto_match_condition_collection,
+        matching_post_count: tag.matching_post_count,
+        matching_post_collection_count: tag.matching_post_collection_count,
+        matching_user_group_count: tag.matching_user_group_count,
         parents,
         aliases,
     })
@@ -302,6 +309,9 @@ pub async fn get_tag_handler(tag_pk: i64) -> Result<impl Reply, Rejection> {
         tag_category,
         auto_match_condition_post: tag.auto_match_condition_post,
         auto_match_condition_collection: tag.auto_match_condition_collection,
+        matching_post_count: tag.matching_post_count,
+        matching_post_collection_count: tag.matching_post_collection_count,
+        matching_user_group_count: tag.matching_user_group_count,
         parents,
         aliases,
     }))
