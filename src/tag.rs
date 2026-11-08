@@ -40,6 +40,7 @@ macro_rules! get_source_object_tag {
 }
 
 pub mod auto_matching;
+pub mod cache;
 pub mod create;
 pub mod history;
 pub mod match_counting;

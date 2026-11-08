@@ -16,6 +16,10 @@ pub mod sql_types {
     #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "user_group_audit_action"))]
     pub struct UserGroupAuditAction;
+
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "xid8", schema = "pg_catalog"))]
+    pub struct Xid8;
 }
 
 diesel::table! {
@@ -545,6 +549,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::Xid8;
+
+    tag_cache_generation (singleton) {
+        singleton -> Bool,
+        generation -> Int8,
+        last_transaction_id -> Nullable<Xid8>,
+    }
+}
+
+diesel::table! {
     tag_category (id) {
         #[max_length = 255]
         id -> Varchar,
@@ -824,6 +839,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     s3_object_metadata,
     tag,
     tag_alias,
+    tag_cache_generation,
     tag_category,
     tag_closure_table,
     tag_edge,

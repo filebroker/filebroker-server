@@ -4,13 +4,18 @@ use super::{
     lexer::Tag,
 };
 use crate::query::{Direction, Ordering, QueryParameters};
+use crate::tag;
+use crate::tag::cache::{CachedTag, PopulationEstimates, TagCacheSnapshot};
 use downcast_rs::{Downcast, impl_downcast};
 use itertools::Itertools;
 use lazy_static::lazy_static;
+use std::sync::Arc;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Debug,
 };
+
+const TAG_EXPANSION_LIMIT: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operator {
@@ -706,6 +711,8 @@ pub struct QueryBuilderVisitor<'p> {
     // query_parameters.encountered_tables for the outer query.
     local_encountered_tables: Option<HashSet<&'static str>>,
     allow_or_expansion: bool,
+    tag_cache: Arc<TagCacheSnapshot>,
+    population_estimates: Arc<PopulationEstimates>,
 }
 
 impl<'p> QueryBuilderVisitor<'p> {
@@ -717,6 +724,8 @@ impl<'p> QueryBuilderVisitor<'p> {
             buffer: None,
             local_encountered_tables: None,
             allow_or_expansion: true,
+            tag_cache: tag::cache::snapshot(),
+            population_estimates: tag::cache::population_estimates(),
         }
     }
 }
@@ -1032,6 +1041,18 @@ impl Visitor for QueryBuilderVisitor<'_> {
         _log: &mut Log,
         _location: Location,
     ) {
+        let base_table_name = self.query_parameters.base_table_name;
+        let cached_tag = self.tag_cache.get_by_name(&post_tag_node.identifier);
+        if let Some(cached_tag) = cached_tag {
+            let effective_tag_pks = cached_tag.effective_pks();
+            let effective_tag_count = effective_tag_pks.len();
+            if effective_tag_count > 0 && effective_tag_count <= TAG_EXPANSION_LIMIT {
+                let effective_tag_pk_str = effective_tag_pks.into_iter().join(", ");
+                self.write_buff(&format!("EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN({effective_tag_pk_str}))"));
+                return;
+            }
+        }
+
         let idx = self.ctes.len();
         let tag_name = sanitize_string_literal(&post_tag_node.identifier);
 
@@ -1047,7 +1068,6 @@ impl Visitor for QueryBuilderVisitor<'_> {
             });
 
         let cte_name = format!("tag_cte{}", cte.idx);
-        let base_table_name = self.query_parameters.base_table_name;
         self.write_buff(&format!("EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN(SELECT tag_key FROM {cte_name}))"));
     }
 
@@ -1303,23 +1323,59 @@ impl Visitor for QueryBuilderVisitor<'_> {
         let search_term = fulltext_node.search_term.split_whitespace().join(" ");
         let use_trigram_search = search_term.chars().filter(|c| !c.is_whitespace()).count() >= 3;
 
-        let idx = self.ctes.len();
-        let search_term = sanitize_string_literal(&search_term);
-        let key = format!("fts'tag:{search_term}");
+        let matching_tags = self.tag_cache.find_fuzzy(&search_term);
 
-        let condition = if use_trigram_search {
-            format!("'{search_term}' <<% tag.tag_name")
-        } else {
-            format!("lower(tag.tag_name) = '{search_term}'")
-        };
-        let cte = self.ctes.entry(key).or_insert_with(|| Cte {
-            idx,
-            expression: build_tag_search_cte(&format!("tag_fuzzy_cte{idx}"), &condition),
-        });
+        let has_common_tag = matching_tags
+            .iter()
+            .any(|tag| !is_tag_selective(scope, tag, &self.population_estimates));
 
-        let tag_cte_name = format!("tag_fuzzy_cte{}", cte.idx);
+        let mut effective_tag_pks: Vec<i64> = matching_tags
+            .into_iter()
+            .flat_map(|tag| tag.effective_pks())
+            .collect();
+        effective_tag_pks.sort_unstable();
+        effective_tag_pks.dedup();
+
         let base_table_name = self.query_parameters.base_table_name;
         let fulltext_table = scope.get_fulltext_table().unwrap_or("--invalid--");
+
+        let search_term = sanitize_string_literal(&search_term);
+
+        // Common tags are checked against individual candidate rows instead of enumerating all matching posts in the fulltext CTE.
+        let use_correlated_tag_lookup = has_common_tag && !effective_tag_pks.is_empty();
+
+        let tag_pks_expression = if effective_tag_pks.is_empty() {
+            String::from("NULL")
+        } else if effective_tag_pks.len() <= TAG_EXPANSION_LIMIT {
+            effective_tag_pks.into_iter().join(", ")
+        } else {
+            let idx = self.ctes.len();
+            let key = format!("fts'tag:{search_term}");
+
+            let condition = if use_trigram_search {
+                format!("'{search_term}' <<% tag.tag_name")
+            } else {
+                format!("lower(tag.tag_name) = '{search_term}'")
+            };
+
+            let cte = self.ctes.entry(key).or_insert_with(|| Cte {
+                idx,
+                expression: build_tag_search_cte(&format!("tag_fuzzy_cte{idx}"), &condition),
+            });
+
+            format!("SELECT tag_key FROM tag_fuzzy_cte{}", cte.idx)
+        };
+
+        let (tag_pks_expression, correlated_tag_predicate) = if use_correlated_tag_lookup {
+            (
+                None,
+                Some(format!(
+                    "EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN ({tag_pks_expression}))"
+                )),
+            )
+        } else {
+            (Some(tag_pks_expression), None)
+        };
 
         let fulltext_cte_idx = {
             let idx = self.ctes.len();
@@ -1333,7 +1389,7 @@ impl Visitor for QueryBuilderVisitor<'_> {
                         &format!("fulltext_match_cte{idx}"),
                         base_table_name,
                         fulltext_table,
-                        &tag_cte_name,
+                        tag_pks_expression.as_deref(),
                         &search_term,
                         use_trigram_search,
                     ),
@@ -1342,7 +1398,17 @@ impl Visitor for QueryBuilderVisitor<'_> {
         };
 
         let fulltext_cte_name = format!("fulltext_match_cte{fulltext_cte_idx}");
-        self.write_buff(&format!("EXISTS(SELECT * FROM {fulltext_cte_name} WHERE {fulltext_cte_name}.pk = {base_table_name}.pk)"));
+        let fulltext_predicate = format!(
+            "EXISTS(SELECT * FROM {fulltext_cte_name} WHERE {fulltext_cte_name}.pk = {base_table_name}.pk)"
+        );
+
+        if let Some(correlated_tag_predicate) = correlated_tag_predicate {
+            self.write_buff(&format!(
+                "({correlated_tag_predicate} OR {fulltext_predicate})"
+            ));
+        } else {
+            self.write_buff(&fulltext_predicate);
+        }
     }
 }
 
@@ -1350,7 +1416,7 @@ fn build_fulltext_match_cte(
     cte_name: &str,
     base_table_name: &str,
     fulltext_table: &str,
-    tag_cte_name: &str,
+    tag_pks_expression: Option<&str>,
     search_term: &str,
     use_trigram_search: bool,
 ) -> String {
@@ -1368,6 +1434,20 @@ fn build_fulltext_match_cte(
         String::new()
     };
 
+    let tag_condition = if let Some(tag_pks_expression) = tag_pks_expression {
+        format!(
+            "
+            UNION ALL
+
+            SELECT {base_table_name}_tag.fk_{base_table_name} AS pk
+            FROM {base_table_name}_tag
+            WHERE {base_table_name}_tag.fk_tag IN ({tag_pks_expression})
+            "
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         "{cte_name} AS NOT MATERIALIZED (
             SELECT {fulltext_table}.fk_{base_table_name} AS pk
@@ -1377,14 +1457,7 @@ fn build_fulltext_match_cte(
 
             {fuzzy_condition}
 
-            UNION ALL
-
-            SELECT {base_table_name}_tag.fk_{base_table_name} AS pk
-            FROM {base_table_name}_tag
-            WHERE {base_table_name}_tag.fk_tag IN (
-                SELECT tag_key
-                FROM {tag_cte_name}
-            )
+            {tag_condition}
         )"
     )
 }
@@ -1770,8 +1843,48 @@ impl ExpressionNode for PostTagNode {
         HashSet::from([ExpressionDependency::PostTag])
     }
 
-    fn is_candidate_selective(&self, _scope: &Scope) -> bool {
-        true
+    fn is_candidate_selective(&self, scope: &Scope) -> bool {
+        let tag_cache = tag::cache::snapshot();
+        let cached_tag = tag_cache.get_by_name(&self.identifier);
+        if let Some(cached_tag) = cached_tag {
+            let population_estimates = tag::cache::population_estimates();
+            is_tag_selective(scope, &cached_tag, &population_estimates)
+        } else {
+            true
+        }
+    }
+}
+
+fn is_tag_selective(
+    scope: &Scope,
+    cached_tag: &CachedTag,
+    population_estimates: &PopulationEstimates,
+) -> bool {
+    const COMMON_TAG_THRESHOLD: f64 = 0.05;
+
+    fn is_tag_selective(total_count: Option<i64>, matching_count: i64) -> bool {
+        if let Some(total_count) = total_count
+            && total_count > 0
+        {
+            (matching_count as f64) / (total_count as f64) < COMMON_TAG_THRESHOLD
+        } else {
+            true
+        }
+    }
+
+    match scope {
+        Scope::Post | Scope::TagAutoMatchPost | Scope::CollectionItem { .. } => {
+            is_tag_selective(population_estimates.posts, cached_tag.matching_post_count)
+        }
+        Scope::Collection | Scope::TagAutoMatchCollection => is_tag_selective(
+            population_estimates.post_collections,
+            cached_tag.matching_post_collection_count,
+        ),
+        Scope::UserGroup => is_tag_selective(
+            population_estimates.user_groups,
+            cached_tag.matching_user_group_count,
+        ),
+        Scope::Global => true,
     }
 }
 
@@ -2426,5 +2539,207 @@ impl ExpressionNode for FulltextNode {
 
     fn is_candidate_selective(&self, _scope: &Scope) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    enum TestExpression<'a> {
+        ExactTag(&'a str),
+        Fulltext(&'a str),
+    }
+
+    // Render directly using a local snapshot.
+    // ExactTag identifiers must already be lowercase, as the lexer
+    // normally performs that normalization.
+    fn render(
+        cache: Arc<tag::cache::TagCacheSnapshot>,
+        expression: TestExpression<'_>,
+    ) -> (String, Vec<String>) {
+        let mut parameters = QueryParameters {
+            pagination: None,
+            ordering: Vec::new(),
+            constriction: None,
+            variables: HashMap::new(),
+            shuffle: false,
+            writable_only: false,
+            base_table_name: "post",
+            select_statements: Vec::new(),
+            join_statements: Vec::new(),
+            fallback_orderings: Vec::new(),
+            from_table_override: None,
+            predefined_where_conditions: None,
+            include_full_count: false,
+            privileged: true,
+            get_secure_query_condition: |_, _, _| None,
+            encountered_tables: HashSet::new(),
+        };
+
+        let mut visitor = QueryBuilderVisitor::new(&mut parameters);
+        visitor.tag_cache = cache;
+        visitor.buffer = Some(String::new());
+
+        let mut log = Log::default();
+
+        match expression {
+            TestExpression::ExactTag(name) => {
+                visitor.visit_post_tag_node(
+                    &mut PostTagNode {
+                        identifier: name.to_owned(),
+                    },
+                    &mut log,
+                    Location::default(),
+                );
+            }
+            TestExpression::Fulltext(search_term) => {
+                visitor.visit_fulltext_node(
+                    &mut FulltextNode {
+                        search_term: search_term.to_owned(),
+                    },
+                    &Scope::Post,
+                    &mut log,
+                    Location::default(),
+                );
+            }
+        }
+
+        assert!(log.errors.is_empty());
+
+        let sql = visitor.buffer.take().unwrap();
+        let ctes = visitor
+            .ctes
+            .into_values()
+            .sorted_by_key(|cte| cte.idx)
+            .map(|cte| cte.expression)
+            .collect();
+
+        (sql, ctes)
+    }
+
+    fn cache(rows: Vec<(i64, String, Vec<i64>)>) -> Arc<tag::cache::TagCacheSnapshot> {
+        Arc::new(tag::cache::TagCacheSnapshot::for_tests(rows))
+    }
+
+    fn expanded_cache(effective_count: usize) -> Arc<tag::cache::TagCacheSnapshot> {
+        assert!(effective_count >= 1);
+
+        let related = (1_000..1_000 + (effective_count - 1) as i64).collect();
+
+        cache(vec![(42, "Audio".to_owned(), related)])
+    }
+
+    #[test]
+    fn exact_tag_with_apostrophe_uses_cache_before_sql_escaping() {
+        let snapshot = cache(vec![(7, "Bob's Music".to_owned(), vec![11])]);
+
+        // Identifier is already normalized by the lexer.
+        let (sql, ctes) = render(snapshot, TestExpression::ExactTag("bob's music"));
+
+        assert!(sql.contains("fk_tag IN(7, 11)"), "{sql}");
+        assert!(ctes.is_empty());
+    }
+
+    #[test]
+    fn unknown_exact_tag_fallback_escapes_apostrophes() {
+        let (sql, ctes) = render(cache(vec![]), TestExpression::ExactTag("bob's music"));
+
+        assert!(sql.contains("SELECT tag_key FROM tag_cte0"), "{sql}");
+        assert_eq!(ctes.len(), 1);
+        assert!(ctes[0].contains("lower(tag.tag_name) = 'bob''s music'"));
+    }
+
+    #[test]
+    fn exact_tag_expands_up_to_and_including_64_ids() {
+        let (sql, ctes) = render(expanded_cache(64), TestExpression::ExactTag("audio"));
+
+        assert!(sql.contains("fk_tag IN(42, 1000, "), "{sql}");
+        assert!(sql.contains("1062)"), "{sql}");
+        assert!(ctes.is_empty());
+    }
+
+    #[test]
+    fn exact_tag_over_64_ids_uses_fallback_cte() {
+        let (sql, ctes) = render(expanded_cache(65), TestExpression::ExactTag("audio"));
+
+        assert!(
+            sql.contains("fk_tag IN(SELECT tag_key FROM tag_cte0)"),
+            "{sql}"
+        );
+        assert_eq!(ctes.len(), 1);
+        assert!(ctes[0].contains("lower(tag.tag_name) = 'audio'"));
+    }
+
+    #[test]
+    fn unmatched_fulltext_term_keeps_content_search_without_tag_lookup() {
+        let (_, ctes) = render(cache(vec![]), TestExpression::Fulltext("notfound"));
+
+        assert_eq!(ctes.len(), 1);
+        assert!(ctes[0].contains("fk_tag IN (NULL)"));
+        assert!(ctes[0].contains("plainto_tsquery('simple', 'notfound')"));
+        assert!(!ctes[0].contains("SELECT pk FROM tag"));
+    }
+
+    #[test]
+    fn fulltext_apostrophe_is_escaped_in_all_sql_branches() {
+        let (_, ctes) = render(cache(vec![]), TestExpression::Fulltext("Bob's Music"));
+
+        assert_eq!(ctes.len(), 1);
+        assert!(ctes[0].contains("'Bob''s Music'"));
+        assert!(!ctes[0].contains("'Bob's Music'"));
+    }
+
+    #[test]
+    fn fuzzy_fulltext_expands_cached_matches_and_relations() {
+        let snapshot = cache(vec![(7, "Audio".to_owned(), vec![9, 8, 8])]);
+
+        let (_, ctes) = render(snapshot, TestExpression::Fulltext("audi"));
+
+        assert_eq!(ctes.len(), 1);
+        assert!(ctes[0].contains("fk_tag IN (7, 8, 9)"));
+        assert!(!ctes[0].contains("tag_fuzzy_cte"));
+    }
+
+    #[test]
+    fn fuzzy_fulltext_over_64_effective_ids_uses_fallback_cte() {
+        let (_, ctes) = render(expanded_cache(65), TestExpression::Fulltext("audi"));
+
+        assert_eq!(ctes.len(), 2);
+        assert!(
+            ctes.iter()
+                .any(|cte| cte.contains("'audi' <<% tag.tag_name"))
+        );
+        assert!(
+            ctes.iter()
+                .any(|cte| cte.contains("SELECT tag_key FROM tag_fuzzy_cte0"))
+        );
+    }
+
+    #[test]
+    fn tag_selectivity_respects_scope_and_threshold() {
+        let tag = Arc::new(CachedTag {
+            pk: 1,
+            tag_name: "audio".to_owned(),
+            matching_post_count: 50,
+            matching_post_collection_count: 49,
+            matching_user_group_count: 0,
+            related_tag_pks: Box::new([]),
+        });
+
+        let estimates = Arc::new(PopulationEstimates {
+            posts: Some(1000),
+            post_collections: Some(1000),
+            user_groups: None,
+        });
+
+        // Exactly 5% is common.
+        assert!(!is_tag_selective(&Scope::Post, &tag, &estimates));
+
+        // Just below 5% is selective.
+        assert!(is_tag_selective(&Scope::Collection, &tag, &estimates));
+
+        // Missing statistics retain the conservative fallback.
+        assert!(is_tag_selective(&Scope::UserGroup, &tag, &estimates));
     }
 }

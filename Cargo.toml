@@ -9,6 +9,7 @@ default = []
 auto_migration = ["diesel_migrations"]
 
 [dependencies]
+arc-swap = "1.9.3"
 async-trait = "0.1.92"
 bcrypt = "0.19.3"
 bigdecimal = "0.4.11"
@@ -65,6 +66,7 @@ tokio-rustls = "0.26.6"
 tokio-stream = "0.1.19"
 tokio-util = { version = "0.7.20", features = ["rt"] }
 tower = "0.5.3"
+trigram = "0.4.4"
 url = "2.5.8"
 uuid = { version = "1.26.1", features = ["v4", "serde"] }
 validator = { version = "0.21.0", features = ["derive"] }

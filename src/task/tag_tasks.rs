@@ -224,3 +224,7 @@ pub fn run_reconcile_tag_matching_counts_tasks(tokio_handle: Handle) -> Result<(
         Ok(())
     })
 }
+
+pub fn run_tag_cache_maintenance(tokio_handle: Handle) -> Result<(), Error> {
+    tokio_handle.block_on(crate::tag::cache::run_maintenance())
+}
