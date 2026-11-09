@@ -15,7 +15,7 @@ use std::{
     fmt::Debug,
 };
 
-const TAG_EXPANSION_LIMIT: usize = 64;
+const TAG_EXPANSION_LIMIT: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operator {
@@ -2720,17 +2720,17 @@ mod tests {
     }
 
     #[test]
-    fn exact_tag_expands_up_to_and_including_64_ids() {
-        let (sql, ctes) = render(expanded_cache(64), TestExpression::ExactTag("audio"));
+    fn exact_tag_expands_up_to_and_including_128_ids() {
+        let (sql, ctes) = render(expanded_cache(128), TestExpression::ExactTag("audio"));
 
         assert!(sql.contains("fk_tag IN(42, 1000, "), "{sql}");
-        assert!(sql.contains("1062)"), "{sql}");
+        assert!(sql.contains("1126)"), "{sql}");
         assert!(ctes.is_empty());
     }
 
     #[test]
-    fn exact_tag_over_64_ids_uses_fallback_cte() {
-        let (sql, ctes) = render(expanded_cache(65), TestExpression::ExactTag("audio"));
+    fn exact_tag_over_128_ids_uses_fallback_cte() {
+        let (sql, ctes) = render(expanded_cache(129), TestExpression::ExactTag("audio"));
 
         assert!(
             sql.contains("fk_tag IN(SELECT tag_key FROM tag_cte0)"),
@@ -2771,8 +2771,8 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_fulltext_over_64_effective_ids_uses_fallback_cte() {
-        let (_, ctes) = render(expanded_cache(65), TestExpression::Fulltext("audi"));
+    fn fuzzy_fulltext_over_128_effective_ids_uses_fallback_cte() {
+        let (_, ctes) = render(expanded_cache(129), TestExpression::Fulltext("audi"));
 
         assert_eq!(ctes.len(), 2);
         assert!(
