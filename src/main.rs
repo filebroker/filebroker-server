@@ -398,6 +398,13 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
         log::info!("Done running startup migration tasks");
     }
 
+    log::info!("Initializing tag cache");
+    if let Err(error) = tag::cache::initialize().await {
+        log::error!("Failed to initialize tag cache: {error}");
+        server::shutdown_server().await;
+        return;
+    }
+
     run_warp_server(http_worker_rt).await;
 }
 
@@ -490,6 +497,18 @@ fn configure_scheduler() -> Scheduler<Utc> {
         task::submit_task(
             "run_apply_auto_tags_tasks",
             task::tag_tasks::run_apply_auto_tags_tasks,
+        );
+    });
+    scheduler.every(clokwerk::Interval::Minutes(10)).run(|| {
+        task::submit_task(
+            "run_reconcile_tag_matching_counts_tasks",
+            task::tag_tasks::run_reconcile_tag_matching_counts_tasks,
+        );
+    });
+    scheduler.every(clokwerk::Interval::Minutes(30)).run(|| {
+        task::submit_task(
+            "run_tag_cache_maintenance",
+            task::tag_tasks::run_tag_cache_maintenance,
         );
     });
     scheduler

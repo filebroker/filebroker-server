@@ -173,7 +173,7 @@ pub fn compile_conditions_ast(
     Ok(root_node)
 }
 
-fn create_root_node_for_expression(
+pub fn create_root_node_for_expression(
     root_expression: Option<Box<Node<dyn ExpressionNode>>>,
 ) -> Node<QueryNode> {
     let location = root_expression
@@ -300,11 +300,7 @@ fn build_sql_string(
             limited_pk_set.push(' ');
             limited_pk_set.push_str(&query_parameters.build_join_statements(true));
         }
-        apply_where_conditions(
-            &mut limited_pk_set,
-            &mut where_expressions,
-            &query_parameters,
-        );
+        apply_where_conditions(&mut limited_pk_set, &where_expressions, &query_parameters);
         limited_pk_set.push_str(" LIMIT ");
         limited_pk_set.push_str(MAX_FULL_LIMIT_STR);
         limited_pk_set.push(')');
@@ -329,7 +325,7 @@ fn build_sql_string(
                 page_pk_set.push(' ');
                 page_pk_set.push_str(&query_parameters.build_join_statements(true));
             }
-            apply_where_conditions(&mut page_pk_set, &mut where_expressions, &query_parameters);
+            apply_where_conditions(&mut page_pk_set, &where_expressions, &query_parameters);
             if query_parameters.shuffle {
                 page_pk_set.push_str(" ORDER BY RANDOM()");
             } else {
@@ -410,7 +406,7 @@ fn build_sql_string(
             sql_query.push_str(from_table_name);
             sql_query.push_str(".pk IN(SELECT pk FROM limitedPkSet) ORDER BY RANDOM()");
         } else {
-            apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+            apply_where_conditions(&mut sql_query, &where_expressions, &query_parameters);
             apply_ordering(
                 &mut sql_query,
                 &mut query_parameters.ordering,
@@ -497,7 +493,7 @@ pub fn compile_window_query(
             sql_query.push_str(&query_parameters.build_join_statements(true));
         }
 
-        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+        apply_where_conditions(&mut sql_query, &where_expressions, &query_parameters);
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
@@ -523,7 +519,7 @@ pub fn compile_window_query(
             sql_query.push(' ');
             sql_query.push_str(&query_parameters.build_join_statements(true));
         }
-        apply_where_conditions(&mut sql_query, &mut where_expressions, &query_parameters);
+        apply_where_conditions(&mut sql_query, &where_expressions, &query_parameters);
         apply_ordering(
             &mut sql_query,
             &mut query_parameters.ordering,
@@ -707,9 +703,9 @@ pub fn apply_ctes(sql_query: &mut String, ctes: &[String]) -> Result<(), crate::
     Ok(())
 }
 
-fn apply_where_conditions(
+pub fn apply_where_conditions(
     sql_query: &mut String,
-    where_expressions: &mut [String],
+    where_expressions: &[String],
     query_parameters: &QueryParameters,
 ) {
     let where_expressions_len = where_expressions.len()

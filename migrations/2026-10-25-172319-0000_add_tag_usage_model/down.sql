@@ -1,0 +1,50 @@
+DROP TRIGGER after_update_tag_name_reconcile_matching_counts ON tag;
+
+DROP TRIGGER after_update_tag_alias_reconcile_matching_counts ON tag_alias;
+DROP TRIGGER after_delete_tag_alias_reconcile_matching_counts ON tag_alias;
+DROP TRIGGER after_insert_tag_alias_reconcile_matching_counts ON tag_alias;
+
+DROP TRIGGER after_update_tag_closure_reconcile_matching_counts ON tag_closure_table;
+DROP TRIGGER after_delete_tag_closure_reconcile_matching_counts ON tag_closure_table;
+DROP TRIGGER after_insert_tag_closure_reconcile_matching_counts ON tag_closure_table;
+
+DROP TRIGGER after_update_user_group_tag_reconcile_matching_counts ON user_group_tag;
+DROP TRIGGER after_delete_user_group_tag_reconcile_matching_counts ON user_group_tag;
+DROP TRIGGER after_insert_user_group_tag_reconcile_matching_counts ON user_group_tag;
+
+DROP TRIGGER after_update_post_collection_tag_reconcile_matching_counts ON post_collection_tag;
+DROP TRIGGER after_delete_post_collection_tag_reconcile_matching_counts ON post_collection_tag;
+DROP TRIGGER after_insert_post_collection_tag_reconcile_matching_counts ON post_collection_tag;
+
+DROP TRIGGER after_update_post_tag_reconcile_matching_counts ON post_tag;
+DROP TRIGGER after_delete_post_tag_reconcile_matching_counts ON post_tag;
+DROP TRIGGER after_insert_post_tag_reconcile_matching_counts ON post_tag;
+
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_tag_name_update_trigger();
+
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_alias_update_trigger();
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_alias_delete_trigger();
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_alias_insert_trigger();
+
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_closure_update_trigger();
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_closure_delete_trigger();
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_closure_insert_trigger();
+
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_usage_update_trigger();
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_usage_delete_trigger();
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_usage_insert_trigger();
+
+DROP FUNCTION enqueue_reconcile_tag_matching_counts_for_usage(
+    BIGINT[], BOOLEAN, BOOLEAN, BOOLEAN
+);
+
+DROP FUNCTION create_reconcile_tag_matching_counts_tasks(
+    BIGINT[], BOOLEAN, BOOLEAN, BOOLEAN, BOOLEAN
+);
+
+DROP TABLE reconcile_tag_matching_counts_task;
+
+ALTER TABLE tag
+    DROP COLUMN matching_post_count,
+    DROP COLUMN matching_post_collection_count,
+    DROP COLUMN matching_user_group_count;

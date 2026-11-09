@@ -16,6 +16,10 @@ pub mod sql_types {
     #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "user_group_audit_action"))]
     pub struct UserGroupAuditAction;
+
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "xid8", schema = "pg_catalog"))]
+    pub struct Xid8;
 }
 
 diesel::table! {
@@ -393,6 +397,21 @@ diesel::table! {
 }
 
 diesel::table! {
+    reconcile_tag_matching_counts_task (pk) {
+        pk -> Int8,
+        fk_tag -> Int8,
+        creation_timestamp -> Timestamptz,
+        reconcile_post_count -> Bool,
+        reconcile_post_collection_count -> Bool,
+        reconcile_user_group_count -> Bool,
+        invalidation_version -> Int8,
+        topology_version -> Int8,
+        locked_at -> Nullable<Timestamptz>,
+        fail_count -> Int4,
+    }
+}
+
+diesel::table! {
     refresh_token (uuid) {
         uuid -> Uuid,
         expiry -> Timestamptz,
@@ -516,6 +535,9 @@ diesel::table! {
         auto_match_condition_collection -> Nullable<Varchar>,
         compiled_auto_match_condition_post -> Nullable<Text>,
         compiled_auto_match_condition_collection -> Nullable<Text>,
+        matching_post_count -> Int8,
+        matching_post_collection_count -> Int8,
+        matching_user_group_count -> Int8,
     }
 }
 
@@ -523,6 +545,17 @@ diesel::table! {
     tag_alias (fk_source, fk_target) {
         fk_source -> Int8,
         fk_target -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::Xid8;
+
+    tag_cache_generation (singleton) {
+        singleton -> Bool,
+        generation -> Int8,
+        last_transaction_id -> Nullable<Xid8>,
     }
 }
 
@@ -747,6 +780,7 @@ diesel::joinable!(post_tag -> post (fk_post));
 diesel::joinable!(post_tag -> tag (fk_tag));
 diesel::joinable!(reconcile_broker_quota_usage_task -> broker (fk_broker));
 diesel::joinable!(reconcile_broker_quota_usage_task -> registered_user (fk_user));
+diesel::joinable!(reconcile_tag_matching_counts_task -> tag (fk_tag));
 diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
 diesel::joinable!(s3_object_metadata -> s3_object (object_key));
@@ -798,12 +832,14 @@ diesel::allow_tables_to_appear_in_same_query!(
     post_search_index,
     post_tag,
     reconcile_broker_quota_usage_task,
+    reconcile_tag_matching_counts_task,
     refresh_token,
     registered_user,
     s3_object,
     s3_object_metadata,
     tag,
     tag_alias,
+    tag_cache_generation,
     tag_category,
     tag_closure_table,
     tag_edge,

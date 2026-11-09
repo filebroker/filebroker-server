@@ -63,6 +63,11 @@ lazy_static! {
                 .expect("FILEBROKER_RECONCILE_QUOTA_GRACE_PERIOD is invalid"))
             .unwrap_or(pg_interval::Interval::new(0, 30, 0));
     static ref BACKGROUND_TASK_TRACKER: TaskTracker = TaskTracker::new();
+    pub static ref RECONCILE_TAG_MATCHING_COUNTS_GRACE_PERIOD: pg_interval::Interval =
+        std::env::var("FILEBROKER_RECONCILE_TAG_MATCHING_COUNTS_GRACE_PERIOD")
+            .map(|value| pg_interval::Interval::from_iso(&value)
+                .expect("FILEBROKER_RECONCILE_TAG_MATCHING_COUNTS_GRACE_PERIOD is invalid"))
+            .unwrap_or(pg_interval::Interval::new(0, 0, 600_000_000));
 }
 
 pub fn submit_task(
@@ -223,6 +228,11 @@ pub fn clear_old_object_locks(tokio_handle: Handle) -> Result<(), Error> {
                 .await?;
 
             diesel::sql_query("UPDATE broker SET quota_audit_locked_at = NULL WHERE quota_audit_locked_at < NOW() - interval '1 day'")
+                .execute(connection)
+                .await
+                .map_err(retry_on_serialization_failure)?;
+
+            diesel::sql_query("UPDATE reconcile_tag_matching_counts_task SET locked_at = NULL WHERE locked_at < NOW() - interval '1 hour'")
                 .execute(connection)
                 .await
                 .map_err(retry_on_serialization_failure)?;
