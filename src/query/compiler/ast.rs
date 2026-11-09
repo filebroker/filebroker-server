@@ -1862,7 +1862,7 @@ fn is_tag_selective(
 ) -> bool {
     const COMMON_TAG_THRESHOLD: f64 = 0.05;
 
-    fn is_tag_selective(total_count: Option<i64>, matching_count: i64) -> bool {
+    fn is_count_selective(total_count: Option<i64>, matching_count: i64) -> bool {
         if let Some(total_count) = total_count
             && total_count > 0
         {
@@ -1874,13 +1874,13 @@ fn is_tag_selective(
 
     match scope {
         Scope::Post | Scope::TagAutoMatchPost | Scope::CollectionItem { .. } => {
-            is_tag_selective(population_estimates.posts, cached_tag.matching_post_count)
+            is_count_selective(population_estimates.posts, cached_tag.matching_post_count)
         }
-        Scope::Collection | Scope::TagAutoMatchCollection => is_tag_selective(
+        Scope::Collection | Scope::TagAutoMatchCollection => is_count_selective(
             population_estimates.post_collections,
             cached_tag.matching_post_collection_count,
         ),
-        Scope::UserGroup => is_tag_selective(
+        Scope::UserGroup => is_count_selective(
             population_estimates.user_groups,
             cached_tag.matching_user_group_count,
         ),
@@ -2555,7 +2555,7 @@ mod tests {
     // ExactTag identifiers must already be lowercase, as the lexer
     // normally performs that normalization.
     fn render(
-        cache: Arc<tag::cache::TagCacheSnapshot>,
+        cache: Arc<TagCacheSnapshot>,
         expression: TestExpression<'_>,
     ) -> (String, Vec<String>) {
         let mut parameters = QueryParameters {
@@ -2618,11 +2618,11 @@ mod tests {
         (sql, ctes)
     }
 
-    fn cache(rows: Vec<(i64, String, Vec<i64>)>) -> Arc<tag::cache::TagCacheSnapshot> {
-        Arc::new(tag::cache::TagCacheSnapshot::for_tests(rows))
+    fn cache(rows: Vec<(i64, String, Vec<i64>)>) -> Arc<TagCacheSnapshot> {
+        Arc::new(TagCacheSnapshot::for_tests(rows))
     }
 
-    fn expanded_cache(effective_count: usize) -> Arc<tag::cache::TagCacheSnapshot> {
+    fn expanded_cache(effective_count: usize) -> Arc<TagCacheSnapshot> {
         assert!(effective_count >= 1);
 
         let related = (1_000..1_000 + (effective_count - 1) as i64).collect();
