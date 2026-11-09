@@ -278,6 +278,7 @@ pub trait Visitor {
     fn visit_post_tag_node(
         &mut self,
         post_tag_node: &mut PostTagNode,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     );
@@ -413,6 +414,7 @@ impl Visitor for SemanticAnalysisVisitor {
     fn visit_post_tag_node(
         &mut self,
         _post_tag_node: &mut PostTagNode,
+        _scope: &Scope,
         _log: &mut Log,
         _location: Location,
     ) {
@@ -713,6 +715,7 @@ pub struct QueryBuilderVisitor<'p> {
     allow_or_expansion: bool,
     tag_cache: Arc<TagCacheSnapshot>,
     population_estimates: Arc<PopulationEstimates>,
+    allow_pk_array: bool,
 }
 
 impl<'p> QueryBuilderVisitor<'p> {
@@ -726,6 +729,7 @@ impl<'p> QueryBuilderVisitor<'p> {
             allow_or_expansion: true,
             tag_cache: tag::cache::snapshot(),
             population_estimates: tag::cache::population_estimates(),
+            allow_pk_array: true,
         }
     }
 }
@@ -1038,17 +1042,46 @@ impl Visitor for QueryBuilderVisitor<'_> {
     fn visit_post_tag_node(
         &mut self,
         post_tag_node: &mut PostTagNode,
+        scope: &Scope,
         _log: &mut Log,
         _location: Location,
     ) {
+        fn build_tag_match_sql(
+            base_table_name: &str,
+            tag_keys: &str,
+            use_pk_array: bool,
+        ) -> String {
+            if use_pk_array {
+                format!(
+                    "{base_table_name}.pk = ANY(ARRAY(SELECT fk_{base_table_name} FROM {base_table_name}_tag WHERE fk_tag IN({tag_keys})))"
+                )
+            } else {
+                format!(
+                    "EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN({tag_keys}))"
+                )
+            }
+        }
+
         let base_table_name = self.query_parameters.base_table_name;
         let cached_tag = self.tag_cache.get_by_name(&post_tag_node.identifier);
+
+        let use_pk_array = self.allow_pk_array
+            && cached_tag.as_ref().is_some_and(|cached_tag| {
+                should_use_pk_array(scope, cached_tag, &self.population_estimates)
+            });
+
         if let Some(cached_tag) = cached_tag {
             let effective_tag_pks = cached_tag.effective_pks();
             let effective_tag_count = effective_tag_pks.len();
+
             if effective_tag_count > 0 && effective_tag_count <= TAG_EXPANSION_LIMIT {
                 let effective_tag_pk_str = effective_tag_pks.into_iter().join(", ");
-                self.write_buff(&format!("EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN({effective_tag_pk_str}))"));
+
+                self.write_buff(&build_tag_match_sql(
+                    base_table_name,
+                    &effective_tag_pk_str,
+                    use_pk_array,
+                ));
                 return;
             }
         }
@@ -1068,7 +1101,13 @@ impl Visitor for QueryBuilderVisitor<'_> {
             });
 
         let cte_name = format!("tag_cte{}", cte.idx);
-        self.write_buff(&format!("EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN(SELECT tag_key FROM {cte_name}))"));
+        let tag_keys = format!("SELECT tag_key FROM {cte_name}");
+
+        self.write_buff(&build_tag_match_sql(
+            base_table_name,
+            &tag_keys,
+            use_pk_array,
+        ));
     }
 
     fn visit_binary_expression_node(
@@ -1233,12 +1272,19 @@ impl Visitor for QueryBuilderVisitor<'_> {
         // However, when OR expansion converts `@title = "foo" OR @artist = "bar"` to a candidate CTE
         // and adds a `WHERE NOT EXISTS(SELECT * FROM candidate_cte...)`, this would then include rows
         // where title is null because those rows are not in the candidate set.
+        //
+        // Also, do not allow PK candidate arrays inside NOT expressions. Negating a selective tag
+        // condition generally produces a non-selective predicate, and PostgreSQL may evaluate
+        // `pk <> ALL(ARRAY(...))` for many candidate rows, resulting in severe regressions.
         if unary_expression_node.op == Operator::Not {
-            let previous = self.allow_or_expansion;
+            let previous_allow_or_expansion = self.allow_or_expansion;
+            let previous_allow_pk_array = self.allow_pk_array;
             self.allow_or_expansion = false;
+            self.allow_pk_array = false;
             unary_expression_node.operand.accept(self, scope, log);
             self.write_buff(")");
-            self.allow_or_expansion = previous;
+            self.allow_or_expansion = previous_allow_or_expansion;
+            self.allow_pk_array = previous_allow_pk_array;
         } else {
             unary_expression_node.operand.accept(self, scope, log);
             self.write_buff(")");
@@ -1817,11 +1863,11 @@ impl NodeType for PostTagNode {
     fn accept(
         &mut self,
         visitor: &mut dyn Visitor,
-        _scope: &Scope,
+        scope: &Scope,
         log: &mut Log,
         location: Location,
     ) {
-        visitor.visit_post_tag_node(self, log, location);
+        visitor.visit_post_tag_node(self, scope, log, location);
     }
 }
 
@@ -1886,6 +1932,28 @@ fn is_tag_selective(
         ),
         Scope::Global => true,
     }
+}
+
+fn should_use_pk_array(
+    scope: &Scope,
+    cached_tag: &CachedTag,
+    population_estimates: &PopulationEstimates,
+) -> bool {
+    const MAX_ARRAY_MATCHING_ENTITIES: i64 = 50_000;
+
+    let matching_count = match scope {
+        Scope::Post | Scope::TagAutoMatchPost | Scope::CollectionItem { .. } => {
+            cached_tag.matching_post_count
+        }
+        Scope::Collection | Scope::TagAutoMatchCollection => {
+            cached_tag.matching_post_collection_count
+        }
+        Scope::UserGroup => cached_tag.matching_user_group_count,
+        Scope::Global => return false,
+    };
+
+    is_tag_selective(scope, cached_tag, population_estimates)
+        && (0..=MAX_ARRAY_MATCHING_ENTITIES).contains(&matching_count)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2589,6 +2657,7 @@ mod tests {
                     &mut PostTagNode {
                         identifier: name.to_owned(),
                     },
+                    &Scope::Post,
                     &mut log,
                     Location::default(),
                 );
