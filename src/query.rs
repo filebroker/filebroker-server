@@ -122,6 +122,11 @@ lazy_static! {
     pub static ref SEARCH_LIMIT: usize = (*MAX_DB_CONNECTIONS * 2 / 3).max(1);
     pub static ref EXPENSIVE_SEARCH_SEMAPHORE: Semaphore = Semaphore::new(*EXPENSIVE_SEARCH_LIMIT);
     pub static ref SEARCH_SEMAPHORE: Semaphore = Semaphore::new(*SEARCH_LIMIT);
+    pub static ref ENABLE_TAG_CACHE: bool = std::env::var("FILEBROKER_ENABLE_TAG_CACHE")
+        .map(|val| val
+            .parse::<bool>()
+            .expect("FILEBROKER_ENABLE_TAG_CACHE is not a valid boolean"))
+        .unwrap_or(true);
 }
 
 #[derive(Default, Deserialize, Validate)]
@@ -154,6 +159,7 @@ pub struct QueryParameters {
     pub predefined_where_conditions: Option<Vec<String>>,
     pub include_full_count: bool,
     pub privileged: bool,
+    pub enable_tag_cache: bool,
     pub get_secure_query_condition:
         fn(Option<&User>, &QueryParameters, &mut Vec<String>) -> Option<String>,
     /// Table referenced by attribute usages encountered in source query
@@ -1079,6 +1085,7 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: scope != &Scope::TagAutoMatchPost,
             privileged: scope == &Scope::TagAutoMatchPost,
+            enable_tag_cache: scope != &Scope::TagAutoMatchPost && *ENABLE_TAG_CACHE,
             get_secure_query_condition: perms::get_secure_query_condition_string_post,
             encountered_tables: HashSet::new(),
         }),
@@ -1191,6 +1198,7 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: scope != &Scope::TagAutoMatchCollection,
             privileged: scope == &Scope::TagAutoMatchCollection,
+            enable_tag_cache: scope != &Scope::TagAutoMatchCollection && *ENABLE_TAG_CACHE,
             get_secure_query_condition: perms::get_secure_query_condition_string_collection,
             encountered_tables: HashSet::new(),
         }),
@@ -1491,6 +1499,7 @@ pub fn prepare_query_parameters(
             )]),
             include_full_count: true,
             privileged: false,
+            enable_tag_cache: *ENABLE_TAG_CACHE,
             get_secure_query_condition: perms::get_secure_query_condition_string_post,
             encountered_tables: HashSet::new(),
         }),
@@ -1546,6 +1555,7 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: true,
             privileged: false,
+            enable_tag_cache: *ENABLE_TAG_CACHE,
             get_secure_query_condition: |user, query_parameters, _| {
                 if query_parameters.privileged
                     || (user.is_some() && user.as_ref().unwrap().is_admin)

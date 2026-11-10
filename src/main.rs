@@ -1,6 +1,6 @@
 #[macro_use]
 extern crate diesel;
-use crate::server::run_warp_server;
+use crate::{query::ENABLE_TAG_CACHE, server::run_warp_server};
 use chrono::Utc;
 use clokwerk::{Job, Scheduler};
 use diesel::{ConnectionError, ConnectionResult};
@@ -157,15 +157,21 @@ fn main() {
         log::info!("Done running diesel migrations");
     }
 
-    let task_scheduler = start_task_scheduler_runtime(configure_scheduler());
-
     let http_worker_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("Failed to start http server worker runtime");
+
     let http_worker_rt = Arc::new(http_worker_rt);
-    setup_tokio_runtime(http_worker_rt.clone());
-    let _ = task_scheduler.join();
+    // pass an Arc clone instead of passing ownership of http_worker_rt into setup_tokio_runtime
+    // so that when the server is shut down, http_worker_rt is dropped here on the main thread,
+    // since tokio runtimes cannot be dropped from within an async context
+    match setup_tokio_runtime(http_worker_rt.clone()) {
+        Some(task_scheduler) => {
+            let _ = task_scheduler.join();
+        }
+        None => std::process::exit(1),
+    }
 }
 
 pub async fn acquire_db_connection() -> Result<DbConnection, Error> {
@@ -375,7 +381,15 @@ async fn recompile_tag_auto_match_conditions() -> Result<(), Error> {
 
 /// Start a tokio runtime that runs a warp server.
 #[tokio::main(flavor = "current_thread")]
-async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
+async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) -> Option<JoinHandle<()>> {
+    if *ENABLE_TAG_CACHE {
+        log::info!("Initializing tag cache");
+        if let Err(error) = tag::cache::initialize().await {
+            log::error!("Failed to initialize tag cache: {error}");
+            return None;
+        }
+    }
+
     #[cfg(feature = "auto_migration")]
     {
         log::info!("Running startup migration tasks");
@@ -385,27 +399,21 @@ async fn setup_tokio_runtime(http_worker_rt: Arc<Runtime>) {
                     log::error!(
                         "Error running startup migration tasks: Failed to compile query due to error in phase {s}: {e:?}"
                     );
-                    crate::server::shutdown_server().await;
-                    return;
                 }
                 _ => {
                     log::error!("Error running startup migration tasks: {e}");
-                    crate::server::shutdown_server().await;
-                    return;
                 }
             }
+            return None;
         }
         log::info!("Done running startup migration tasks");
     }
 
-    log::info!("Initializing tag cache");
-    if let Err(error) = tag::cache::initialize().await {
-        log::error!("Failed to initialize tag cache: {error}");
-        server::shutdown_server().await;
-        return;
-    }
+    let task_scheduler = start_task_scheduler_runtime(configure_scheduler());
 
     run_warp_server(http_worker_rt).await;
+
+    Some(task_scheduler)
 }
 
 // enable TLS for AsyncPgConnection, see https://github.com/weiznich/diesel_async/blob/main/examples/postgres/pooled-with-rustls
@@ -505,12 +513,14 @@ fn configure_scheduler() -> Scheduler<Utc> {
             task::tag_tasks::run_reconcile_tag_matching_counts_tasks,
         );
     });
-    scheduler.every(clokwerk::Interval::Minutes(30)).run(|| {
-        task::submit_task(
-            "run_tag_cache_maintenance",
-            task::tag_tasks::run_tag_cache_maintenance,
-        );
-    });
+    if *ENABLE_TAG_CACHE {
+        scheduler.every(clokwerk::Interval::Minutes(30)).run(|| {
+            task::submit_task(
+                "run_tag_cache_maintenance",
+                task::tag_tasks::run_tag_cache_maintenance,
+            );
+        });
+    }
     scheduler
         .every(clokwerk::Interval::Days(1))
         .at("03:00")

@@ -137,4 +137,9 @@ if you send your mails through an SMTP relay that manages DKIM for you this is r
 
 `FILEBROKER_HTTP_SHUTDOWN_TIMEOUT_SECONDS` (optional, u64): The number of seconds to wait for HTTP server to shutdown gracefully before forcefully shutting down. Defaults to 1800 seconds (30 minutes).
 
+`FILEBROKER_ENABLE_TAG_CACHE` (optional, boolean): Enables managing a cache to reflect the entire global tag hierarchy.
+This enables the query compiler to embed the effective tag pks in the SQL query by resolving descendant and alias tags from the cache.
+This enables the Postgres query planner to choose better query plans by being aware of the specific tag PKs at planning time.
+Enabled by default.
+
 Note that CORS headers are only set when running debug binaries for development, for production you need to set up nginx.

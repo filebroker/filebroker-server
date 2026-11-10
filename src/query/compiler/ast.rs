@@ -713,13 +713,14 @@ pub struct QueryBuilderVisitor<'p> {
     // query_parameters.encountered_tables for the outer query.
     local_encountered_tables: Option<HashSet<&'static str>>,
     allow_or_expansion: bool,
-    tag_cache: Arc<TagCacheSnapshot>,
-    population_estimates: Arc<PopulationEstimates>,
+    tag_cache: Option<Arc<TagCacheSnapshot>>,
+    population_estimates: Option<Arc<PopulationEstimates>>,
     allow_pk_array: bool,
 }
 
 impl<'p> QueryBuilderVisitor<'p> {
     pub fn new(query_parameters: &'p mut QueryParameters) -> Self {
+        let enable_tag_cache = query_parameters.enable_tag_cache;
         QueryBuilderVisitor {
             ctes: HashMap::new(),
             where_expressions: Vec::new(),
@@ -727,8 +728,16 @@ impl<'p> QueryBuilderVisitor<'p> {
             buffer: None,
             local_encountered_tables: None,
             allow_or_expansion: true,
-            tag_cache: tag::cache::snapshot(),
-            population_estimates: tag::cache::population_estimates(),
+            tag_cache: if enable_tag_cache {
+                Some(tag::cache::snapshot())
+            } else {
+                None
+            },
+            population_estimates: if enable_tag_cache {
+                Some(tag::cache::population_estimates())
+            } else {
+                None
+            },
             allow_pk_array: true,
         }
     }
@@ -1063,12 +1072,18 @@ impl Visitor for QueryBuilderVisitor<'_> {
         }
 
         let base_table_name = self.query_parameters.base_table_name;
-        let cached_tag = self.tag_cache.get_by_name(&post_tag_node.identifier);
+        let cached_tag = self
+            .tag_cache
+            .as_ref()
+            .and_then(|tag_cache| tag_cache.get_by_name(&post_tag_node.identifier));
 
         let use_pk_array = self.allow_pk_array
-            && cached_tag.as_ref().is_some_and(|cached_tag| {
-                should_use_pk_array(scope, cached_tag, &self.population_estimates)
-            });
+            && cached_tag
+                .as_ref()
+                .zip(self.population_estimates.as_ref())
+                .is_some_and(|(cached_tag, population_estimates)| {
+                    should_use_pk_array(scope, cached_tag, population_estimates)
+                });
 
         if let Some(cached_tag) = cached_tag {
             let effective_tag_pks = cached_tag.effective_pks();
@@ -1366,62 +1381,90 @@ impl Visitor for QueryBuilderVisitor<'_> {
         _log: &mut Log,
         _location: Location,
     ) {
-        let search_term = fulltext_node.search_term.split_whitespace().join(" ");
-        let use_trigram_search = search_term.chars().filter(|c| !c.is_whitespace()).count() >= 3;
+        fn apply_tag_fuzzy_match_cte(
+            visitor: &mut QueryBuilderVisitor,
+            search_term: &str,
+            use_trigram_search: bool,
+        ) -> String {
+            let search_term = sanitize_string_literal(search_term);
 
-        let matching_tags = self.tag_cache.find_fuzzy(&search_term);
-
-        let has_common_tag = matching_tags
-            .iter()
-            .any(|tag| !is_tag_selective(scope, tag, &self.population_estimates));
-
-        let mut effective_tag_pks: Vec<i64> = matching_tags
-            .into_iter()
-            .flat_map(|tag| tag.effective_pks())
-            .collect();
-        effective_tag_pks.sort_unstable();
-        effective_tag_pks.dedup();
-
-        let base_table_name = self.query_parameters.base_table_name;
-        let fulltext_table = scope.get_fulltext_table().unwrap_or("--invalid--");
-
-        let search_term = sanitize_string_literal(&search_term);
-
-        // Common tags are checked against individual candidate rows instead of enumerating all matching posts in the fulltext CTE.
-        let use_correlated_tag_lookup = has_common_tag && !effective_tag_pks.is_empty();
-
-        let tag_pks_expression = if effective_tag_pks.is_empty() {
-            String::from("NULL")
-        } else if effective_tag_pks.len() <= TAG_EXPANSION_LIMIT {
-            effective_tag_pks.into_iter().join(", ")
-        } else {
-            let idx = self.ctes.len();
+            let idx = visitor.ctes.len();
             let key = format!("fts'tag:{search_term}");
 
             let condition = if use_trigram_search {
                 format!("'{search_term}' <<% tag.tag_name")
             } else {
-                format!("lower(tag.tag_name) = '{search_term}'")
+                format!("lower(tag.tag_name) = lower('{search_term}')")
             };
 
-            let cte = self.ctes.entry(key).or_insert_with(|| Cte {
+            let cte = visitor.ctes.entry(key).or_insert_with(|| Cte {
                 idx,
                 expression: build_tag_search_cte(&format!("tag_fuzzy_cte{idx}"), &condition),
             });
 
             format!("SELECT tag_key FROM tag_fuzzy_cte{}", cte.idx)
+        }
+
+        let search_term = fulltext_node.search_term.split_whitespace().join(" ");
+        let use_trigram_search = search_term.chars().filter(|c| !c.is_whitespace()).count() >= 3;
+
+        let base_table_name = self.query_parameters.base_table_name;
+        let fulltext_table = scope.get_fulltext_table().unwrap_or("--invalid--");
+
+        let (tag_pks_expression, correlated_tag_predicate) = if let Some(ref tag_cache) =
+            self.tag_cache
+        {
+            let matching_tags = tag_cache.find_fuzzy(&search_term);
+
+            let has_common_tag =
+                self.population_estimates
+                    .as_ref()
+                    .is_some_and(|population_estimates| {
+                        matching_tags
+                            .iter()
+                            .any(|tag| !is_tag_selective(scope, tag, population_estimates))
+                    });
+
+            let mut effective_tag_pks: Vec<i64> = matching_tags
+                .into_iter()
+                .flat_map(|tag| tag.effective_pks())
+                .collect();
+            effective_tag_pks.sort_unstable();
+            effective_tag_pks.dedup();
+
+            // Common tags are checked against individual candidate rows instead of enumerating all matching posts in the fulltext CTE.
+            let use_correlated_tag_lookup = has_common_tag && !effective_tag_pks.is_empty();
+
+            let tag_pks_expression = if effective_tag_pks.is_empty() {
+                String::from("NULL")
+            } else if effective_tag_pks.len() <= TAG_EXPANSION_LIMIT {
+                effective_tag_pks.into_iter().join(", ")
+            } else {
+                apply_tag_fuzzy_match_cte(self, &search_term, use_trigram_search)
+            };
+
+            if use_correlated_tag_lookup {
+                (
+                    None,
+                    Some(format!(
+                        "EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN ({tag_pks_expression}))"
+                    )),
+                )
+            } else {
+                (Some(tag_pks_expression), None)
+            }
+        } else {
+            (
+                Some(apply_tag_fuzzy_match_cte(
+                    self,
+                    &search_term,
+                    use_trigram_search,
+                )),
+                None,
+            )
         };
 
-        let (tag_pks_expression, correlated_tag_predicate) = if use_correlated_tag_lookup {
-            (
-                None,
-                Some(format!(
-                    "EXISTS(SELECT * FROM {base_table_name}_tag WHERE fk_{base_table_name} = {base_table_name}.pk AND fk_tag IN ({tag_pks_expression}))"
-                )),
-            )
-        } else {
-            (Some(tag_pks_expression), None)
-        };
+        let search_term = sanitize_string_literal(&search_term);
 
         let fulltext_cte_idx = {
             let idx = self.ctes.len();
@@ -2641,12 +2684,13 @@ mod tests {
             predefined_where_conditions: None,
             include_full_count: false,
             privileged: true,
+            enable_tag_cache: true,
             get_secure_query_condition: |_, _, _| None,
             encountered_tables: HashSet::new(),
         };
 
         let mut visitor = QueryBuilderVisitor::new(&mut parameters);
-        visitor.tag_cache = cache;
+        visitor.tag_cache = Some(cache);
         visitor.buffer = Some(String::new());
 
         let mut log = Log::default();
@@ -2810,5 +2854,48 @@ mod tests {
 
         // Missing statistics retain the conservative fallback.
         assert!(is_tag_selective(&Scope::UserGroup, &tag, &estimates));
+    }
+
+    #[test]
+    fn short_fulltext_search_is_case_insensitive_without_tag_cache() {
+        use crate::query::compiler::{Junction, compile_ast, compile_conditions};
+        use crate::query::{QueryParametersFilter, prepare_query_parameters};
+
+        let query = r#"~"AI""#;
+
+        // Verify that the lexer/parser preserves the case of string tokens.
+        let mut log = Log::default();
+        let ast = compile_ast(query.to_owned(), &mut log, true).unwrap();
+
+        let statement = ast.node_type.statements[0]
+            .node_type
+            .downcast_ref::<ExpressionStatement>()
+            .unwrap();
+
+        let fulltext_node = statement
+            .expression_node
+            .node_type
+            .downcast_ref::<FulltextNode>()
+            .unwrap();
+
+        assert_eq!(fulltext_node.search_term, "AI");
+
+        // Compile the original query without using the tag cache.
+        let mut parameters =
+            prepare_query_parameters(&QueryParametersFilter::default(), &None, &Scope::Post)
+                .unwrap();
+        parameters.enable_tag_cache = false;
+
+        let sql = compile_conditions(
+            vec![query.to_owned()],
+            Junction::And,
+            parameters,
+            &Scope::Post,
+            &None,
+        )
+        .unwrap();
+
+        assert!(sql.contains("lower(tag.tag_name) = lower('AI')"), "{sql}");
+        assert!(sql.contains("SELECT tag_key FROM tag_fuzzy_cte0"), "{sql}");
     }
 }
