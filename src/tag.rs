@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use diesel::sql_types::{Array, BigInt, Integer};
 use diesel::{
     BoolExpressionMethods, ExpressionMethods, JoinOnDsl, OptionalExtension,
     PgTextExpressionMethods, QueryDsl, dsl::exists,
@@ -8,6 +9,7 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::{
     cmp::{Ordering, Reverse},
     collections::HashMap,
@@ -50,70 +52,73 @@ use crate::model::{TagCategory, User, UserPublic};
 use crate::schema::{registered_user, tag_category};
 pub(crate) use get_source_object_tag;
 
-/// Filter redundant tags by removing tags that are a parent of another included tag or a shorter alias
-/// for another included tag.
+#[derive(QueryableByName)]
+struct RedundantTagPk {
+    #[diesel(sql_type = BigInt)]
+    pk: i64,
+}
+
+/// Filter redundant tags by removing tags that are a parent of another included
+/// tag or an alias of another included tag. For aliases, prefer the longest name,
+/// breaking ties by the lowest PK.
 pub async fn filter_redundant_tags(
     tags: &mut Vec<Tag>,
     connection: &mut AsyncPgConnection,
 ) -> Result<(), Error> {
-    let mut selected_tags = Vec::new();
-    for tag in tags.iter() {
-        selected_tags.push(get_tag_hierarchy_information(tag, connection).await?);
+    if tags.len() < 2 {
+        return Ok(());
     }
 
-    tags.retain(|tag| {
-        selected_tags.iter().all(|other| {
-            if tag.pk == other.tag.pk {
-                return true;
-            }
+    let tag_pks = tags.iter().map(|tag| tag.pk).collect::<Vec<_>>();
+    let name_lengths = tags
+        .iter()
+        .map(|tag| tag.tag_name.len() as i32)
+        .collect::<Vec<_>>();
 
-            let other_tag = &other.tag;
-            let other_aliases = &other.tag_aliases;
-            let is_parent = other.parent_depth_map.contains_key(&tag.pk);
+    let redundant_tags = diesel::sql_query(
+        r#"
+        WITH selected_tags AS (
+            SELECT pk, name_length
+            FROM unnest($1::BIGINT[], $2::INTEGER[])
+                AS selected(pk, name_length)
+        )
+        SELECT closure.fk_parent AS pk
+        FROM tag_closure_table AS closure
+        INNER JOIN selected_tags AS parent
+            ON parent.pk = closure.fk_parent
+        INNER JOIN selected_tags AS child
+            ON child.pk = closure.fk_child
+        WHERE closure.depth > 0
 
-            let is_shorter_alias = other_aliases
-                .iter()
-                .any(|alias| alias.pk == tag.pk && tag.tag_name.len() < other_tag.tag_name.len());
+        UNION
 
-            !is_parent && !is_shorter_alias
-        })
-    });
+        SELECT CASE
+            WHEN source_tag.name_length < target_tag.name_length
+                OR (
+                    source_tag.name_length = target_tag.name_length
+                    AND source_tag.pk > target_tag.pk
+                )
+                THEN source_tag.pk
+            ELSE target_tag.pk
+        END AS pk
+        FROM tag_alias AS aliases
+        INNER JOIN selected_tags AS source_tag
+            ON source_tag.pk = aliases.fk_source
+        INNER JOIN selected_tags AS target_tag
+            ON target_tag.pk = aliases.fk_target
+        "#,
+    )
+    .bind::<Array<BigInt>, _>(tag_pks)
+    .bind::<Array<Integer>, _>(name_lengths)
+    .load::<RedundantTagPk>(connection)
+    .await?
+    .into_iter()
+    .map(|row| row.pk)
+    .collect::<HashSet<_>>();
+
+    tags.retain(|tag| !redundant_tags.contains(&tag.pk));
 
     Ok(())
-}
-
-pub struct TagHierarchyInformation {
-    pub tag: Tag,
-    /// Mapping for the parent tag pks to their respective depth
-    pub parent_depth_map: HashMap<i64, i32>,
-    pub tag_aliases: Vec<Tag>,
-}
-
-pub async fn get_tag_hierarchy_information(
-    tag: &Tag,
-    connection: &mut AsyncPgConnection,
-) -> Result<TagHierarchyInformation, Error> {
-    let tag_closure_table = tag_closure_table::table
-        .filter(
-            tag_closure_table::fk_child
-                .eq(tag.pk)
-                .and(tag_closure_table::depth.gt(0)),
-        )
-        .load::<TagClosureTable>(connection)
-        .await?;
-
-    let mut parent_depth_map = HashMap::new();
-    for tag_closure in tag_closure_table.iter() {
-        parent_depth_map.insert(tag_closure.fk_parent, tag_closure.depth);
-    }
-
-    let tag_aliases = get_tag_aliases(tag.pk, connection).await?;
-
-    Ok(TagHierarchyInformation {
-        tag: tag.clone(),
-        parent_depth_map,
-        tag_aliases,
-    })
 }
 
 #[derive(Serialize)]
