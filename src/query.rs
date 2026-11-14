@@ -142,6 +142,19 @@ pub struct QueryParametersFilter {
     pub writable_only: Option<bool>,
     #[validate(length(max = 1024))]
     pub constriction: Option<String>,
+    pub access_filter: Option<AccessFilter>,
+}
+
+/// Represents the different access levels for search queries. Each level includes the lower levels,
+/// meaning All sees all results the user is allowed to access, Shared sees shared and own
+/// results and Own only sees results belonging to the user.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessFilter {
+    #[default]
+    All,
+    Shared,
+    Own,
 }
 
 pub struct QueryParameters {
@@ -159,6 +172,7 @@ pub struct QueryParameters {
     pub predefined_where_conditions: Option<Vec<String>>,
     pub include_full_count: bool,
     pub privileged: bool,
+    pub access_filter: AccessFilter,
     pub enable_tag_cache: bool,
     pub get_secure_query_condition:
         fn(Option<&User>, &QueryParameters, &mut Vec<String>) -> Option<String>,
@@ -258,6 +272,10 @@ pub async fn search_handler(
 
     let query_parameters = prepare_query_parameters(&query_parameters_filter, &user, &scope)?;
     let max_limit = query_parameters.pagination.as_ref().map(|p| p.max_limit);
+
+    if user.is_none() && query_parameters.access_filter != AccessFilter::All {
+        return Err(warp::reject::custom(Error::MissingAuthHeaderError));
+    }
 
     let CompiledQuery {
         source_query,
@@ -744,6 +762,7 @@ pub async fn find_all_posts(
         shuffle: None,
         writable_only: None,
         constriction: None,
+        access_filter: None,
     };
     let mut query_parameters = prepare_query_parameters(&query_parameters_filter, user, &scope)?;
     query_parameters.pagination = Some(QueryBuilderPagination {
@@ -881,6 +900,7 @@ pub fn prepare_query_parameters(
     scope: &Scope,
 ) -> Result<QueryParameters, Error> {
     let mut variables = get_global_variables();
+    let access_filter = query_parameters_filter.access_filter.unwrap_or_default();
 
     if let Some(user) = user {
         variables.insert(String::from("current_user_key"), user.pk.to_string());
@@ -1085,6 +1105,7 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: scope != &Scope::TagAutoMatchPost,
             privileged: scope == &Scope::TagAutoMatchPost,
+            access_filter,
             enable_tag_cache: scope != &Scope::TagAutoMatchPost && *ENABLE_TAG_CACHE,
             get_secure_query_condition: perms::get_secure_query_condition_string_post,
             encountered_tables: HashSet::new(),
@@ -1198,6 +1219,7 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: scope != &Scope::TagAutoMatchCollection,
             privileged: scope == &Scope::TagAutoMatchCollection,
+            access_filter,
             enable_tag_cache: scope != &Scope::TagAutoMatchCollection && *ENABLE_TAG_CACHE,
             get_secure_query_condition: perms::get_secure_query_condition_string_collection,
             encountered_tables: HashSet::new(),
@@ -1499,6 +1521,7 @@ pub fn prepare_query_parameters(
             )]),
             include_full_count: true,
             privileged: false,
+            access_filter,
             enable_tag_cache: *ENABLE_TAG_CACHE,
             get_secure_query_condition: perms::get_secure_query_condition_string_post,
             encountered_tables: HashSet::new(),
@@ -1555,20 +1578,33 @@ pub fn prepare_query_parameters(
             predefined_where_conditions: None,
             include_full_count: true,
             privileged: false,
+            access_filter,
             enable_tag_cache: *ENABLE_TAG_CACHE,
             get_secure_query_condition: |user, query_parameters, _| {
-                if query_parameters.privileged
-                    || (user.is_some() && user.as_ref().unwrap().is_admin)
+                if (query_parameters.privileged
+                    || (user.is_some() && user.as_ref().unwrap().is_admin))
+                    && query_parameters.access_filter == AccessFilter::All
                 {
                     return None;
                 }
+
+                if user.is_none() && query_parameters.access_filter != AccessFilter::All {
+                    return Some(String::from("FALSE"));
+                }
+
                 let user_key = user
                     .as_ref()
                     .map(|u| u.pk.to_string())
                     .unwrap_or_else(|| String::from("NULL"));
 
+                if query_parameters.access_filter == AccessFilter::Own {
+                    return Some(format!("user_group.fk_owner = {user_key}"));
+                }
+
                 let (group_access_write_cond, public_cond) = if query_parameters.writable_only {
                     ("user_group_membership.administrator", "FALSE")
+                } else if query_parameters.access_filter == AccessFilter::Shared {
+                    ("TRUE", "FALSE")
                 } else {
                     ("TRUE", "user_group.public")
                 };
