@@ -526,6 +526,22 @@ diesel::table! {
     use diesel::sql_types::*;
     use super::sql_types::StoredQueryScope;
 
+    stored_constriction (pk) {
+        pk -> Int8,
+        fk_user -> Nullable<Int8>,
+        scope -> StoredQueryScope,
+        #[max_length = 255]
+        name -> Varchar,
+        #[max_length = 1024]
+        condition -> Varchar,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::StoredQueryScope;
+
     stored_query (pk) {
         pk -> Int8,
         fk_user -> Int8,
@@ -805,6 +821,7 @@ diesel::joinable!(reconcile_tag_matching_counts_task -> tag (fk_tag));
 diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
 diesel::joinable!(s3_object_metadata -> s3_object (object_key));
+diesel::joinable!(stored_constriction -> registered_user (fk_user));
 diesel::joinable!(stored_query -> registered_user (fk_user));
 diesel::joinable!(tag -> tag_category (tag_category));
 diesel::joinable!(tag_edit_history -> registered_user (fk_edit_user));
@@ -859,6 +876,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     registered_user,
     s3_object,
     s3_object_metadata,
+    stored_constriction,
     stored_query,
     tag,
     tag_alias,

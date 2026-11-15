@@ -756,6 +756,31 @@ pub fn build_warp_filter() -> impl Filter<Extract = (impl Reply,), Error = warp:
         .and(auth::with_user())
         .and_then(query::stored::delete_stored_query_handler);
 
+    let get_stored_constrictions_route = warp::path("get-stored-constrictions")
+        .and(warp::get())
+        .and(auth::with_user_optional())
+        .and(warp::query::<query::stored::GetStoredConstrictionsFilter>())
+        .and_then(query::stored::get_stored_constrictions_handler);
+
+    let create_stored_constriction_route = warp::path("create-stored-constriction")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(query::stored::create_stored_constriction_handler);
+
+    let edit_stored_constriction_route = warp::path("edit-stored-constriction")
+        .and(warp::patch())
+        .and(warp::path::param::<i64>())
+        .and(warp::body::json())
+        .and(auth::with_user())
+        .and_then(query::stored::edit_stored_constriction_handler);
+
+    let delete_stored_constriction_route = warp::path("delete-stored-constriction")
+        .and(warp::delete())
+        .and(warp::path::param::<i64>())
+        .and(auth::with_user())
+        .and_then(query::stored::delete_stored_constriction_handler);
+
     let auth_routes = login_route
         .or(refresh_login_route)
         .or(refresh_token_route)
@@ -784,7 +809,11 @@ pub fn build_warp_filter() -> impl Filter<Extract = (impl Reply,), Error = warp:
         .or(record_recent_query_route)
         .or(save_query_route)
         .or(edit_saved_query_route)
-        .or(delete_stored_query_route);
+        .or(delete_stored_query_route)
+        .or(get_stored_constrictions_route)
+        .or(create_stored_constriction_route)
+        .or(edit_stored_constriction_route)
+        .or(delete_stored_constriction_route);
 
     let post_routes = create_post_route
         .or(get_post_route)

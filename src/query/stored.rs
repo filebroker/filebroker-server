@@ -1,4 +1,6 @@
-use diesel::{ExpressionMethods, OptionalExtension, QueryDsl};
+use diesel::{
+    BoolExpressionMethods, ExpressionMethods, IntoSql, OptionalExtension, QueryDsl, sql_types::Bool,
+};
 use diesel_async::RunQueryDsl;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -12,14 +14,18 @@ use super::{
 use crate::{
     acquire_db_connection,
     error::Error,
-    model::{NewStoredQuery, StoredQuery, StoredQueryScope, User},
+    model::{
+        NewStoredConstriction, NewStoredQuery, StoredConstriction, StoredQuery, StoredQueryScope,
+        User,
+    },
     run_retryable_transaction, run_serializable_transaction,
-    schema::stored_query,
+    schema::{stored_constriction, stored_query},
     util::{NOT_BLANK_REGEX, string_value_updated},
 };
 
 const RECENT_QUERY_LIMIT: i64 = 10;
 const MAX_SAVED_QUERIES: i64 = 100;
+const MAX_PERSONAL_CONSTRICTIONS_PER_SCOPE: i64 = 10;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -386,18 +392,290 @@ fn validate_advanced_query(
         return Ok(());
     };
 
-    let scope = match stored_scope {
-        StoredQueryScope::Post => Scope::Post,
-        StoredQueryScope::Collection => Scope::Collection,
-        StoredQueryScope::CollectionItem => Scope::CollectionItem { collection_pk: -1 },
-        StoredQueryScope::UserGroup => Scope::UserGroup,
-    };
-
+    let scope = stored_scope_to_compiler_scope(stored_scope);
     let user = Some(user.clone());
     let query_parameters =
         prepare_query_parameters(&QueryParametersFilter::default(), &user, &scope)?;
 
     compiler::compile_sql(Some(query.clone()), query_parameters, &scope, &user)?;
+
+    Ok(())
+}
+
+fn stored_scope_to_compiler_scope(stored_scope: StoredQueryScope) -> Scope {
+    match stored_scope {
+        StoredQueryScope::Post => Scope::Post,
+        StoredQueryScope::Collection => Scope::Collection,
+        StoredQueryScope::CollectionItem => Scope::CollectionItem { collection_pk: -1 },
+        StoredQueryScope::UserGroup => Scope::UserGroup,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct GetStoredConstrictionsFilter {
+    pub scope: Option<StoredQueryScope>,
+}
+
+pub async fn get_stored_constrictions_handler(
+    user: Option<User>,
+    filter: GetStoredConstrictionsFilter,
+) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection().await?;
+
+    let mut query = stored_constriction::table.into_boxed();
+
+    query = if let Some(user) = user {
+        query.filter(
+            stored_constriction::fk_user
+                .eq(user.pk)
+                .or(stored_constriction::fk_user.is_null()),
+        )
+    } else {
+        query.filter(stored_constriction::fk_user.is_null())
+    };
+
+    if let Some(scope) = filter.scope {
+        query = query.filter(stored_constriction::scope.eq(scope));
+    }
+
+    let constrictions = query
+        .order_by((
+            stored_constriction::scope.asc(),
+            stored_constriction::name.asc(),
+            stored_constriction::pk.asc(),
+        ))
+        .load::<StoredConstriction>(&mut connection)
+        .await
+        .map_err(Error::from)?;
+
+    Ok(warp::reply::json(&constrictions))
+}
+
+#[derive(Deserialize, Validate)]
+pub struct CreateStoredConstrictionRequest {
+    pub scope: StoredQueryScope,
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
+    pub name: String,
+    #[validate(length(min = 1, max = 1024), regex(path = *NOT_BLANK_REGEX))]
+    pub condition: String,
+    #[serde(default)]
+    pub is_global: bool,
+}
+
+pub async fn create_stored_constriction_handler(
+    request: CreateStoredConstrictionRequest,
+    user: User,
+) -> Result<impl Reply, Rejection> {
+    request.validate().map_err(|e| {
+        warp::reject::custom(Error::InvalidRequestInputError(format!(
+            "Validation failed for CreateStoredConstrictionRequest: {e}"
+        )))
+    })?;
+
+    if request.is_global && !user.is_admin {
+        return Err(warp::reject::custom(Error::UserNotAdmin));
+    }
+
+    validate_stored_constriction_condition(&request.condition, request.scope, &user)
+        .map_err(warp::reject::custom)?;
+
+    let mut connection = acquire_db_connection().await?;
+    let stored_constriction = run_serializable_transaction(&mut connection, async |connection| {
+        let stored_constriction = diesel::insert_into(stored_constriction::table)
+            .values(&NewStoredConstriction {
+                fk_user: if request.is_global {
+                    None
+                } else {
+                    Some(user.pk)
+                },
+                scope: request.scope,
+                name: request.name.clone(),
+                condition: request.condition.clone(),
+            })
+            .get_result::<StoredConstriction>(connection)
+            .await?;
+
+        if !request.is_global {
+            let count = stored_constriction::table
+                .filter(stored_constriction::fk_user.eq(user.pk))
+                .filter(stored_constriction::scope.eq(request.scope))
+                .count()
+                .get_result::<i64>(connection)
+                .await?;
+
+            if count > MAX_PERSONAL_CONSTRICTIONS_PER_SCOPE {
+                return Err(Error::TooManyResultsError(
+                    count as u32,
+                    MAX_PERSONAL_CONSTRICTIONS_PER_SCOPE as u32,
+                )
+                .into());
+            }
+        }
+
+        Ok(stored_constriction)
+    })
+    .await?;
+
+    Ok(warp::reply::json(&stored_constriction))
+}
+
+#[derive(Deserialize, Validate)]
+pub struct EditStoredConstrictionRequest {
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
+    pub name: Option<String>,
+    #[validate(length(min = 1, max = 1024), regex(path = *NOT_BLANK_REGEX))]
+    pub condition: Option<String>,
+}
+
+#[derive(AsChangeset)]
+#[diesel(table_name = stored_constriction)]
+pub struct StoredConstrictionUpdateOptional {
+    pub name: Option<String>,
+    pub condition: Option<String>,
+}
+
+pub struct StoredConstrictionUpdateFieldChanges {
+    pub name_changed: bool,
+    pub condition_changed: bool,
+}
+
+impl StoredConstrictionUpdateFieldChanges {
+    pub fn has_changes(&self) -> bool {
+        self.name_changed || self.condition_changed
+    }
+}
+
+impl StoredConstrictionUpdateOptional {
+    pub fn get_field_changes(
+        &self,
+        curr_value: &StoredConstriction,
+    ) -> StoredConstrictionUpdateFieldChanges {
+        StoredConstrictionUpdateFieldChanges {
+            name_changed: string_value_updated(Some(&curr_value.name), self.name.as_deref()),
+            condition_changed: string_value_updated(
+                Some(&curr_value.condition),
+                self.condition.as_deref(),
+            ),
+        }
+    }
+
+    pub fn has_changes(&self, curr_value: &StoredConstriction) -> bool {
+        self.get_field_changes(curr_value).has_changes()
+    }
+}
+
+pub async fn edit_stored_constriction_handler(
+    pk: i64,
+    request: EditStoredConstrictionRequest,
+    user: User,
+) -> Result<impl Reply, Rejection> {
+    request.validate().map_err(|e| {
+        warp::reject::custom(Error::InvalidRequestInputError(format!(
+            "Validation failed for EditStoredConstrictionRequest: {e}"
+        )))
+    })?;
+
+    let mut connection = acquire_db_connection().await?;
+    let stored_constriction = run_retryable_transaction(&mut connection, async |connection| {
+        let curr_value = stored_constriction::table
+            .filter(stored_constriction::pk.eq(pk))
+            .filter(
+                stored_constriction::fk_user
+                    .eq(user.pk)
+                    .or(stored_constriction::fk_user
+                        .is_null()
+                        .and(user.is_admin.into_sql::<Bool>())),
+            )
+            .for_update()
+            .get_result::<StoredConstriction>(connection)
+            .await
+            .optional()?
+            .ok_or(Error::NotFoundError)?;
+
+        let update = StoredConstrictionUpdateOptional {
+            name: request.name.clone(),
+            condition: request.condition.clone(),
+        };
+
+        let field_changes = update.get_field_changes(&curr_value);
+
+        if !field_changes.has_changes() {
+            return Ok(curr_value);
+        }
+
+        if field_changes.condition_changed
+            && let Some(ref condition) = request.condition
+        {
+            validate_stored_constriction_condition(condition, curr_value.scope, &user)?;
+        }
+
+        let updated = diesel::update(stored_constriction::table)
+            .filter(stored_constriction::pk.eq(pk))
+            .set(update)
+            .get_result::<StoredConstriction>(connection)
+            .await?;
+
+        Ok(updated)
+    })
+    .await?;
+
+    Ok(warp::reply::json(&stored_constriction))
+}
+
+pub async fn delete_stored_constriction_handler(
+    pk: i64,
+    user: User,
+) -> Result<impl Reply, Rejection> {
+    let mut connection = acquire_db_connection().await?;
+
+    let deleted = diesel::delete(stored_constriction::table)
+        .filter(stored_constriction::pk.eq(pk))
+        .filter(
+            stored_constriction::fk_user
+                .eq(user.pk)
+                .or(stored_constriction::fk_user
+                    .is_null()
+                    .and(user.is_admin.into_sql::<Bool>())),
+        )
+        .execute(&mut connection)
+        .await
+        .map_err(Error::from)?;
+
+    if deleted == 0 {
+        return Err(warp::reject::custom(Error::NotFoundError));
+    }
+
+    Ok(warp::reply::reply())
+}
+
+fn validate_stored_constriction_condition(
+    condition: &str,
+    stored_scope: StoredQueryScope,
+    user: &User,
+) -> Result<(), Error> {
+    let scope = stored_scope_to_compiler_scope(stored_scope);
+
+    let mut log = compiler::Log::default();
+    let ast = compiler::compile_ast(condition.to_string(), &mut log, true)?;
+
+    if ast.node_type.statements.is_empty() {
+        return Err(Error::InvalidRequestInputError(String::from(
+            "Constriction must contain a boolean expression",
+        )));
+    }
+
+    let user = Some(user.clone());
+
+    let query_parameters = prepare_query_parameters(
+        &QueryParametersFilter {
+            constriction: Some(condition.to_string()),
+            ..Default::default()
+        },
+        &user,
+        &scope,
+    )?;
+
+    compiler::compile_sql(None, query_parameters, &scope, &user)?;
 
     Ok(())
 }

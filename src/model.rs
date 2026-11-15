@@ -2211,3 +2211,24 @@ pub struct NewStoredQuery {
     pub is_saved: bool,
     pub name: Option<String>,
 }
+
+#[derive(Clone, Debug, Identifiable, Queryable, Serialize)]
+#[diesel(table_name = stored_constriction)]
+#[diesel(primary_key(pk))]
+pub struct StoredConstriction {
+    pub pk: i64,
+    pub fk_user: Option<i64>,
+    pub scope: StoredQueryScope,
+    pub name: String,
+    pub condition: String,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Insertable)]
+#[diesel(table_name = stored_constriction)]
+pub struct NewStoredConstriction {
+    pub fk_user: Option<i64>,
+    pub scope: StoredQueryScope,
+    pub name: String,
+    pub condition: String,
+}
