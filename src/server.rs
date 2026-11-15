@@ -728,6 +728,7 @@ pub fn build_warp_filter() -> impl Filter<Extract = (impl Reply,), Error = warp:
     let get_stored_queries_route = warp::path("get-stored-queries")
         .and(warp::get())
         .and(auth::with_user())
+        .and(warp::query::<query::stored::GetStoredQueriesFilter>())
         .and_then(query::stored::get_stored_queries_handler);
 
     let record_recent_query_route = warp::path("record-recent-query")

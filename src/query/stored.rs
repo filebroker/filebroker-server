@@ -40,18 +40,33 @@ pub struct QuerySort {
     pub descending: bool,
 }
 
+#[derive(Deserialize)]
+pub struct GetStoredQueriesFilter {
+    pub scope: Option<StoredQueryScope>,
+}
+
 #[derive(Serialize)]
 pub struct GetStoredQueriesResponse {
     pub saved_queries: Vec<StoredQuery>,
     pub recent_queries: Vec<StoredQuery>,
 }
 
-pub async fn get_stored_queries_handler(user: User) -> Result<impl Reply, Rejection> {
+pub async fn get_stored_queries_handler(
+    user: User,
+    filter: GetStoredQueriesFilter,
+) -> Result<impl Reply, Rejection> {
     let mut connection = acquire_db_connection().await?;
 
-    let saved_queries = stored_query::table
+    let mut saved_query = stored_query::table
         .filter(stored_query::fk_user.eq(user.pk))
         .filter(stored_query::is_saved.eq(true))
+        .into_boxed();
+
+    if let Some(scope) = filter.scope {
+        saved_query = saved_query.filter(stored_query::scope.eq(scope));
+    }
+
+    let saved_queries = saved_query
         .order_by((
             stored_query::creation_timestamp.desc(),
             stored_query::pk.desc(),
@@ -60,14 +75,20 @@ pub async fn get_stored_queries_handler(user: User) -> Result<impl Reply, Reject
         .await
         .map_err(Error::from)?;
 
-    let recent_queries = stored_query::table
+    let mut recent_query = stored_query::table
         .filter(stored_query::fk_user.eq(user.pk))
         .filter(stored_query::is_saved.eq(false))
+        .into_boxed();
+
+    if let Some(scope) = filter.scope {
+        recent_query = recent_query.filter(stored_query::scope.eq(scope));
+    }
+
+    let recent_queries = recent_query
         .order_by((
             stored_query::last_used_timestamp.desc(),
             stored_query::pk.desc(),
         ))
-        .limit(RECENT_QUERY_LIMIT)
         .load::<StoredQuery>(&mut connection)
         .await
         .map_err(Error::from)?;
@@ -111,6 +132,7 @@ pub async fn record_recent_query_handler(
 
         let obsolete_pks = stored_query::table
             .filter(stored_query::fk_user.eq(user.pk))
+            .filter(stored_query::scope.eq(request.scope))
             .filter(stored_query::is_saved.eq(false))
             .order_by((
                 stored_query::last_used_timestamp.desc(),
