@@ -7,7 +7,7 @@ use std::{
 
 use crate::error::Error;
 use crate::query::{SearchQueryResultObject, SearchResult};
-use crate::util::string_value_updated;
+use crate::util::{NOT_BLANK_REGEX, string_value_updated};
 use crate::{perms, schema::*};
 use chrono::{DateTime, offset::Utc};
 use diesel::data_types::PgInterval;
@@ -1231,7 +1231,7 @@ pub struct Tag {
 pub struct TagCategory {
     #[validate(length(min = 1, max = 255), custom(function = "validate_tag_category"))]
     pub id: String,
-    #[validate(length(min = 1, max = 255))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub label: String,
     #[validate(length(max = 1000))]
     pub auto_match_condition_post: Option<String>,

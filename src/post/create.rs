@@ -33,7 +33,7 @@ use crate::{
         s3_object_metadata, user_group,
     },
     tag::validate_tags,
-    util::dedup_vec_optional,
+    util::{NOT_BLANK_REGEX, dedup_vec_optional},
 };
 
 #[derive(Deserialize, Validate)]
@@ -234,7 +234,7 @@ pub async fn create_post_handler(
 
 #[derive(Deserialize, Validate)]
 pub struct CreatePostCollectionRequest {
-    #[validate(length(max = 300))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub title: String,
     #[validate(length(max = 100), custom(function = "validate_tags"))]
     pub entered_tags: Option<Vec<String>>,

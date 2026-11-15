@@ -47,7 +47,7 @@ use crate::{
         TagUsage, filter_redundant_tags, get_source_object_tag, sanitize_request_tags,
         validate_tags,
     },
-    util::{dedup_vec, dedup_vec_optional, dedup_vecs_optional},
+    util::{NOT_BLANK_REGEX, dedup_vec, dedup_vec_optional, dedup_vecs_optional},
 };
 
 macro_rules! handle_object_tag_update {
@@ -605,7 +605,7 @@ pub struct EditPostCollectionRequest {
     pub added_tag_pks: Option<Vec<i64>>,
     #[validate(length(max = 100), custom(function = "validate_tags"))]
     pub added_tags: Option<Vec<String>>,
-    #[validate(length(max = 300))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub title: Option<String>,
     pub is_public: Option<bool>,
     pub public_edit: Option<bool>,
