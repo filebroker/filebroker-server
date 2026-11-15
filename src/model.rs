@@ -2177,3 +2177,37 @@ pub struct ReconcileTagMatchingCountsTask {
     pub locked_at: Option<DateTime<Utc>>,
     pub fail_count: i32,
 }
+
+#[derive(diesel_derive_enum::DbEnum, Clone, Copy, Debug, Serialize, Deserialize)]
+#[ExistingTypePath = "crate::schema::sql_types::StoredQueryScope"]
+#[serde(rename_all = "snake_case")]
+pub enum StoredQueryScope {
+    Post,
+    Collection,
+    CollectionItem,
+    UserGroup,
+}
+
+#[derive(Clone, Debug, Identifiable, Queryable, Serialize)]
+#[diesel(table_name = stored_query)]
+#[diesel(primary_key(pk))]
+pub struct StoredQuery {
+    pub pk: i64,
+    pub fk_user: i64,
+    pub scope: StoredQueryScope,
+    pub query_definition: serde_json::Value,
+    pub is_saved: bool,
+    pub name: Option<String>,
+    pub creation_timestamp: DateTime<Utc>,
+    pub last_used_timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Insertable)]
+#[diesel(table_name = stored_query)]
+pub struct NewStoredQuery {
+    pub fk_user: i64,
+    pub scope: StoredQueryScope,
+    pub query_definition: serde_json::Value,
+    pub is_saved: bool,
+    pub name: Option<String>,
+}

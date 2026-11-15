@@ -45,12 +45,14 @@ use self::{
 };
 
 pub mod compiler;
+pub mod stored;
 
 const DEFAULT_LIMIT_STR: &str = "50";
 const MAX_LIMIT: u32 = 100;
 const MAX_FULL_LIMIT: u32 = 10000;
 const MAX_FULL_LIMIT_STR: &str = "10000";
 const MAX_PAGE: u32 = 998; // client pages start at 1 so this corresponds to page 999
+pub const MAX_SELECTED_QUERY_TAGS: usize = 10;
 
 macro_rules! report_missing_pks {
     ($tab:ident, $pks:expr, $connection:expr) => {

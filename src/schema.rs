@@ -10,6 +10,10 @@ pub mod sql_types {
     pub struct ObjectType;
 
     #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "stored_query_scope"))]
+    pub struct StoredQueryScope;
+
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "tsvector", schema = "pg_catalog"))]
     pub struct Tsvector;
 
@@ -519,6 +523,23 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::StoredQueryScope;
+
+    stored_query (pk) {
+        pk -> Int8,
+        fk_user -> Int8,
+        scope -> StoredQueryScope,
+        query_definition -> Jsonb,
+        is_saved -> Bool,
+        #[max_length = 255]
+        name -> Nullable<Varchar>,
+        creation_timestamp -> Timestamptz,
+        last_used_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
     tag (pk) {
         pk -> Int8,
         #[max_length = 50]
@@ -784,6 +805,7 @@ diesel::joinable!(reconcile_tag_matching_counts_task -> tag (fk_tag));
 diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
 diesel::joinable!(s3_object_metadata -> s3_object (object_key));
+diesel::joinable!(stored_query -> registered_user (fk_user));
 diesel::joinable!(tag -> tag_category (tag_category));
 diesel::joinable!(tag_edit_history -> registered_user (fk_edit_user));
 diesel::joinable!(tag_edit_history -> tag (fk_tag));
@@ -837,6 +859,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     registered_user,
     s3_object,
     s3_object_metadata,
+    stored_query,
     tag,
     tag_alias,
     tag_cache_generation,
