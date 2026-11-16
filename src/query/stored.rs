@@ -198,7 +198,10 @@ pub async fn save_query_handler(
                 name: Some(request.name.clone()),
             })
             .get_result::<StoredQuery>(connection)
-            .await?;
+            .await
+            .map_err(|e| {
+                map_stored_name_unique_violation(e, "stored_query_unique_name_idx", &request.name)
+            })?;
 
         let count = stored_query::table
             .filter(stored_query::fk_user.eq(user.pk))
@@ -314,7 +317,18 @@ pub async fn edit_saved_query_handler(
             .filter(stored_query::is_saved.eq(true))
             .set(update)
             .get_result::<StoredQuery>(connection)
-            .await?;
+            .await
+            .map_err(|e| {
+                map_stored_name_unique_violation(
+                    e,
+                    "stored_query_unique_name_idx",
+                    request
+                        .name
+                        .as_deref()
+                        .or(curr_value.name.as_deref())
+                        .unwrap_or_default(),
+                )
+            })?;
 
         Ok(updated)
     })
@@ -493,7 +507,14 @@ pub async fn create_stored_constriction_handler(
                 condition: request.condition.clone(),
             })
             .get_result::<StoredConstriction>(connection)
-            .await?;
+            .await
+            .map_err(|e| {
+                map_stored_name_unique_violation(
+                    e,
+                    "stored_constriction_unique_name_idx",
+                    &request.name,
+                )
+            })?;
 
         if !request.is_global {
             let count = stored_constriction::table
@@ -613,7 +634,14 @@ pub async fn edit_stored_constriction_handler(
             .filter(stored_constriction::pk.eq(pk))
             .set(update)
             .get_result::<StoredConstriction>(connection)
-            .await?;
+            .await
+            .map_err(|e| {
+                map_stored_name_unique_violation(
+                    e,
+                    "stored_constriction_unique_name_idx",
+                    request.name.as_deref().unwrap_or(&curr_value.name),
+                )
+            })?;
 
         Ok(updated)
     })
@@ -678,4 +706,21 @@ fn validate_stored_constriction_condition(
     compiler::compile_sql(None, query_parameters, &scope, &user)?;
 
     Ok(())
+}
+
+fn map_stored_name_unique_violation(
+    e: diesel::result::Error,
+    index_name: &str,
+    name: &str,
+) -> Error {
+    use diesel::result::{DatabaseErrorKind, Error as DieselError};
+
+    match &e {
+        DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, info)
+            if info.constraint_name() == Some(index_name) =>
+        {
+            Error::UniqueValueError(name.to_string())
+        }
+        _ => e.into(),
+    }
 }

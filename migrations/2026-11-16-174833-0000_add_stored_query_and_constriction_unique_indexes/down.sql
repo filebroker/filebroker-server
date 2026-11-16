@@ -1,0 +1,2 @@
+DROP INDEX stored_constriction_unique_name_idx;
+DROP INDEX stored_query_unique_name_idx;
