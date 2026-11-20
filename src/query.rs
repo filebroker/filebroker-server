@@ -753,9 +753,12 @@ pub async fn get_post_collection_handler(
 /// Find all posts for the given query string, limited to 9999 results maximum
 pub async fn find_all_posts(
     query: String,
+    constriction: Option<String>,
+    access_filter: Option<AccessFilter>,
     user: &Option<User>,
 ) -> Result<Vec<PostQueryObject>, Error> {
     let scope = Scope::Post;
+
     let query_parameters_filter = QueryParametersFilter {
         limit: None,
         page: None,
@@ -763,10 +766,12 @@ pub async fn find_all_posts(
         exclude_window: None,
         shuffle: None,
         writable_only: None,
-        constriction: None,
-        access_filter: None,
+        constriction,
+        access_filter,
     };
+
     let mut query_parameters = prepare_query_parameters(&query_parameters_filter, user, &scope)?;
+
     query_parameters.pagination = Some(QueryBuilderPagination {
         limit: Some(MAX_FULL_LIMIT.to_string()),
         page: None,

@@ -34,7 +34,7 @@ use crate::{
     },
     perms,
     post::{load_post_collection_poster_object, report_inaccessible_post_pks},
-    query::{self, load_and_report_missing_pks},
+    query::{self, AccessFilter, load_and_report_missing_pks},
     retry_on_constraint_violation, run_serializable_transaction,
     schema::{
         post, post_collection, post_collection_edit_history,
@@ -627,6 +627,9 @@ pub struct EditPostCollectionRequest {
     pub added_post_query: Option<String>,
     pub removed_item_pks: Option<Vec<i64>>,
     pub duplicate_mode: Option<PostCollectionDuplicateMode>,
+    #[validate(length(max = 1024))]
+    pub post_query_constriction: Option<String>,
+    pub post_query_access_filter: Option<AccessFilter>,
 }
 
 /// Changes the behaviour of adding duplicate posts to collections for the edit_post_collection_handler
@@ -762,9 +765,13 @@ pub async fn update_post_collection(
         if let Some(ref post_query_overwrite) = request.post_query_overwrite {
             match request.added_post_query {
                 Some(_) => {
-                    let found_posts =
-                        query::find_all_posts(post_query_overwrite.clone(), &Some(user.clone()))
-                            .await?;
+                    let found_posts = query::find_all_posts(
+                        post_query_overwrite.clone(),
+                        request.post_query_constriction.clone(),
+                        request.post_query_access_filter,
+                        &Some(user.clone()),
+                    )
+                    .await?;
                     let mut found_post_pks = found_posts
                         .iter()
                         .map(|post_query_object| post_query_object.pk)
@@ -780,8 +787,13 @@ pub async fn update_post_collection(
     }
 
     if let Some(ref added_post_query) = request.added_post_query {
-        let found_posts =
-            query::find_all_posts(added_post_query.clone(), &Some(user.clone())).await?;
+        let found_posts = query::find_all_posts(
+            added_post_query.clone(),
+            request.post_query_constriction.clone(),
+            request.post_query_access_filter,
+            &Some(user.clone()),
+        )
+        .await?;
         let mut found_post_pks = found_posts
             .iter()
             .map(|post_query_object| post_query_object.pk)

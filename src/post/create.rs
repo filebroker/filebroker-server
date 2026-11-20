@@ -25,7 +25,7 @@ use crate::{
         S3ObjectMetadata, User, UserPublic,
     },
     perms,
-    query::{self, PostCollectionDetailed, PostDetailed, report_missing_pks},
+    query::{self, AccessFilter, PostCollectionDetailed, PostDetailed, report_missing_pks},
     run_retryable_transaction, run_serializable_transaction,
     schema::{
         self, post, post_collection, post_collection_group_access, post_collection_item,
@@ -251,6 +251,9 @@ pub struct CreatePostCollectionRequest {
     pub post_pks: Option<Vec<i64>>,
     #[validate(length(min = 0, max = 1024))]
     pub post_query: Option<String>,
+    #[validate(length(max = 1024))]
+    pub post_query_constriction: Option<String>,
+    pub post_query_access_filter: Option<AccessFilter>,
 }
 
 pub async fn create_post_collection_handler(
@@ -370,7 +373,13 @@ pub async fn create_post_collection_handler(
             if let Some(query) = request.post_query
                 && !query.is_empty()
             {
-                let found_posts = query::find_all_posts(query, &Some(user.clone())).await?;
+                let found_posts = query::find_all_posts(
+                    query,
+                    request.post_query_constriction.clone(),
+                    request.post_query_access_filter,
+                    &Some(user.clone()),
+                )
+                .await?;
                 let post_collection_items = found_posts
                     .into_iter()
                     .enumerate()
