@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::error::Error;
-use crate::query::{SearchQueryResultObject, SearchResult};
+use crate::query::{AccessFilter, SearchQueryResultObject, SearchResult};
 use crate::util::{NOT_BLANK_REGEX, string_value_updated};
 use crate::{perms, schema::*};
 use chrono::{DateTime, offset::Utc};
@@ -165,6 +165,7 @@ pub struct UserPreferences {
     pub auto_play_video: bool,
     pub auto_play_audio_in_collection: bool,
     pub auto_play_video_in_collection: bool,
+    pub default_access_filter: AccessFilter,
 }
 
 impl UserPreferences {

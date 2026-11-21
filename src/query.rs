@@ -150,7 +150,10 @@ pub struct QueryParametersFilter {
 /// Represents the different access levels for search queries. Each level includes the lower levels,
 /// meaning All sees all results the user is allowed to access, Shared sees shared and own
 /// results and Own only sees results belonging to the user.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, diesel_derive_enum::DbEnum, PartialEq, Serialize,
+)]
+#[ExistingTypePath = "crate::schema::sql_types::AccessFilter"]
 #[serde(rename_all = "snake_case")]
 pub enum AccessFilter {
     #[default]

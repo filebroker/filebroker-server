@@ -2,6 +2,10 @@
 
 pub mod sql_types {
     #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "access_filter"))]
+    pub struct AccessFilter;
+
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "broker_audit_action"))]
     pub struct BrokerAuditAction;
 
@@ -762,6 +766,9 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::AccessFilter;
+
     user_preferences (fk_user) {
         fk_user -> Int8,
         advanced_query_mode -> Bool,
@@ -769,6 +776,7 @@ diesel::table! {
         auto_play_video -> Bool,
         auto_play_audio_in_collection -> Bool,
         auto_play_video_in_collection -> Bool,
+        default_access_filter -> AccessFilter,
     }
 }
 
