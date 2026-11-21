@@ -2,12 +2,20 @@
 
 pub mod sql_types {
     #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "access_filter"))]
+    pub struct AccessFilter;
+
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "broker_audit_action"))]
     pub struct BrokerAuditAction;
 
     #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "object_type"))]
     pub struct ObjectType;
+
+    #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
+    #[diesel(postgres_type(name = "stored_query_scope"))]
+    pub struct StoredQueryScope;
 
     #[derive(diesel::query_builder::QueryId, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "tsvector", schema = "pg_catalog"))]
@@ -519,6 +527,39 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::StoredQueryScope;
+
+    stored_constriction (pk) {
+        pk -> Int8,
+        fk_user -> Nullable<Int8>,
+        scope -> StoredQueryScope,
+        #[max_length = 255]
+        name -> Varchar,
+        #[max_length = 1024]
+        condition -> Varchar,
+        creation_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::StoredQueryScope;
+
+    stored_query (pk) {
+        pk -> Int8,
+        fk_user -> Int8,
+        scope -> StoredQueryScope,
+        query_definition -> Jsonb,
+        is_saved -> Bool,
+        #[max_length = 255]
+        name -> Nullable<Varchar>,
+        creation_timestamp -> Timestamptz,
+        last_used_timestamp -> Timestamptz,
+    }
+}
+
+diesel::table! {
     tag (pk) {
         pk -> Int8,
         #[max_length = 50]
@@ -725,6 +766,9 @@ diesel::table! {
 }
 
 diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::AccessFilter;
+
     user_preferences (fk_user) {
         fk_user -> Int8,
         advanced_query_mode -> Bool,
@@ -732,6 +776,7 @@ diesel::table! {
         auto_play_video -> Bool,
         auto_play_audio_in_collection -> Bool,
         auto_play_video_in_collection -> Bool,
+        default_access_filter -> AccessFilter,
     }
 }
 
@@ -784,6 +829,8 @@ diesel::joinable!(reconcile_tag_matching_counts_task -> tag (fk_tag));
 diesel::joinable!(refresh_token -> registered_user (fk_user));
 diesel::joinable!(s3_object -> broker (fk_broker));
 diesel::joinable!(s3_object_metadata -> s3_object (object_key));
+diesel::joinable!(stored_constriction -> registered_user (fk_user));
+diesel::joinable!(stored_query -> registered_user (fk_user));
 diesel::joinable!(tag -> tag_category (tag_category));
 diesel::joinable!(tag_edit_history -> registered_user (fk_edit_user));
 diesel::joinable!(tag_edit_history -> tag (fk_tag));
@@ -837,6 +884,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     registered_user,
     s3_object,
     s3_object_metadata,
+    stored_constriction,
+    stored_query,
     tag,
     tag_alias,
     tag_cache_generation,

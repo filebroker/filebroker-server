@@ -2656,6 +2656,7 @@ impl ExpressionNode for FulltextNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::AccessFilter;
 
     enum TestExpression<'a> {
         ExactTag(&'a str),
@@ -2684,6 +2685,7 @@ mod tests {
             predefined_where_conditions: None,
             include_full_count: false,
             privileged: true,
+            access_filter: AccessFilter::All,
             enable_tag_cache: true,
             get_secure_query_condition: |_, _, _| None,
             encountered_tables: HashSet::new(),

@@ -63,7 +63,9 @@ pub fn get_secure_query_condition_string(
     ctes: &mut Vec<String>,
     broker_access_src_dest: Option<(&str, &str)>,
 ) -> Option<String> {
-    if query_parameters.privileged || user.is_some_and(|user| user.is_admin) {
+    if (query_parameters.privileged || user.is_some_and(|user| user.is_admin))
+        && query_parameters.access_filter == AccessFilter::All
+    {
         return None;
     }
 
@@ -80,12 +82,20 @@ pub fn get_secure_query_condition_string(
     };
 
     let Some(user) = user else {
-        return Some(format!(
-            "({base_table_name}.public AND {public_edit_condition})"
-        ));
+        return if query_parameters.access_filter == AccessFilter::All {
+            Some(format!(
+                "({base_table_name}.public AND {public_edit_condition})"
+            ))
+        } else {
+            Some(String::from("FALSE"))
+        };
     };
 
     let user_key = user.pk;
+
+    if query_parameters.access_filter == AccessFilter::Own {
+        return Some(format!("{base_table_name}.fk_create_user = {user_key}"));
+    }
 
     ctes.push(format!(
         r#"member_groups AS (
@@ -102,10 +112,10 @@ pub fn get_secure_query_condition_string(
         )"#
     ));
 
-    let broker_admin_condition = if let Some((
-        broker_access_base_table,
-        broker_access_target_table,
-    )) = broker_access_src_dest
+    // If AccessFilter = All, also include posts uploaded to brokers where the user is admin
+    let broker_admin_condition = if let Some((broker_access_base_table, broker_access_target_table)) =
+        broker_access_src_dest
+        && query_parameters.access_filter == AccessFilter::All
     {
         ctes.push(format!(
             r#"admin_groups AS (
@@ -171,10 +181,16 @@ pub fn get_secure_query_condition_string(
         String::from("FALSE")
     };
 
+    let public_cond = if query_parameters.access_filter == AccessFilter::All {
+        format!("({base_table_name}.public AND {public_edit_condition})")
+    } else {
+        String::from("FALSE")
+    };
+
     Some(format!(
         r#"(
             {base_table_name}.fk_create_user = {user_key}
-            OR ({base_table_name}.public AND {public_edit_condition})
+            OR {public_cond}
             OR {broker_admin_condition}
             OR EXISTS (
                 SELECT *
@@ -309,6 +325,7 @@ macro_rules! get_broker_access_condition {
     };
 }
 
+use crate::query::AccessFilter;
 pub(crate) use get_broker_access_condition;
 
 pub struct PostJoined {

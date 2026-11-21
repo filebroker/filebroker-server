@@ -17,7 +17,7 @@ use crate::tag::auto_matching::{
 };
 use crate::tag::{TagDetailed, load_tag_detailed, validate_tag};
 use crate::tag::{get_or_create_tag, get_tag_aliases_pks, get_tag_parents_pks, sanitize_tag};
-use crate::util::{dedup_vec_optional, dedup_vecs_optional, string_value_updated};
+use crate::util::{NOT_BLANK_REGEX, dedup_vec_optional, dedup_vecs_optional, string_value_updated};
 use crate::{acquire_db_connection, retry_on_constraint_violation, run_serializable_transaction};
 use chrono::{DateTime, Utc};
 use diesel::{BelongingToDsl, BoolExpressionMethods, ExpressionMethods, QueryDsl};
@@ -826,7 +826,7 @@ pub async fn add_tag_parents(
 #[diesel(primary_key(id))]
 pub struct TagCategoryUpdateRequest {
     pub id: String,
-    #[validate(length(min = 1, max = 255))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub label: Option<String>,
     #[validate(length(max = 1000))]
     pub auto_match_condition_post: Option<String>,

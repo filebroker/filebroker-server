@@ -5,7 +5,7 @@ use crate::schema::{user_group, user_group_tag};
 use crate::tag::create::handle_entered_and_selected_tags;
 use crate::tag::validate_tags;
 use crate::user_group::load_user_group_detailed;
-use crate::util::dedup_vec_optional;
+use crate::util::{NOT_BLANK_REGEX, dedup_vec_optional};
 use crate::{acquire_db_connection, run_retryable_transaction};
 use chrono::Utc;
 use diesel_async::RunQueryDsl;
@@ -15,6 +15,7 @@ use warp::{Rejection, Reply};
 
 #[derive(Deserialize, Validate)]
 pub struct CreateUserGroupRequest {
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub name: String,
     #[serde(rename = "is_public")]
     pub public: Option<bool>,

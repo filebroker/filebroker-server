@@ -18,7 +18,9 @@ use crate::user_group::{
     UserGroupJoined, get_user_group_joined, is_user_group_detailed_editable,
     load_user_group_detailed,
 };
-use crate::util::{dedup_vec, dedup_vec_optional, dedup_vecs_optional, string_value_updated};
+use crate::util::{
+    NOT_BLANK_REGEX, dedup_vec, dedup_vec_optional, dedup_vecs_optional, string_value_updated,
+};
 use crate::{acquire_db_connection, perms, run_serializable_transaction};
 use chrono::{DateTime, Utc};
 use diesel::OptionalExtension;
@@ -77,7 +79,7 @@ impl UserGroupUpdateFieldChanges {
 
 #[derive(Clone, Deserialize, Validate)]
 pub struct EditUserGroupRequest {
-    #[validate(length(max = 255))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub name: Option<String>,
     pub is_public: Option<bool>,
     #[validate(length(max = 30000))]

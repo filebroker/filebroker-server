@@ -30,7 +30,7 @@ use crate::{
         EmailConfirmationToken, NewUser, OneTimePassword, RefreshToken, User, UserPreferences,
         UserPublic,
     },
-    query::functions::lower,
+    query::{AccessFilter, functions::lower},
     retry_on_constraint_violation, run_retryable_transaction,
     schema::{
         email_confirmation_token, one_time_password, refresh_token, registered_user,
@@ -676,6 +676,7 @@ pub struct PatchUserPreferencesRequest {
     pub auto_play_video: Option<bool>,
     pub auto_play_audio_in_collection: Option<bool>,
     pub auto_play_video_in_collection: Option<bool>,
+    pub default_access_filter: Option<AccessFilter>,
 }
 
 #[derive(AsChangeset, Insertable)]
@@ -688,6 +689,7 @@ pub struct PatchUserPreferencesChangeset {
     pub auto_play_video: Option<bool>,
     pub auto_play_audio_in_collection: Option<bool>,
     pub auto_play_video_in_collection: Option<bool>,
+    pub default_access_filter: Option<AccessFilter>,
 }
 
 impl PatchUserPreferencesRequest {
@@ -697,6 +699,7 @@ impl PatchUserPreferencesRequest {
             || self.auto_play_video.is_some()
             || self.auto_play_audio_in_collection.is_some()
             || self.auto_play_video_in_collection.is_some()
+            || self.default_access_filter.is_some()
     }
 
     pub fn into_changeset(self, user_pk: i64) -> PatchUserPreferencesChangeset {
@@ -707,6 +710,7 @@ impl PatchUserPreferencesRequest {
             auto_play_video: self.auto_play_video,
             auto_play_audio_in_collection: self.auto_play_audio_in_collection,
             auto_play_video_in_collection: self.auto_play_video_in_collection,
+            default_access_filter: self.default_access_filter,
         }
     }
 }

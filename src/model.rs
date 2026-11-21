@@ -6,8 +6,8 @@ use std::{
 };
 
 use crate::error::Error;
-use crate::query::{SearchQueryResultObject, SearchResult};
-use crate::util::string_value_updated;
+use crate::query::{AccessFilter, SearchQueryResultObject, SearchResult};
+use crate::util::{NOT_BLANK_REGEX, string_value_updated};
 use crate::{perms, schema::*};
 use chrono::{DateTime, offset::Utc};
 use diesel::data_types::PgInterval;
@@ -165,6 +165,7 @@ pub struct UserPreferences {
     pub auto_play_video: bool,
     pub auto_play_audio_in_collection: bool,
     pub auto_play_video_in_collection: bool,
+    pub default_access_filter: AccessFilter,
 }
 
 impl UserPreferences {
@@ -1231,7 +1232,7 @@ pub struct Tag {
 pub struct TagCategory {
     #[validate(length(min = 1, max = 255), custom(function = "validate_tag_category"))]
     pub id: String,
-    #[validate(length(min = 1, max = 255))]
+    #[validate(length(min = 1, max = 255), regex(path = *NOT_BLANK_REGEX))]
     pub label: String,
     #[validate(length(max = 1000))]
     pub auto_match_condition_post: Option<String>,
@@ -2176,4 +2177,59 @@ pub struct ReconcileTagMatchingCountsTask {
     pub topology_version: i64,
     pub locked_at: Option<DateTime<Utc>>,
     pub fail_count: i32,
+}
+
+#[derive(diesel_derive_enum::DbEnum, Clone, Copy, Debug, Serialize, Deserialize)]
+#[ExistingTypePath = "crate::schema::sql_types::StoredQueryScope"]
+#[serde(rename_all = "snake_case")]
+pub enum StoredQueryScope {
+    Post,
+    Collection,
+    CollectionItem,
+    UserGroup,
+}
+
+#[derive(Clone, Debug, Identifiable, Queryable, Serialize)]
+#[diesel(table_name = stored_query)]
+#[diesel(primary_key(pk))]
+pub struct StoredQuery {
+    pub pk: i64,
+    pub fk_user: i64,
+    pub scope: StoredQueryScope,
+    pub query_definition: serde_json::Value,
+    pub is_saved: bool,
+    pub name: Option<String>,
+    pub creation_timestamp: DateTime<Utc>,
+    pub last_used_timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Insertable)]
+#[diesel(table_name = stored_query)]
+pub struct NewStoredQuery {
+    pub fk_user: i64,
+    pub scope: StoredQueryScope,
+    pub query_definition: serde_json::Value,
+    pub is_saved: bool,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Identifiable, Queryable, Serialize)]
+#[diesel(table_name = stored_constriction)]
+#[diesel(primary_key(pk))]
+pub struct StoredConstriction {
+    pub pk: i64,
+    pub fk_user: Option<i64>,
+    pub scope: StoredQueryScope,
+    pub name: String,
+    pub condition: String,
+    pub creation_timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Insertable)]
+#[diesel(table_name = stored_constriction)]
+pub struct NewStoredConstriction {
+    pub fk_user: Option<i64>,
+    pub scope: StoredQueryScope,
+    pub name: String,
+    pub condition: String,
 }

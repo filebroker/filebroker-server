@@ -359,6 +359,8 @@ pub async fn apply_auto_tags_for_collection(
         added_post_query: None,
         removed_item_pks: None,
         duplicate_mode: None,
+        post_query_constriction: None,
+        post_query_access_filter: None,
     };
 
     update_post_collection(post_collection_pk, &get_system_user(), request, connection).await?;
@@ -1092,6 +1094,8 @@ async fn apply_tag_category_auto_tags_batch(
                 added_post_query: None,
                 removed_item_pks: None,
                 duplicate_mode: None,
+                post_query_constriction: None,
+                post_query_access_filter: None,
             };
 
             match update_post_collection(
@@ -1179,6 +1183,7 @@ pub fn compile_auto_match_condition(
         shuffle: None,
         writable_only: None,
         constriction: None,
+        access_filter: None,
     };
     let mut query_parameters = prepare_query_parameters(&query_parameters_filter, &None, &scope)?;
     query_parameters.privileged = true;
@@ -1253,6 +1258,8 @@ fn get_add_post_collection_tags_request(tag_pks: Vec<i64>) -> EditPostCollection
         added_post_query: None,
         removed_item_pks: None,
         duplicate_mode: None,
+        post_query_constriction: None,
+        post_query_access_filter: None,
     }
 }
 
@@ -1277,5 +1284,7 @@ fn get_remove_post_collection_tags_request(tag_pks: Vec<i64>) -> EditPostCollect
         added_post_query: None,
         removed_item_pks: None,
         duplicate_mode: None,
+        post_query_constriction: None,
+        post_query_access_filter: None,
     }
 }
