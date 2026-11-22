@@ -44,7 +44,7 @@ pub async fn generate_avatar(
             String::from("0"),
             String::from("-preset"),
             String::from("default"),
-            String::from("-vsync"),
+            String::from("-fps_mode"),
             String::from("vfr"),
             String::from("-f"),
             String::from("webp"),
