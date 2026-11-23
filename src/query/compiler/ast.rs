@@ -5,7 +5,7 @@ use super::{
 };
 use crate::query::{Direction, Ordering, QueryParameters};
 use crate::tag;
-use crate::tag::cache::{CachedTag, PopulationEstimates, TagCacheSnapshot};
+use crate::tag::cache::{CachedTag, PopulationEstimates, TagCacheSnapshot, fuzzy_word_count};
 use downcast_rs::{Downcast, impl_downcast};
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -1386,13 +1386,16 @@ impl Visitor for QueryBuilderVisitor<'_> {
             search_term: &str,
             use_trigram_search: bool,
         ) -> String {
+            let search_word_count = fuzzy_word_count(search_term);
             let search_term = sanitize_string_literal(search_term);
 
             let idx = visitor.ctes.len();
             let key = format!("fts'tag:{search_term}");
 
             let condition = if use_trigram_search {
-                format!("'{search_term}' <<% tag.tag_name")
+                format!(
+                    r"'{search_term}' <<% tag.tag_name AND regexp_count(tag.tag_name, '\w+') >= {search_word_count}"
+                )
             } else {
                 format!("lower(tag.tag_name) = lower('{search_term}')")
             };
@@ -1510,13 +1513,19 @@ fn build_fulltext_match_cte(
     use_trigram_search: bool,
 ) -> String {
     let fuzzy_condition = if use_trigram_search {
+        let word_match_condition = if fuzzy_word_count(search_term) > 1 {
+            format!(" AND fuzzy_text_matches('{search_term}', {fulltext_table}.search_text)")
+        } else {
+            String::new()
+        };
+
         format!(
             "
             UNION ALL
 
             SELECT {fulltext_table}.fk_{base_table_name} AS pk
             FROM {fulltext_table}
-            WHERE '{search_term}' <<% {fulltext_table}.search_text
+            WHERE '{search_term}' <<% {fulltext_table}.search_text{word_match_condition}
             "
         )
     } else {
@@ -2806,6 +2815,25 @@ mod tests {
     }
 
     #[test]
+    fn multiword_fuzzy_fulltext_adds_word_matching_filter() {
+        let (_, ctes) = render(cache(vec![]), TestExpression::Fulltext("linkin park numb"));
+
+        assert_eq!(ctes.len(), 1);
+        assert!(ctes[0].contains(
+            "'linkin park numb' <<% post_search_index.search_text AND fuzzy_text_matches('linkin park numb', post_search_index.search_text)"
+        ));
+    }
+
+    #[test]
+    fn single_word_fuzzy_fulltext_does_not_use_word_matching_filter() {
+        let (_, ctes) = render(cache(vec![]), TestExpression::Fulltext("audi"));
+
+        assert_eq!(ctes.len(), 1);
+        assert!(ctes[0].contains("'audi' <<% post_search_index.search_text"));
+        assert!(!ctes[0].contains("fuzzy_text_matches("));
+    }
+
+    #[test]
     fn fuzzy_fulltext_expands_cached_matches_and_relations() {
         let snapshot = cache(vec![(7, "Audio".to_owned(), vec![9, 8, 8])]);
 
@@ -2814,6 +2842,18 @@ mod tests {
         assert_eq!(ctes.len(), 1);
         assert!(ctes[0].contains("fk_tag IN (7, 8, 9)"));
         assert!(!ctes[0].contains("tag_fuzzy_cte"));
+    }
+
+    #[test]
+    fn fuzzy_fulltext_tag_fallback_requires_enough_tag_words() {
+        let related = (1_000..1_128).collect();
+        let snapshot = cache(vec![(42, "Family Guy Star Wars".to_owned(), related)]);
+        let (_, ctes) = render(snapshot, TestExpression::Fulltext("family guy star wars"));
+
+        assert_eq!(ctes.len(), 2);
+        assert!(ctes.iter().any(|cte| cte.contains(
+            r"'family guy star wars' <<% tag.tag_name AND regexp_count(tag.tag_name, '\w+') >= 4"
+        )));
     }
 
     #[test]

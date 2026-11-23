@@ -95,10 +95,17 @@ fn trigrams(text: &str) -> Vec<Trigram> {
     grams
 }
 
+pub(crate) fn fuzzy_word_count(text: &str) -> usize {
+    FUZZY_WORDS.find_iter(text).count()
+}
+
 /// Test the entire query against contiguous spans of complete words.
 /// Unlike find_words_iter(), this also supports multiword search terms.
 fn fuzzy_name_matches(query: &str, name: &str) -> bool {
     let words: Vec<_> = FUZZY_WORDS.find_iter(name).collect();
+    if fuzzy_word_count(query) > words.len() {
+        return false;
+    }
     for (i, first) in words.iter().enumerate() {
         for last in &words[i..] {
             if trigram::similarity(query, &name[first.start()..last.end()])
@@ -1052,6 +1059,32 @@ mod tests {
         assert_eq!(cache.fuzzy_effective_pks("audi"), vec![1, 20, 21]);
         assert!(cache.find_fuzzy("t").is_empty());
         assert_eq!(cache.find_fuzzy("test")[0].pk, 4);
+    }
+
+    #[test]
+    fn fuzzy_search_rejects_tags_with_fewer_words_than_the_query() {
+        let cache = TagCacheSnapshot::from_rows(
+            1,
+            vec![
+                row(1, "Family Guy", &[]),
+                row(2, "Family Guy Star Wars", &[]),
+                row(3, "Linkin Park", &[]),
+            ],
+        );
+
+        assert!(
+            !cache
+                .find_fuzzy("family guy star wars")
+                .iter()
+                .any(|tag| tag.pk == 1)
+        );
+        assert!(
+            cache
+                .find_fuzzy("family guy star wars")
+                .iter()
+                .any(|tag| tag.pk == 2)
+        );
+        assert!(cache.find_fuzzy("linkin").iter().any(|tag| tag.pk == 3));
     }
 
     #[test]
