@@ -1,6 +1,6 @@
 [package]
 name = "filebroker-server"
-version = "0.11.1"
+version = "0.11.2-dev"
 authors = ["robinfriedli <robinfriedli@icloud.com>"]
 edition = "2024"
 
